@@ -20,7 +20,8 @@ Samsung S3C2410（ARM920T）構成のマシンで起動することを最初の�
 
 ## テスト用イメージの入手
 
-イメージデータ（21MB〜）は Git 管理しない。`tmp/images/` はリポジトリ外扱い（.gitignore 済み）なので、以下の手順で各自取得する。
+動作確認には Microsoft Device Emulator 用の Windows Mobile 5.0 イメージが必要になる
+（リポジトリには含まれない）。以下の手順で `tmp/images/` に取得できる。
 
 ```sh
 mkdir -p tmp/images && cd tmp/images
@@ -32,14 +33,11 @@ curl -L -o wm5sdk.msi \
 # .msi 内のエミュレータイメージ PPC_USA.bin を抽出（要 cabextract）
 cabextract -F '_208PPC_USA_bin' wm5sdk.msi
 mv _208PPC_USA_bin PPC_USA.bin
+rm wm5sdk.msi  # 抽出後は不要
 
 # 確認（B000FF 形式、start=80070000 / entry=80076CF0 / 99 レコードのはず）
 cd ../.. && go run ./cmd/cerulean info tmp/images/PPC_USA.bin
 ```
-
-- 抽出後は wm5sdk.msi（182MB）を消してよい。
-- 日本語版イメージ（Localized Windows Mobile 5.0 Pocket PC Emulator Images の JPN 版）は
-  入手先未発見（CLAUDE.md の TODO 参照）。
 
 ## ビルドと実行
 
