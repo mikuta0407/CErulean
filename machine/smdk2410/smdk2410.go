@@ -18,11 +18,12 @@ import (
 
 // S3C2410 の物理メモリマップ（データシート Figure 5-1）:
 //   - 0x30000000: SDRAM（バンク 6）。SMDK2410/Device Emulator は 64MB。
+//   - 0x48000000〜: 周辺機器レジスタ群（下の peripheralStubs も参照）
 //   - 0x50000000: UART（UART0/1/2 が 0x4000 間隔）
 const (
 	sdramBase = 0x30000000
 	sdramSize = 64 * 1024 * 1024
-	uart0Base = 0x50000000
+	uartBase  = 0x50000000
 )
 
 // WinCE カーネルの仮想アドレスマッピング（OEMAddressTable 相当）。
@@ -47,9 +48,55 @@ func New(uartOut io.Writer) (*Machine, error) {
 	if err := b.MapRAM("sdram", sdramBase, sdramSize); err != nil {
 		return nil, err
 	}
-	// UART0 のみ。レジスタ帯は 0x4000 だが実レジスタは先頭 0x2C バイト。
-	if err := b.MapMMIO("uart0", uart0Base, 0x4000, s3c2410.NewUART(uartOut)); err != nil {
-		return nil, err
+	// UART0/1/2。レジスタ帯は各 0x4000 だが実レジスタは先頭 0x2C バイト。
+	// デバッグシリアル出力は UART0 の想定なので、1/2 は出力先なし。
+	// TODO: 実イメージのバナーが UART0 以外に出ていたら見直す。
+	for i, w := range []io.Writer{uartOut, nil, nil} {
+		name := fmt.Sprintf("uart%d", i)
+		if err := b.MapMMIO(name, uartBase+uint32(i)*0x4000, 0x4000, s3c2410.NewUART(w)); err != nil {
+			return nil, err
+		}
+	}
+	// 当面は値保持スタブで済ませる周辺ブロック（S3C2410 データシート Figure 5-1）。
+	// 割り込みコントローラとタイマーは、カーネルの時限処理を動かす段階で
+	// 実動作する専用実装に置き換える予定。
+	for _, p := range []struct {
+		name string
+		base uint32
+		init map[uint32]uint32
+	}{
+		{"memc", 0x48000000, nil},     // メモリコントローラ（BWSCON など）
+		{"intc", 0x4A000000, map[uint32]uint32{ // 割り込みコントローラ
+			0x08: 0xFFFFFFFF, // INTMSK: リセット値は全マスク
+		}},
+		{"clkpwr", 0x4C000000, map[uint32]uint32{ // クロック・電源管理
+			// リセット値（データシート Ch.7）。カーネルが PLL 設定から
+			// クロックを逆算する場合に 0 だと壊れるため入れておく。
+			// TODO: データシート原本と再照合する（記憶ベースの値）。
+			0x00: 0x00FFFFFF, // LOCKTIME
+			0x04: 0x0005C080, // MPLLCON
+			0x08: 0x00028080, // UPLLCON
+			0x0C: 0x0007FFF0, // CLKCON
+			0x10: 0x00000004, // CLKSLOW
+		}},
+		{"lcd", 0x4D000000, nil},   // LCD コントローラ
+		{"nand", 0x4E000000, nil},  // NAND フラッシュコントローラ
+		{"timer", 0x51000000, nil}, // PWM タイマー
+		{"wdt", 0x53000000, map[uint32]uint32{
+			0x00: 0x8021, // WTCON リセット値。TODO: データシートと再照合
+		}},
+		{"iic", 0x54000000, nil},
+		{"gpio", 0x56000000, map[uint32]uint32{
+			// GSTATUS1: チップ ID。BSP が SoC 判別に読む可能性がある。
+			// TODO: データシートと再照合（0x32410000 = S3C2410 のはず）
+			0xB0: 0x32410000,
+		}},
+		{"rtc", 0x57000000, nil},
+		{"adc", 0x58000000, nil},
+	} {
+		if err := b.MapMMIO(p.name, p.base, 0x1000, s3c2410.NewStub(p.name, p.init)); err != nil {
+			return nil, err
+		}
 	}
 	// mmu.MMU は CPU から見たメモリ空間（cpu.Memory）と CP15（arm.Coprocessor）を兼ねる。
 	m := mmu.New(b)
