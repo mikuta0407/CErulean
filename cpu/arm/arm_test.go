@@ -705,14 +705,14 @@ func TestExceptionReturn(t *testing.T) {
 
 func TestUndefinedReportsPCAndWord(t *testing.T) {
 	c, mem := newTestCore()
-	const mul = 0xE0000291 // MUL r0, r1, r2（未実装）
-	err := stepOne(t, c, mem, mul)
+	const cdp = 0xEE000000 // CDP p0, ...（未実装）
+	err := stepOne(t, c, mem, cdp)
 	var ue *UndefinedError
 	if !errors.As(err, &ue) {
 		t.Fatalf("err = %v, want UndefinedError", err)
 	}
-	if ue.PC != testPC || ue.Word != mul {
-		t.Errorf("UndefinedError PC=%08X Word=%08X, want %08X/%08X", ue.PC, ue.Word, uint32(testPC), uint32(mul))
+	if ue.PC != testPC || ue.Word != cdp {
+		t.Errorf("UndefinedError PC=%08X Word=%08X, want %08X/%08X", ue.PC, ue.Word, uint32(testPC), uint32(cdp))
 	}
 	// PC は命令位置に戻っている（停止位置の報告用）
 	if c.PC() != testPC {

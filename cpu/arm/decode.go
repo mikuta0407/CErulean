@@ -45,8 +45,7 @@ func decodeFn(word uint32) execFn {
 		if word&0x90 == 0x90 { // bit7=1 かつ bit4=1: データ処理ではない
 			if (word>>5)&3 == 0 {
 				// bits[7:4] = 1001: 乗算（MUL/MLA/UMULL...）または SWP
-				// TODO: WinCE ブートで必要になり次第実装する。
-				return unimpl("multiply/swap not implemented yet")
+				return execMulSwp
 			}
 			// bits[7:4] = 1011/1101/1111: ハーフワード・符号付き転送
 			return execLdstMisc
