@@ -23,7 +23,8 @@ func usage() {
 run flags:
   -machine name    マシン構成 (default "smdk2410")
   -max-steps n     最大実行命令数 (0 = 無制限)
-  -trace           実行した命令の PC と命令語を逐一表示する
+  -trace           実行した命令の PC・命令語・ディスアセンブルを逐一表示する
+  -history n       停止時に直前 n 命令を表示する (default 16, 0 = 無効)
   -nb0-base addr   .nb0 イメージのロード先アドレス (default 0x30000000)
 `)
 	os.Exit(2)
@@ -103,6 +104,7 @@ func cmdRun(args []string) {
 	machineName := fs.String("machine", "smdk2410", "マシン構成")
 	maxSteps := fs.Uint64("max-steps", 0, "最大実行命令数 (0 = 無制限)")
 	trace := fs.Bool("trace", false, "実行トレースを表示")
+	history := fs.Int("history", 16, "停止時に表示する直前の命令数 (0 = 無効)")
 	nb0Base := fs.Uint64("nb0-base", defaultNB0Base, ".nb0 のロード先アドレス")
 	_ = fs.Parse(args)
 	if fs.NArg() != 1 {
@@ -129,17 +131,50 @@ func cmdRun(args []string) {
 		m.Name(), img.Format, img.Entry, m.CPU().PC())
 
 	c := m.CPU()
+	// 直前 N 命令のリングバッファ（停止原因の調査用）。
+	type histEntry struct {
+		pc, word uint32
+	}
+	var (
+		hist    []histEntry
+		histPos int
+	)
+	if *history > 0 {
+		hist = make([]histEntry, *history)
+	}
+	dumpHistory := func(steps uint64) {
+		if hist == nil {
+			return
+		}
+		n := len(hist)
+		if steps < uint64(n) {
+			n = int(steps)
+		}
+		fmt.Fprintf(os.Stderr, "last %d instructions:\n", n)
+		for i := 0; i < n; i++ {
+			e := hist[(histPos+len(hist)-n+i)%len(hist)]
+			fmt.Fprintf(os.Stderr, "  PC=%08X  %08X  %s\n", e.pc, e.word, arm.Disasm(e.word, e.pc))
+		}
+	}
+
 	var steps uint64
 	for {
+		// 命令語はバス経由で覗く（フェッチ前なので副作用はない）。
+		// 注意: MMU 有効時は PC が仮想アドレスなので物理バス直読みはずれる。
+		// TODO: MMU 実装後はデバッグ用の変換付き読み出しに変える。
+		word, _ := m.Bus().Read32(c.PC())
 		if *trace {
-			// 命令語はバス経由で覗く（フェッチ前なので副作用はない）。
-			word, _ := m.Bus().Read32(c.PC())
-			fmt.Fprintf(os.Stderr, "%12d  PC=%08X  %08X\n", steps, c.PC(), word)
+			fmt.Fprintf(os.Stderr, "%12d  PC=%08X  %08X  %s\n", steps, c.PC(), word, arm.Disasm(word, c.PC()))
+		}
+		if hist != nil {
+			hist[histPos] = histEntry{pc: c.PC(), word: word}
+			histPos = (histPos + 1) % len(hist)
 		}
 		if err := m.Step(); err != nil {
 			steps++
 			reportStop(c.PC(), steps, err)
 			dumpRegs(c)
+			dumpHistory(steps)
 			os.Exit(1)
 		}
 		steps++
