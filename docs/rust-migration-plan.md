@@ -772,6 +772,17 @@ Worker → メイン:
 - 完了条件: wasm でも完全一致する。Chrome/Firefox/Safari（Mac）と iOS Safari の
   速度を記録する。
 - **判断が必要**: wasm の速度を見て、段階3 と段階4 のどちらを先にするか。
+- **途中経過（2026-09-28、Node 24・この開発機）**:
+  - 全 6 基準シナリオで wasm（Node）がネイティブと完全一致（`GOLDEN_RUNNER=wasm
+    tools/golden/verify.sh`）。
+  - 速度: boot-1200M 48M 命令/秒（ネイティブ約 75M の約 0.64 倍）、boot-today 78 秒
+    （ネイティブ 44 秒）、taps-5 のリセットからの通し 96 秒。
+  - デコードキャッシュ: デコード済みページは Today まで約 2,000 枚、操作後で約 2,070 枚
+    （1 枚 16KB で約 33MB）。wasm のメモリは RAM 128MB＋これ＋スナップショットの作業領域。
+  - スナップショット（boot-1200M の時点）: 無圧縮 134.2MB、保存 0.44 秒・読み込み 0.50 秒。
+    gzip（CompressionStream）で 24.7MB、圧縮 1.4 秒・展開 1.1 秒。
+  - 各ブラウザ（Chrome/Firefox/Safari・iOS Safari）の値は計測ページ
+    （`rust/web/www/bench/`）でユーザーに測ってもらう。
 
 ### 段階3: ブラウザ版の最小製品（MVP）
 
