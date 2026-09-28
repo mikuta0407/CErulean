@@ -2,9 +2,8 @@
 // 仕様の根拠は ARM Architecture Reference Manual (DDI 0100) 第B3章。
 //
 // 設計（ユーザー確認済み 2026-09）:
-//   - TLB はエミュレートせず、アクセス毎に毎回テーブルウォークする。
-//     正しさ優先で、ウォークが常に最新のテーブルを見るため CP15 の
-//     TLB 操作（c8）は no-op でよい。速度が問題になったらソフト TLB を足す。
+//   - 変換結果は 4KB 単位のソフト TLB にキャッシュする（tlb.go）。
+//     CP15 の c1/c2/c3/c8 書き込みで全無効化する。
 //   - キャッシュ（c7、C/W/I ビット）はエミュレートしない（書き込み保持のみ）。
 //   - MMU 起因のフォルトは cpu.AbortError で返し、CPU が ARM 例外に変換する。
 //     ページテーブル自体が未マップ物理を指した場合（bus.BusError）は
@@ -70,12 +69,18 @@ type MMU struct {
 
 	// その他の crn への書き込みを保持する（読み返し用）。
 	regs [16]uint32
+
+	// ソフト TLB（tlb.go）。permR/permW は現在の特権状態で見る権限ビット。
+	tlb          [tlbSize]tlbEntry
+	permR, permW uint8
 }
 
 var _ cpu.Memory = (*MMU)(nil)
 
 func New(phys cpu.Memory) *MMU {
-	return &MMU{phys: phys, priv: true}
+	m := &MMU{phys: phys, priv: true}
+	m.updatePermMask()
+	return m
 }
 
 // Enabled は MMU（CP15 c1 の M ビット）が有効化されているか。
@@ -110,10 +115,7 @@ func (m *MMU) translateCtrl(ctrl, va uint32, write bool) (uint32, error) {
 
 	// FCSE(c13): VA の下位 32MB は PID で修飾された MVA に再配置される。
 	// WinCE はプロセス切替に PID を使う。
-	mva := va
-	if va < 0x02000000 {
-		mva = va | m.pid
-	}
+	mva := m.mva(va)
 
 	// TODO: アライメントチェック（A ビット）は未実装。現状 CPU 側が
 	// アドレスをアラインしてから発行するため、MMU には非アラインの
@@ -136,7 +138,7 @@ func (m *MMU) translateCtrl(ctrl, va uint32, write bool) (uint32, error) {
 		}
 		if m.domainClient(domain) {
 			ap := (l1 >> 10) & 3
-			if !m.apAllowed(ctrl, ap, write) {
+			if !apAllowed(ctrl, ap, write, m.priv) {
 				return 0, &cpu.AbortError{VA: va, Status: fsPermSect, Domain: domain, Write: write}
 			}
 		}
@@ -181,7 +183,7 @@ func (m *MMU) translateCtrl(ctrl, va uint32, write bool) (uint32, error) {
 			pa = l2&0xFFFFFC00 | mva&0x000003FF // 1KB。AP は 1 個
 			ap = (l2 >> 4) & 3
 		}
-		if m.domainClient(domain) && !m.apAllowed(ctrl, ap, write) {
+		if m.domainClient(domain) && !apAllowed(ctrl, ap, write, m.priv) {
 			return 0, &cpu.AbortError{VA: va, Status: fsPermPage, Domain: domain, Write: write}
 		}
 		return pa, nil
@@ -209,7 +211,7 @@ func (m *MMU) checkDomain(domain uint8, va uint32, write bool, status uint8) err
 }
 
 // apAllowed は AP ビットと S/R ビットによるアクセス可否（ARM ARM B3-16）。
-func (m *MMU) apAllowed(ctrl, ap uint32, write bool) bool {
+func apAllowed(ctrl, ap uint32, write, priv bool) bool {
 	switch ap {
 	case 0:
 		// AP=00 は S/R ビット次第の読み出し専用空間。
@@ -220,68 +222,29 @@ func (m *MMU) apAllowed(ctrl, ap uint32, write bool) bool {
 		case ctrl&ctrlR != 0:
 			return true // R=1: 全モード読み出し可
 		case ctrl&ctrlS != 0:
-			return m.priv // S=1: 特権のみ読み出し可
+			return priv // S=1: 特権のみ読み出し可
 		default:
 			return false
 		}
 	case 1: // 特権のみ RW
-		return m.priv
+		return priv
 	case 2: // 特権 RW / ユーザー読み出しのみ
-		return m.priv || !write
+		return priv || !write
 	default: // 3: 全モード RW
 		return true
 	}
 }
 
 // ---- cpu.Memory ----
-
-func (m *MMU) Read8(a uint32) (uint8, error) {
-	pa, err := m.translate(a, false)
-	if err != nil {
-		return 0, err
-	}
-	return m.phys.Read8(pa)
-}
-func (m *MMU) Read16(a uint32) (uint16, error) {
-	pa, err := m.translate(a, false)
-	if err != nil {
-		return 0, err
-	}
-	return m.phys.Read16(pa)
-}
-func (m *MMU) Read32(a uint32) (uint32, error) {
-	pa, err := m.translate(a, false)
-	if err != nil {
-		return 0, err
-	}
-	return m.phys.Read32(pa)
-}
-func (m *MMU) Write8(a uint32, v uint8) error {
-	pa, err := m.translate(a, true)
-	if err != nil {
-		return err
-	}
-	return m.phys.Write8(pa, v)
-}
-func (m *MMU) Write16(a uint32, v uint16) error {
-	pa, err := m.translate(a, true)
-	if err != nil {
-		return err
-	}
-	return m.phys.Write16(pa, v)
-}
-func (m *MMU) Write32(a uint32, v uint32) error {
-	pa, err := m.translate(a, true)
-	if err != nil {
-		return err
-	}
-	return m.phys.Write32(pa, v)
-}
+// Read8〜Write32 はソフト TLB の fast path 付きで tlb.go にある。
 
 // Fetch32 は命令フェッチ（cpu.InstructionFetcher）。M ビット変更直後、
 // MCR に続く連続した最大 2 命令だけ変更前の変換状態を使う
 // （パイプライン近似。struct コメント参照）。
 func (m *MMU) Fetch32(a uint32) (uint32, error) {
+	if m.fetchGrace == 0 {
+		return m.Read32(a) // 通常は TLB 付きのデータ読み出しと同じ経路
+	}
 	ctrl := m.ctrl
 	if m.fetchGrace > 0 {
 		if m.graceNext == 0 || a == m.graceNext {
@@ -342,10 +305,13 @@ func (m *MMU) Write(opc1, crn, crm, opc2 uint8, v uint32) error {
 			m.graceNext = 0
 		}
 		m.ctrl = v
+		m.flushTLB()
 	case 2:
 		m.ttb = v
+		m.flushTLB()
 	case 3:
 		m.dacr = v
+		m.flushTLB()
 	case 5:
 		m.fsr = v // OS がコンテキスト復元で書くことがある
 	case 6:
@@ -355,7 +321,8 @@ func (m *MMU) Write(opc1, crn, crm, opc2 uint8, v uint32) error {
 		// TODO: wait-for-interrupt を「割り込みまで停止」に最適化すると
 		// アイドルループが速くなる。当面はビジーループで正しく動く。
 	case 8:
-		// TLB 操作: 毎回ウォークするので no-op。
+		// TLB 操作: 単一エントリ指定も含めて全無効化する（安全側）。
+		m.flushTLB()
 	case 13:
 		m.pid = v & 0xFE000000
 	default:
@@ -373,4 +340,14 @@ func (m *MMU) VectorBase() uint32 {
 }
 
 // SetPrivileged は CPU の特権状態の通知を受ける（arm.Coprocessor）。
-func (m *MMU) SetPrivileged(priv bool) { m.priv = priv }
+func (m *MMU) SetPrivileged(priv bool) {
+	m.priv = priv
+	m.updatePermMask()
+}
+
+// Translate は現在の変換状態で VA を PA に変換する（デバッグ用）。
+// 権限チェックは読み出しとして行う。MMU 無効なら VA をそのまま返す。
+// テーブルウォークは物理バスを読むだけで、MMU の状態は変えない。
+func (m *MMU) Translate(va uint32) (uint32, error) {
+	return m.translate(va, false)
+}

@@ -129,3 +129,81 @@ func TestMapRAMMirror(t *testing.T) {
 		t.Error("non power-of-two size should be rejected")
 	}
 }
+
+func TestWatch(t *testing.T) {
+	b := New()
+	if err := b.MapRAM("ram", 0x1000, 0x100); err != nil {
+		t.Fatal(err)
+	}
+	dev := &stubDev{readVal: 0x55}
+	if err := b.MapMMIO("dev", 0x2000, 0x100, dev); err != nil {
+		t.Fatal(err)
+	}
+	type ev struct {
+		name  string
+		addr  uint32
+		v     uint32
+		write bool
+	}
+	var got []ev
+	fn := func(name string, addr uint32, size int, v uint32, write bool) {
+		got = append(got, ev{name, addr, v, write})
+	}
+	b.AddWatch(0x1010, 0x1013, fn)
+	b.AddWatch(0x2000, 0x20FF, fn)
+
+	_ = b.Write32(0x1010, 0x12345678) // 範囲内
+	_ = b.Write32(0x1020, 1)          // 範囲外: 通知なし
+	_, _ = b.Read8(0x1011)            // 範囲内
+	_, _ = b.Read32(0x2004)           // MMIO 範囲内
+	want := []ev{
+		{"ram", 0x1010, 0x12345678, true},
+		{"ram", 0x1011, 0x56, false},
+		{"dev", 0x2004, 0x55, false},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d events %+v, want %+v", len(got), got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("event %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestUnalignedRegionAndRAMPage(t *testing.T) {
+	b := New()
+	if err := b.MapRAM("ram", 0x10000, 0x2000); err != nil {
+		t.Fatal(err)
+	}
+	// 4KB に揃っていない小さな MMIO 2 個が同じページに同居する。
+	d1, d2 := &stubDev{readVal: 1}, &stubDev{readVal: 2}
+	if err := b.MapMMIO("d1", 0x20000, 0x10, d1); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.MapMMIO("d2", 0x20100, 0x10, d2); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := b.Read32(0x20000); v != 1 {
+		t.Errorf("d1 = %d", v)
+	}
+	if v, _ := b.Read32(0x20104); v != 2 {
+		t.Errorf("d2 = %d", v)
+	}
+	if _, err := b.Read32(0x20080); err == nil {
+		t.Error("gap between d1 and d2 must be unmapped")
+	}
+
+	_ = b.Write32(0x11004, 0xCAFEBABE)
+	pg := b.RAMPage(0x11FFF)
+	if len(pg) != 0x1000 || pg[4] != 0xBE {
+		t.Fatalf("RAMPage = len %d", len(pg))
+	}
+	if b.RAMPage(0x20000) != nil {
+		t.Error("RAMPage on MMIO must be nil")
+	}
+	b.AddWatch(0, 0, func(string, uint32, int, uint32, bool) {})
+	if b.RAMPage(0x11000) != nil {
+		t.Error("RAMPage must be nil while watching")
+	}
+}

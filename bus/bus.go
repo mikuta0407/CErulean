@@ -39,15 +39,53 @@ type region struct {
 }
 
 // Bus は物理アドレス空間。cpu.Memory を実装する。
-// 領域数は少数（数個）の想定なので線形探索で十分。
-// TODO: 性能が問題になったらページテーブル化する。
+//
+// 領域検索は全アクセスで走るので、4KB ページ単位の引き表（pages）で
+// O(1) にしている（線形探索だとプロファイルの 1 割近くを占めた）。
+// 4KB に揃っていない領域が一部だけ覆うページは pagePartial にして
+// 線形探索に落とす（現状の構成には無いが、正しさのための保険）。
 type Bus struct {
 	regions []region
+	pages   []uint16 // PA>>12 → 領域番号+1（0 = 未マップ、pagePartial = 線形探索）
+
+	// watches はデバッグ用のアクセス監視範囲。hasWatch が false の間は
+	// RAM アクセスの経路に bool 判定 1 回ぶんしかコストを足さない。
+	watches  []watchRange
+	hasWatch bool
+	watchFn  WatchFunc
+}
+
+// WatchFunc は監視範囲へのアクセス通知。region は領域名、v は
+// 読み出し値または書き込み値。デバッグ（CLI のアクセスログ）用。
+type WatchFunc func(region string, addr uint32, size int, v uint32, write bool)
+
+type watchRange struct{ lo, hi uint32 } // 両端を含む
+
+// AddWatch は物理アドレス lo〜hi（両端含む）へのアクセスを fn に通知させる。
+// fn は全範囲で共通（最後に渡したもの）。
+func (b *Bus) AddWatch(lo, hi uint32, fn WatchFunc) {
+	b.watches = append(b.watches, watchRange{lo, hi})
+	b.watchFn = fn
+	b.hasWatch = true
+}
+
+func (b *Bus) notify(r *region, addr uint32, size int, v uint32, write bool) {
+	for _, w := range b.watches {
+		if addr >= w.lo && addr <= w.hi {
+			b.watchFn(r.name, addr, size, v, write)
+			return
+		}
+	}
 }
 
 var _ cpu.Memory = (*Bus)(nil)
 
-func New() *Bus { return &Bus{} }
+const (
+	pageShift   = 12
+	pagePartial = 0xFFFF
+)
+
+func New() *Bus { return &Bus{pages: make([]uint16, 1<<(32-pageShift))} }
 
 // MapRAM は base から size バイトの RAM を確保して配置する。
 func (b *Bus) MapRAM(name string, base, size uint32) error {
@@ -78,8 +116,47 @@ func (b *Bus) add(r region) error {
 				r.name, r.base, r.size, x.name, x.base, x.size)
 		}
 	}
+	if len(b.regions) >= pagePartial-1 {
+		return fmt.Errorf("bus: too many regions")
+	}
 	b.regions = append(b.regions, r)
+	idx := uint16(len(b.regions)) // 領域番号+1
+	end := uint64(r.base) + uint64(r.size)
+	for p := uint64(r.base) >> pageShift; p<<pageShift < end; p++ {
+		full := p<<pageShift >= uint64(r.base) && (p+1)<<pageShift <= end
+		if full && b.pages[p] == 0 {
+			b.pages[p] = idx
+		} else {
+			b.pages[p] = pagePartial
+		}
+	}
 	return nil
+}
+
+// RAMPage は PA を含む 4KB ページが RAM なら、そのページの実体（長さ 4KB の
+// スライス）を返す。MMU のソフト TLB が RAM を直接読み書きする fast path 用。
+// 監視（AddWatch）が有効な間は nil を返して必ず bus を経由させる
+// （fast path だと監視が素通りになるため）。
+func (b *Bus) RAMPage(pa uint32) []byte {
+	if b.hasWatch {
+		return nil
+	}
+	r := b.find(pa)
+	if r == nil || r.ram == nil {
+		return nil
+	}
+	page := pa &^ (1<<pageShift - 1)
+	if page < r.base || uint64(page)+1<<pageShift > uint64(r.base)+uint64(r.size) {
+		return nil // ページが領域をはみ出す
+	}
+	off := page - r.base
+	if r.ramMask != 0 {
+		off &= r.ramMask
+	}
+	if int(off)+1<<pageShift > len(r.ram) {
+		return nil
+	}
+	return r.ram[off : off+1<<pageShift : off+1<<pageShift]
 }
 
 // RAM は base を含む RAM 領域のスライスと領域内オフセットを返す（ローダー用）。
@@ -98,6 +175,17 @@ func (b *Bus) RAM(addr uint32) ([]byte, uint32, bool) {
 }
 
 func (b *Bus) find(addr uint32) *region {
+	switch i := b.pages[addr>>pageShift]; i {
+	case 0:
+		return nil
+	case pagePartial:
+		return b.findSlow(addr)
+	default:
+		return &b.regions[i-1]
+	}
+}
+
+func (b *Bus) findSlow(addr uint32) *region {
 	for i := range b.regions {
 		r := &b.regions[i]
 		if addr >= r.base && addr-r.base < r.size {
@@ -108,6 +196,17 @@ func (b *Bus) find(addr uint32) *region {
 }
 
 func (b *Bus) read(addr uint32, size int) (uint32, error) {
+	if b.hasWatch {
+		v, err := b.read1(addr, size)
+		if err == nil {
+			b.notify(b.find(addr), addr, size, v, false)
+		}
+		return v, err
+	}
+	return b.read1(addr, size)
+}
+
+func (b *Bus) read1(addr uint32, size int) (uint32, error) {
 	r := b.find(addr)
 	if r == nil || int(addr-r.base)+size > int(r.size) {
 		return 0, &BusError{Addr: addr}
@@ -138,6 +237,9 @@ func (b *Bus) write(addr uint32, size int, v uint32) error {
 	r := b.find(addr)
 	if r == nil || int(addr-r.base)+size > int(r.size) {
 		return &BusError{Addr: addr, Write: true}
+	}
+	if b.hasWatch {
+		b.notify(r, addr, size, v, true)
 	}
 	off := addr - r.base
 	if r.ram != nil {
