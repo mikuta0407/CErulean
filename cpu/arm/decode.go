@@ -26,6 +26,14 @@ func unimpl(reason string) execFn {
 	}
 }
 
+// archUndef は「実機（コプロセッサなし構成）でも未定義例外になる」命令。
+// Step がゲストに未定義命令例外として配送する。
+func archUndef(reason string) execFn {
+	return func(c *Core, word uint32) error {
+		return &UndefinedError{Reason: reason, Arch: true}
+	}
+}
+
 // decodeFn は ARM ARM Figure A3-1 の命令クラス分けに従うディスパッチ。
 // 分岐の順序が重要: 「データ処理レジスタ形式」の空間には bit7/bit4 や
 // S ビットの組み合わせで乗算・MRS/MSR・BX などが埋め込まれている。
@@ -72,16 +80,18 @@ func decodeFn(word uint32) execFn {
 		return execLdst
 	case 3: // LDR/STR レジスタオフセット
 		if word&0x10 != 0 {
-			// bit4=1 は v4 では未定義（v6 でメディア命令になる空間）
-			return unimpl("undefined (bit4 set in register-offset load/store)")
+			// bits[27:25]=011 かつ bit4=1 は ARMv4 のアーキテクチャ未定義空間
+			// （実機でも未定義例外）。WinCE はこの空間の命令をトラップとして
+			// 意図的に実行するので、例外として配送する。
+			return archUndef("architecturally undefined space (011 with bit4)")
 		}
 		return execLdst
 	case 4: // LDM/STM
 		return execLdmStm
 	case 5: // B/BL
 		return execBranch
-	case 6: // コプロセッサ LDC/STC
-		return unimpl("LDC/STC not implemented")
+	case 6: // コプロセッサ LDC/STC: 対応コプロセッサがないので実機同様に未定義例外
+		return archUndef("LDC/STC (no coprocessor)")
 	default: // 7: コプロセッサ演算・レジスタ転送、SWI
 		if word&(1<<24) != 0 {
 			return execSWI
@@ -89,6 +99,6 @@ func decodeFn(word uint32) execFn {
 		if word&0x10 != 0 {
 			return execMcrMrc
 		}
-		return unimpl("CDP not implemented")
+		return archUndef("CDP (no coprocessor)")
 	}
 }

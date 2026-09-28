@@ -18,17 +18,18 @@ func words(ws ...uint32) []byte {
 	return buf
 }
 
-// UART0 に "OK" を出力してから未実装命令で止まる小さなプログラムを、
+// デバッグシリアル（UART1）に "OK" を出力してから停止する小さなプログラムを、
 // CE 仮想アドレス（0x80070000）に置いたイメージとして実行する統合テスト。
 func TestBootToUART(t *testing.T) {
 	prog := words(
-		0xE3A00205, // MOV r0, #0x50000000   (UART0 ベース)
+		0xE3A00205, // MOV r0, #0x50000000   (UART ベース)
+		0xE3800901, // ORR r0, r0, #0x4000   (UART1)
 		0xE3800020, // ORR r0, r0, #0x20     (UTXH)
 		0xE3A0104F, // MOV r1, #'O'
 		0xE5C01000, // STRB r1, [r0]
 		0xE3A0104B, // MOV r1, #'K'
 		0xE5C01000, // STRB r1, [r0]
-		0xE7F000F0, // 未定義命令（ここで停止するはず）
+		0xE8B10000, // 空リスト LDM（UNPREDICTABLE → エミュレーション停止するはず）
 	)
 	img := &loader.Image{
 		Format: "bin",
@@ -63,8 +64,8 @@ func TestBootToUART(t *testing.T) {
 	if !errors.As(stepErr, &ue) {
 		t.Fatalf("expected UndefinedError, got %v", stepErr)
 	}
-	if ue.PC != 0x30070018 {
-		t.Errorf("stopped at PC=%08X, want 30070018", ue.PC)
+	if ue.PC != 0x3007001C {
+		t.Errorf("stopped at PC=%08X, want 3007001C", ue.PC)
 	}
 	if out.String() != "OK" {
 		t.Errorf("UART output = %q, want %q", out.String(), "OK")
@@ -103,7 +104,7 @@ func TestLoadImageOutOfRange(t *testing.T) {
 	}
 	img := &loader.Image{
 		Entry: 0x80000000,
-		Segs:  []loader.Segment{{Addr: 0x83FFFFFC, Data: make([]byte, 16)}}, // RAM 末尾を越える
+		Segs:  []loader.Segment{{Addr: 0x87FFFFFC, Data: make([]byte, 16)}}, // RAM 末尾（128MB）を越える
 	}
 	if err := m.LoadImage(img); err == nil {
 		t.Error("LoadImage accepted a segment beyond RAM; want error")

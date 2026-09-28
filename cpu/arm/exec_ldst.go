@@ -159,6 +159,83 @@ func execLdstMisc(c *Core, word uint32) error {
 	return nil
 }
 
+// userReg / setUserReg は現在モードに関係なく usr バンクのレジスタを
+// 読み書きする（LDM(2)/STM(2) 用）。r0-r7 は全モード共有。
+// r8-r12 は FIQ モードのときだけ退避領域（bankR8Usr）側が usr の値。
+// r13/r14 は usr/sys 以外のモードでは bankR13/R14[bankUsr] 側が usr の値。
+func (c *Core) userReg(i uint32) uint32 {
+	b := c.curBank()
+	switch {
+	case i >= 8 && i <= 12 && b == bankFiq:
+		return c.bankR8Usr[i-8]
+	case i == 13 && b != bankUsr:
+		return c.bankR13[bankUsr]
+	case i == 14 && b != bankUsr:
+		return c.bankR14[bankUsr]
+	}
+	return c.regs[i]
+}
+
+func (c *Core) setUserReg(i uint32, v uint32) {
+	b := c.curBank()
+	switch {
+	case i >= 8 && i <= 12 && b == bankFiq:
+		c.bankR8Usr[i-8] = v
+	case i == 13 && b != bankUsr:
+		c.bankR13[bankUsr] = v
+	case i == 14 && b != bankUsr:
+		c.bankR14[bankUsr] = v
+	default:
+		c.regs[i] = v
+	}
+}
+
+// execLdmStmUser は LDM(2)/STM(2)（ユーザーバンク転送）本体。
+// アドレス計算は execLdmStm と同じ正規化を使う（ライトバックはなし）。
+func (c *Core) execLdmStmUser(word uint32, load bool) error {
+	pre := word&(1<<24) != 0
+	up := word&(1<<23) != 0
+	rn := (word >> 16) & 0xF
+	list := word & 0xFFFF
+	n := uint32(bits.OnesCount32(list))
+
+	start := c.readReg(rn)
+	switch {
+	case up && !pre: // IA
+	case up && pre: // IB
+		start += 4
+	case !up && !pre: // DA
+		start -= 4*n - 4
+	default: // DB
+		start -= 4 * n
+	}
+
+	addr := start
+	for i := uint32(0); i < 16; i++ {
+		if list&(1<<i) == 0 {
+			continue
+		}
+		if load {
+			// LDM(2) に PC は含まれない（含む形は LDM(3) として処理済み）。
+			v, err := c.mem.Read32(addr &^ 3)
+			if err != nil {
+				return err
+			}
+			c.setUserReg(i, v)
+		} else {
+			v := c.userReg(i)
+			if i == 15 {
+				v = c.readReg(15) // PC は通常の STM と同じ PC+8
+			}
+			if err := c.mem.Write32(addr&^3, v); err != nil {
+				return err
+			}
+		}
+		addr += 4
+	}
+	return nil
+}
+
 // execLdmStm は LDM/STM（A3.12、アドレッシングは A5.4）。
 func execLdmStm(c *Core, word uint32) error {
 	var (
@@ -177,10 +254,13 @@ func execLdmStm(c *Core, word uint32) error {
 	hasPC := list&(1<<15) != 0
 
 	if sBit && !(load && hasPC) {
-		// S ビット付きでも LDM {..pc}^ 以外（ユーザーバンク転送）は未実装。
-		// TODO: WinCE カーネルがユーザーモード復帰で使う可能性が高いので、
-		// 必要になったら実装する（バンク切替なしで usr の r13/r14 を読み書きする）。
-		return &UndefinedError{Reason: "LDM/STM user-bank transfer (S bit) not implemented"}
+		// LDM(2)/STM(2): ユーザーバンク転送（現在モードに関係なく usr の
+		// r8-r14 を読み書きする）。WinCE はスレッドのコンテキスト切替で使う。
+		// ライトバックは UNPREDICTABLE（W=0 であるべき）なので止めて気づく。
+		if writeback {
+			return &UndefinedError{Reason: "LDM(2)/STM(2) with writeback (UNPREDICTABLE)"}
+		}
+		return c.execLdmStmUser(word, load)
 	}
 
 	base := c.readReg(rn)
@@ -214,6 +294,12 @@ func execLdmStm(c *Core, word uint32) error {
 			}
 			v, err := c.mem.Read32(addr &^ 3)
 			if err != nil {
+				// ARM9 系はアボート時にベースを命令実行前の値へ戻す
+				// （base restored モデル）。途中までロードしたレジスタは
+				// そのまま（実機でも上書きされ得る）。
+				if writeback && rn != 15 {
+					c.regs[rn] = base
+				}
 				return err
 			}
 			if i == 15 {

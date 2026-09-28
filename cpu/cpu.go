@@ -5,6 +5,8 @@
 // だけに依存すること。
 package cpu
 
+import "fmt"
+
 // CPU は 1 コアのプロセッサ。
 //
 // Step 単位の実行にしているのは、iOS で JIT が使えずインタプリタが前提のため。
@@ -28,8 +30,12 @@ type CPU interface {
 // Memory は CPU から見えるメモリ空間（MMU を含む）。アドレスは CPU が発行
 // したままの値で、変換は Memory 実装（mmu パッケージ）の責務。
 //
-// error はアボート（存在しないアドレスへのアクセス等）を表す。当面は
-// エミュレーションを停止させ、将来はデータアボート例外に変換する。
+// error の使い分け:
+//   - *AbortError: MMU 起因のフォルト。CPU がデータアボート/プリフェッチ
+//     アボート例外としてゲストに配送する。
+//   - それ以外（bus.BusError 等）: エミュレータ側の不備（スタブ未実装など）
+//     とみなし、エミュレーションを停止させる。
+//
 // リトルエンディアン固定（WinCE/ARM は LE）。
 type Memory interface {
 	Read8(addr uint32) (uint8, error)
@@ -38,4 +44,36 @@ type Memory interface {
 	Write8(addr uint32, v uint8) error
 	Write16(addr uint32, v uint16) error
 	Write32(addr uint32, v uint32) error
+}
+
+// InstructionFetcher は Memory 実装が命令フェッチをデータリードと区別
+// したい場合に追加実装する任意 interface。CPU コアは実装があれば命令
+// フェッチに Fetch32 を使い、なければ Read32 に落ちる。
+//
+// MMU がこれを使う理由: 実機（ARM920T）では MMU 有効化の MCR の時点で
+// 後続 2 命令がパイプラインにフェッチ済みで、WinCE のブートコードは
+// 「MCR の直後の命令は物理アドレスのまま実行される」ことに依存している。
+// フェッチ経路を区別できると、この 2 命令分だけ旧変換状態を使う近似で
+// 再現できる。
+type InstructionFetcher interface {
+	Fetch32(addr uint32) (uint32, error)
+}
+
+// AbortError は MMU の変換・保護チェックで発生したフォルト。
+// CPU はこれを ARM のアボート例外に変換する（cpu/arm の Step 参照）。
+// Status/Domain は FSR（フォルトステータスレジスタ）にそのまま入る値
+// （ARM ARM DDI 0100 のフォルトステータス符号）。
+type AbortError struct {
+	VA     uint32 // フォルトを起こした仮想アドレス
+	Status uint8  // FSR[3:0]（例: 0101=セクション変換フォルト）
+	Domain uint8  // FSR[7:4] に入るドメイン番号
+	Write  bool   // 書き込みアクセスだったか
+}
+
+func (e *AbortError) Error() string {
+	kind := "read"
+	if e.Write {
+		kind = "write"
+	}
+	return fmt.Sprintf("abort: %s at VA=%08X (status=%X domain=%X)", kind, e.VA, e.Status, e.Domain)
 }

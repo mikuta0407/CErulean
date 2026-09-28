@@ -39,7 +39,9 @@ func execSWI(c *Core, word uint32) error {
 func execMcrMrc(c *Core, word uint32) error {
 	cpNum := (word >> 8) & 0xF
 	if cpNum != 15 {
-		return &UndefinedError{Reason: "coprocessor other than CP15 not implemented"}
+		// ARM920T に CP15 以外のコプロセッサはなく、実機でも未定義命令例外
+		// になる。WinCE は FPU 検出のため意図的に p10（VFP）等を叩く。
+		return &UndefinedError{Reason: "no such coprocessor (undefined exception on real HW)", Arch: true}
 	}
 	if c.cp15 == nil {
 		return &UndefinedError{Reason: "CP15 not connected to this core"}

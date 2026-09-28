@@ -705,14 +705,14 @@ func TestExceptionReturn(t *testing.T) {
 
 func TestUndefinedReportsPCAndWord(t *testing.T) {
 	c, mem := newTestCore()
-	const cdp = 0xEE000000 // CDP p0, ...（未実装）
-	err := stepOne(t, c, mem, cdp)
+	const badLdm = 0xE8B10000 // 空レジスタリストの LDM（UNPREDICTABLE → 停止）
+	err := stepOne(t, c, mem, badLdm)
 	var ue *UndefinedError
 	if !errors.As(err, &ue) {
 		t.Fatalf("err = %v, want UndefinedError", err)
 	}
-	if ue.PC != testPC || ue.Word != cdp {
-		t.Errorf("UndefinedError PC=%08X Word=%08X, want %08X/%08X", ue.PC, ue.Word, uint32(testPC), uint32(cdp))
+	if ue.PC != testPC || ue.Word != badLdm {
+		t.Errorf("UndefinedError PC=%08X Word=%08X, want %08X/%08X", ue.PC, ue.Word, uint32(testPC), uint32(badLdm))
 	}
 	// PC は命令位置に戻っている（停止位置の報告用）
 	if c.PC() != testPC {

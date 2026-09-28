@@ -98,3 +98,34 @@ func TestRAMLookup(t *testing.T) {
 		t.Error("RAM lookup outside region succeeded")
 	}
 }
+
+func TestMapRAMMirror(t *testing.T) {
+	b := New()
+	if err := b.MapRAMMirror("m", 0x1000, 0x400, 0x100); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Write32(0x1004, 0xCAFEBABE); err != nil {
+		t.Fatal(err)
+	}
+	// 0x100 ごとに折り返して同じ値が見える
+	for _, a := range []uint32{0x1004, 0x1104, 0x1204, 0x1304} {
+		if v, err := b.Read32(a); err != nil || v != 0xCAFEBABE {
+			t.Errorf("Read32(%X) = %08X, %v; want CAFEBABE", a, v, err)
+		}
+	}
+	// エイリアス先への書き込みは元にも見える
+	if err := b.Write32(0x1204, 0x11111111); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := b.Read32(0x1004); v != 0x11111111 {
+		t.Errorf("alias write: Read32(0x1004) = %08X", v)
+	}
+	// 窓の外は BusError
+	if _, err := b.Read32(0x1400); err == nil {
+		t.Error("outside window should be BusError")
+	}
+	// size が 2 の冪でない場合は拒否
+	if err := New().MapRAMMirror("bad", 0, 0x400, 0x300); err == nil {
+		t.Error("non power-of-two size should be rejected")
+	}
+}

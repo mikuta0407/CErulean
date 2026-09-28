@@ -34,6 +34,7 @@ type region struct {
 	base, size uint32
 	name       string
 	ram        []byte // RAM 領域なら non-nil
+	ramMask    uint32 // 0 以外なら部分デコード: オフセットを &= ramMask して ram に届く
 	dev        Device // MMIO 領域なら non-nil
 }
 
@@ -51,6 +52,18 @@ func New() *Bus { return &Bus{} }
 // MapRAM は base から size バイトの RAM を確保して配置する。
 func (b *Bus) MapRAM(name string, base, size uint32) error {
 	return b.add(region{base: base, size: size, name: name, ram: make([]byte, size)})
+}
+
+// MapRAMMirror は window バイトの窓に size バイトの RAM を折り返しで見せる。
+// 実機のメモリコントローラはバンク窓（例: S3C2410 は 128MB）に対して
+// 実装 RAM が小さいとき、アドレス線の部分デコードでエイリアスが生じる。
+// OS のメモリサイズ検出はこの折り返しに依存するので再現する。
+// size は 2 の冪であること。
+func (b *Bus) MapRAMMirror(name string, base, window, size uint32) error {
+	if size == 0 || size&(size-1) != 0 || window < size {
+		return fmt.Errorf("bus: MapRAMMirror %s: size %X must be a power of two <= window %X", name, size, window)
+	}
+	return b.add(region{base: base, size: window, name: name, ram: make([]byte, size), ramMask: size - 1})
 }
 
 // MapMMIO は base から size バイトを MMIO として dev に接続する。
@@ -74,7 +87,11 @@ func (b *Bus) RAM(addr uint32) ([]byte, uint32, bool) {
 	for i := range b.regions {
 		r := &b.regions[i]
 		if r.ram != nil && addr >= r.base && addr < r.base+r.size {
-			return r.ram, addr - r.base, true
+			off := addr - r.base
+			if r.ramMask != 0 {
+				off &= r.ramMask
+			}
+			return r.ram, off, true
 		}
 	}
 	return nil, 0, false
@@ -97,6 +114,14 @@ func (b *Bus) read(addr uint32, size int) (uint32, error) {
 	}
 	off := addr - r.base
 	if r.ram != nil {
+		if r.ramMask != 0 {
+			off &= r.ramMask
+			if int(off)+size > len(r.ram) {
+				// 折り返し境界をまたぐアクセス。実機ならバイト単位で折り返すが、
+				// アラインされたアクセスでは起きないので異常として報告する。
+				return 0, &BusError{Addr: addr}
+			}
+		}
 		switch size {
 		case 1:
 			return uint32(r.ram[off]), nil
@@ -116,6 +141,12 @@ func (b *Bus) write(addr uint32, size int, v uint32) error {
 	}
 	off := addr - r.base
 	if r.ram != nil {
+		if r.ramMask != 0 {
+			off &= r.ramMask
+			if int(off)+size > len(r.ram) {
+				return &BusError{Addr: addr, Write: true} // read 側と同じ扱い
+			}
+		}
 		switch size {
 		case 1:
 			r.ram[off] = uint8(v)

@@ -159,10 +159,8 @@ func cmdRun(args []string) {
 
 	var steps uint64
 	for {
-		// 命令語はバス経由で覗く（フェッチ前なので副作用はない）。
-		// 注意: MMU 有効時は PC が仮想アドレスなので物理バス直読みはずれる。
-		// TODO: MMU 実装後はデバッグ用の変換付き読み出しに変える。
-		word, _ := m.Bus().Read32(c.PC())
+		// 命令語を CPU と同じ経路（MMU 変換込み）で覗く。フェッチ前なので副作用はない。
+		word, _ := m.Peek32(c.PC())
 		if *trace {
 			fmt.Fprintf(os.Stderr, "%12d  PC=%08X  %08X  %s\n", steps, c.PC(), word, arm.Disasm(word, c.PC()))
 		}

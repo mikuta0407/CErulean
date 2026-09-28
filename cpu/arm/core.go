@@ -7,6 +7,7 @@
 package arm
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/mikuta0407/cerulean/cpu"
@@ -48,12 +49,24 @@ func bankIndex(mode uint32) int {
 type Coprocessor interface {
 	Read(opc1, crn, crm, opc2 uint8) (uint32, error)
 	Write(opc1, crn, crm, opc2 uint8, v uint32) error
+	// VectorBase は例外ベクタのベースアドレス
+	// （CP15 制御レジスタ V ビット: 0 または 0xFFFF0000）。
+	VectorBase() uint32
+	// SetPrivileged は CPU の特権状態の変化を伝える。MMU のアクセス権限
+	// チェック（AP ビット）が特権/ユーザーで異なるため。cpu.Memory
+	// interface にモード引数を足すより、変化時に通知する方が軽い。
+	SetPrivileged(priv bool)
 }
 
 // Core は ARM CPU の状態。cpu.CPU を実装する。
 type Core struct {
 	mem  cpu.Memory
 	cp15 Coprocessor // nil なら MCR/MRC p15 は未実装エラー
+
+	// fetch32 は命令フェッチ用の読み出し。mem が cpu.InstructionFetcher を
+	// 実装していればそれ（MMU 有効化直後のパイプライン近似のため）、
+	// なければ mem.Read32。
+	fetch32 func(addr uint32) (uint32, error)
 
 	// regs は現在のモードから見えるレジスタ。regs[15] = PC。
 	// モード切替時に bankR13/bankR14（FIQ は bankR8Fiq も）と入れ替える。
@@ -76,16 +89,25 @@ var _ cpu.CPU = (*Core)(nil)
 // New は mem に接続された ARM コアを作る。cp15 は nil でもよい
 // （その場合 MCR/MRC p15 で未実装エラーになる）。
 func New(mem cpu.Memory, cp15 Coprocessor) *Core {
-	return &Core{mem: mem, cp15: cp15}
+	c := &Core{mem: mem, cp15: cp15}
+	if f, ok := mem.(cpu.InstructionFetcher); ok {
+		c.fetch32 = f.Fetch32
+	} else {
+		c.fetch32 = mem.Read32
+	}
+	return c
 }
 
 // Reset は電源投入相当。SVC モード・IRQ/FIQ 禁止・ARM state で pc から開始する。
 // TODO: 本来のリセットはベクタ 0x00000000 へ飛ぶが、Device Emulator 同様に
 // ローダーが決めたエントリポイントから直接開始する。実イメージで問題が出たら見直す。
 func (c *Core) Reset(pc uint32) {
-	*c = Core{mem: c.mem, cp15: c.cp15}
+	*c = Core{mem: c.mem, cp15: c.cp15, fetch32: c.fetch32}
 	c.cpsr = PSR(ModeSvc) | FlagI | FlagF
 	c.regs[15] = pc
+	if c.cp15 != nil {
+		c.cp15.SetPrivileged(true)
+	}
 }
 
 func (c *Core) PC() uint32 { return c.regs[15] }
@@ -109,20 +131,38 @@ func (c *Core) curBank() int {
 }
 
 // UndefinedError は未実装またはアーキテクチャ上未定義の命令。
-// マイルストーン1では例外ベクタに飛ばさず、PC と命令語を持ってエミュレーションを止める。
+// Arch=true は「実機（ARM920T 構成）でも未定義命令例外になる」ことが
+// 確かな命令で、Step がゲストに例外として配送する（WinCE は FPU 検出
+// などで意図的に未定義命令を実行する）。Arch=false はエミュレータの
+// 実装漏れの可能性があるため、例外にせず停止して気づけるようにする。
 type UndefinedError struct {
 	PC     uint32
 	Word   uint32
 	Reason string
+	Arch   bool
 }
 
 func (e *UndefinedError) Error() string {
 	return fmt.Sprintf("unimplemented/undefined instruction at PC=%08X: word=%08X (%s)", e.PC, e.Word, e.Reason)
 }
 
-// Step は 1 命令実行する。エラー時は PC を命令の位置に戻して返す
+// Step は 1 命令実行する。MMU 起因のアボート（cpu.AbortError）は ARM の
+// 例外として配送して nil を返す。それ以外のエラー（未実装命令・未マップ
+// 物理アドレス等）は PC を命令の位置に戻してエラーを返す
 // （レジスタ・メモリの部分的な副作用までは巻き戻さない）。
 func (c *Core) Step() error {
+	// 割り込みは命令境界で受け付ける。FIQ が IRQ より優先（ARM ARM A2.6）。
+	// 復帰先は「実行されなかった命令」なので LR = その PC+4
+	// （ハンドラは SUBS pc, lr, #4 で戻る）。
+	if c.fiq && c.cpsr&FlagF == 0 {
+		c.enterException(VecFIQ, ModeFiq, c.regs[15]+4)
+		return nil
+	}
+	if c.irq && c.cpsr&FlagI == 0 {
+		c.enterException(VecIRQ, ModeIrq, c.regs[15]+4)
+		return nil
+	}
+
 	if c.cpsr.T() {
 		// TODO(マイルストーン2): Thumb デコーダ。BX で Thumb に入るコードが
 		// 来たらここで止まる。
@@ -130,8 +170,14 @@ func (c *Core) Step() error {
 	}
 
 	pc := c.regs[15]
-	word, err := c.mem.Read32(pc)
+	word, err := c.fetch32(pc)
 	if err != nil {
+		if isAbort(err) {
+			// プリフェッチアボート。FSR/FAR はデータアボート専用なので更新しない
+			//（ARM ARM: FAR is only updated for data aborts）。LR = PC+4。
+			c.enterException(VecPabt, ModeAbt, pc+4)
+			return nil
+		}
 		return fmt.Errorf("instruction fetch at PC=%08X: %w", pc, err)
 	}
 
@@ -145,7 +191,24 @@ func (c *Core) Step() error {
 		return nil // 条件不成立: 何もせず次の命令へ
 	}
 	if err := in.exec(c, word); err != nil {
+		var ae *cpu.AbortError
+		if errors.As(err, &ae) {
+			// データアボート。FSR（ドメイン|ステータス）と FAR を更新して配送。
+			// LR = PC+8（ハンドラは SUBS pc, lr, #8 で再実行できる）。
+			if c.cp15 != nil {
+				_ = c.cp15.Write(0, 5, 0, 0, uint32(ae.Domain)<<4|uint32(ae.Status))
+				_ = c.cp15.Write(0, 6, 0, 0, ae.VA)
+			}
+			c.enterException(VecDabt, ModeAbt, pc+8)
+			return nil
+		}
 		if ue, ok := err.(*UndefinedError); ok {
+			if ue.Arch {
+				// 実機でも未定義例外になる命令: ゲストに配送する。
+				// LR = 未定義命令の次（ARM ARM A2.6.4）。
+				c.enterException(VecUndef, ModeUnd, pc+4)
+				return nil
+			}
 			ue.PC = pc
 			ue.Word = word
 		}
@@ -153,6 +216,12 @@ func (c *Core) Step() error {
 		return err
 	}
 	return nil
+}
+
+// isAbort は err が MMU 起因のアボートか（例外配送の対象か）を判定する。
+func isAbort(err error) bool {
+	var ae *cpu.AbortError
+	return errors.As(err, &ae)
 }
 
 // readReg はオペランドとしてのレジスタ読み出し。r15 は PC+8 に見える。
@@ -179,6 +248,10 @@ func (c *Core) setCPSR(p PSR) {
 	newMode := p.Mode()
 	if oldMode != newMode {
 		c.swapBanks(oldMode, newMode)
+		if c.cp15 != nil {
+			// MMU の権限チェック用に特権状態の変化を伝える（usr だけが非特権）。
+			c.cp15.SetPrivileged(newMode != ModeUsr)
+		}
 	}
 	c.cpsr = p
 }
@@ -207,9 +280,8 @@ func (c *Core) swapBanks(oldMode, newMode uint32) {
 	c.regs[14] = c.bankR14[newBank]
 }
 
-// 例外ベクタアドレス。
-// TODO: CP15 の V ビット（high vectors 0xFFFF0000）は未対応。WinCE は
-// high vectors を使うはずなので、MMU 実装時に対応する。
+// 例外ベクタオフセット。ベースは CP15 の V ビットで 0 または 0xFFFF0000
+// （enterException が Coprocessor.VectorBase で解決する）。
 const (
 	VecReset = 0x00
 	VecUndef = 0x04
@@ -235,5 +307,9 @@ func (c *Core) enterException(vector uint32, newMode uint32, retAddr uint32) {
 
 	c.spsr[c.curBank()] = oldCPSR
 	c.regs[14] = retAddr
-	c.regs[15] = vector
+	base := uint32(0)
+	if c.cp15 != nil {
+		base = c.cp15.VectorBase()
+	}
+	c.regs[15] = base | vector
 }

@@ -17,12 +17,17 @@ import (
 )
 
 // S3C2410 の物理メモリマップ（データシート Figure 5-1）:
-//   - 0x30000000: SDRAM（バンク 6）。SMDK2410/Device Emulator は 64MB。
-//   - 0x48000000〜: 周辺機器レジスタ群（下の peripheralStubs も参照）
+//   - 0x30000000: SDRAM（バンク 6、窓は 128MB）。Device Emulator の 128MB 構成に
+//     合わせて全部を実 RAM にする。WinCE の OEMGetExtensionDRAM が
+//     0x34000000〜 を拡張 RAM（後半は RAMFMD = RAM ディスク）として使う。
+//     64MB 実装＋折り返しにすると、このプローブがエイリアスを実 RAM と
+//     誤検出してカーネルメモリを二重使用してしまう（2026-09 に実測）。
+//   - 0x38000000: バンク 7。SDRAM 未実装（オープンバス）。
+//   - 0x48000000〜: 周辺機器レジスタ群
 //   - 0x50000000: UART（UART0/1/2 が 0x4000 間隔）
 const (
 	sdramBase = 0x30000000
-	sdramSize = 64 * 1024 * 1024
+	sdramSize = 128 * 1024 * 1024
 	uartBase  = 0x50000000
 )
 
@@ -42,16 +47,35 @@ type Machine struct {
 
 var _ machine.Machine = (*Machine)(nil)
 
-// New は SMDK2410 相当のマシンを組み立てる。uartOut に UART0 の送信データが流れる。
+// openBus は SDRAM が実装されていないバンク窓。実機ではアクセスしても
+// バスフォールトにはならず読み出しは不定値になる。WinCE のメモリサイズ
+// 検出が書いた署名の読み戻しに失敗して「RAM なし」と判定できるよう、
+// 書き込みは無視し読み出しは 0 を返す。
+// TODO: 実機の不定値は 0 とは限らない（直前のバス値が残る等）。検出が
+// 誤動作するようなら見直す。
+type openBus struct{}
+
+func (openBus) Read(off uint32, size int) uint32     { return 0 }
+func (openBus) Write(off uint32, size int, v uint32) {}
+
+// New は SMDK2410 相当のマシンを組み立てる。uartOut にはカーネルデバッグ
+// シリアル（UART1）の送信データが流れる。
 func New(uartOut io.Writer) (*Machine, error) {
 	b := bus.New()
 	if err := b.MapRAM("sdram", sdramBase, sdramSize); err != nil {
 		return nil, err
 	}
+	// バンク7（0x38000000）: SDRAM 未実装。メモリサイズ検出が触るので
+	// オープンバスとして応答だけする。
+	if err := b.MapMMIO("bank7-empty", sdramBase+sdramSize, sdramSize, openBus{}); err != nil {
+		return nil, err
+	}
 	// UART0/1/2。レジスタ帯は各 0x4000 だが実レジスタは先頭 0x2C バイト。
-	// デバッグシリアル出力は UART0 の想定なので、1/2 は出力先なし。
-	// TODO: 実イメージのバナーが UART0 以外に出ていたら見直す。
-	for i, w := range []io.Writer{uartOut, nil, nil} {
+	// 実イメージ（WM5 Device Emulator 用 PPC_USA.bin）のカーネルデバッグ
+	// シリアルは UART1 に出る（2026-09 に実測。ブートバナーが UART1 の
+	// UTXH に書かれた）ので、uartOut は UART1 につなぐ。
+	// TODO: UART0/2 の出力先はアプリのシリアル対応時に決める。
+	for i, w := range []io.Writer{nil, uartOut, nil} {
 		name := fmt.Sprintf("uart%d", i)
 		if err := b.MapMMIO(name, uartBase+uint32(i)*0x4000, 0x4000, s3c2410.NewUART(w)); err != nil {
 			return nil, err
@@ -65,7 +89,7 @@ func New(uartOut io.Writer) (*Machine, error) {
 		base uint32
 		init map[uint32]uint32
 	}{
-		{"memc", 0x48000000, nil},     // メモリコントローラ（BWSCON など）
+		{"memc", 0x48000000, nil}, // メモリコントローラ（BWSCON など）
 		{"intc", 0x4A000000, map[uint32]uint32{ // 割り込みコントローラ
 			0x08: 0xFFFFFFFF, // INTMSK: リセット値は全マスク
 		}},
@@ -113,6 +137,13 @@ func (m *Machine) CPU() cpu.CPU { return m.cpu }
 
 // Bus は物理バス（デバッグ・テスト用）。
 func (m *Machine) Bus() *bus.Bus { return m.bus }
+
+// Peek32 は CPU から見えるアドレス空間（MMU 有効なら変換込み）を
+// 副作用なしで読む。デバッグ・トレース用。
+// 注意: MMIO を指すと副作用が出得るが、コード領域を覗く用途では問題ない。
+func (m *Machine) Peek32(addr uint32) (uint32, error) {
+	return m.mmu.Read32(addr)
+}
 
 // vaToPA はイメージ内アドレス（CE 仮想アドレス）をロード先物理アドレスに変換する。
 // MMU 有効化前のロード時にだけ使う。
