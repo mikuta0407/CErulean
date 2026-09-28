@@ -32,7 +32,7 @@ run flags:
   -trace           実行した命令の PC・命令語・ディスアセンブルを逐一表示する
   -trace-from n    -trace の表示を n 命令目から始める
   -sample n        n 命令ごとに PC・CPSR を 1 行表示する（停滞箇所の調査用）
-  -rtc time       RTC の初期時刻（例 2006-01-02T15:04:05。既定はホストの現在時刻。
+  -rtc time        RTC の初期時刻（例 2006-01-02T15:04:05。既定はホストの現在時刻。
                    固定すると実行が完全に再現可能になる）
   -fb-out f.png    停止時（max-steps・エラー）に LCD のフレームバッファを PNG に書く
   -fb-every n      -fb-out と併用。n 命令ごとに f-<命令数>.png として連番で書く

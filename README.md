@@ -19,9 +19,17 @@ Samsung S3C2410（ARM920T）構成のマシンで起動することを最初の�
       （命令数ベースの仮想時間）、GPIO・クロック等は値保持スタブ
 - [x] デバッグ支援: `-trace` の簡易ディスアセンブラ、停止時の直前命令履歴表示
 
-現在のブート到達点: カーネルバナー「Windows CE Kernel for ARM (Thumb Enabled)」に
-続き、RAMFMD（RAM ディスク）初期化・ドライバロードまで進む。デバッグシリアルは
-UART1 に出る（`run` の標準出力に表示される）。表示（LCD/フレームバッファ）は
+マイルストーン3（完了）: 実イメージが **Today 画面まで起動**し、LCD の
+フレームバッファを PNG で確認できる。
+
+- [x] LCD コントローラ（LCDCON/LCDSADDR からフレームバッファの位置・解像度・bpp を解釈）
+- [x] フレームバッファの PNG 出力（停止時 `-fb-out`、一定間隔 `-fb-every`）
+- [x] RTC（仮想時間で進む。初期時刻は `-rtc` で固定可能）
+- [x] 性能改善: MMU のソフト TLB と物理バスの O(1) 領域検索（約 10M → 22M 命令/秒）
+- [x] デバッグ支援: 物理アドレス監視 `-watch`、`-trace-from`、`-sample`、
+      Thumb 命令のディスアセンブル、停止時の PC の VA→PA 表示
+
+Today 画面の完成まで約 35 億命令（現状の速度で約 2.5 分）かかる。入力（タッチ・キー）は
 次のマイルストーン。
 
 ## テスト用イメージの入手
@@ -59,7 +67,19 @@ go build ./cmd/cerulean
 
 # トレース実行（ディスアセンブル付き）・ステップ数制限
 ./cerulean run -trace -max-steps 1000000 path/to/nk.bin
+
+# Today 画面が出るところまで実行し、停止時の画面を PNG に保存
+./cerulean run -max-steps 3600000000 -fb-out screen.png path/to/nk.bin
+
+# 起動の様子を 1 億命令ごとの連番 PNG で見る（RTC を固定して再現可能に）
+./cerulean run -rtc 2006-01-02T15:04:05 -max-steps 3600000000 \
+  -fb-out shot.png -fb-every 100000000 path/to/nk.bin
+
+# 物理アドレス範囲へのアクセスを PC 付きで記録（周辺機器の調査用）
+./cerulean run -watch 0x4D000000-0x4D000FFF -max-steps 100000000 path/to/nk.bin
 ```
+
+`run` の全フラグは `./cerulean` を引数なしで実行すると表示される。
 
 ## 開発
 

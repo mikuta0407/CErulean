@@ -199,12 +199,23 @@ func New(uartOut io.Writer) (*Machine, error) {
 		s3c2410.NewStub("iis", nil).ForceReadBits(0x00, 1<<7)); err != nil {
 		return nil, err
 	}
-	// 0x500F0000: S3C2410 のデータシートにない領域だが、ドライバが
-	// VA を張って 0x500F2080 に書く（2026-09 に実測）。Device Emulator
-	// 固有の準仮想デバイスと思われる。レジスタ帯が広い（+0x2080）ので
-	// 0x10000 マップする。
-	// TODO: 正体の特定。どのドライバがどう使うかをトレースで調べる。
-	if err := b.MapMMIO("de-unknown-500F0000", 0x500F0000, 0x10000, s3c2410.NewStub("de-unknown", nil)); err != nil {
+	// 0x500F0000: S3C2410 のデータシートにない領域。Device Emulator 固有の
+	// 準仮想デバイス群と判断した（ROM の TOC からアクセス元モジュールを特定。
+	// 2026-09 の実イメージ観察。いずれもブートを止める要因ではなかった）:
+	//   - +0x2080 + n*0x20（n=0..3）: dmatrans.dll（DE の DMA トランスポート。
+	//     ActiveSync/デバッガ用のホスト通信と推定）が 4 チャネルを初期化する。
+	//     各チャネル +0x00 に 1 を書き、後で 1 を読み返してから
+	//     +0x04 = 0x500F2000+4n、+0x10 = 0x26、+0x00 = 0x101 を書く。
+	//     書き込みは ceddk.dll の WRITE_REGISTER_ULONG 経由。
+	//   - +0x5000〜+0x5007: emulserv.dll（エミュレータサービス）が VirtualCopy で
+	//     8 バイトだけマップし、+0x04 を読んで bit30 を検査、+0x00 に
+	//     0xFFFFFFFF を書く。割り込みは GPF3 を EINT3（High レベル）に設定して
+	//     受ける（GPFCON/GPFUP/EXTINT0 を操作）。
+	// どちらもホスト側が居ないと動作しない機能なので、値保持スタブのまま
+	// （初期化の読み返しが通れば十分）。
+	// TODO: ホスト連携（フォルダ共有・ActiveSync 等）が必要になったら
+	// レジスタの意味を観察から詰める。
+	if err := b.MapMMIO("de-paravirt-500F0000", 0x500F0000, 0x10000, s3c2410.NewStub("de-paravirt", nil)); err != nil {
 		return nil, err
 	}
 	// mmu.MMU は CPU から見たメモリ空間（cpu.Memory）と CP15（arm.Coprocessor）を兼ねる。
