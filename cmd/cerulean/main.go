@@ -31,6 +31,8 @@ func usage() {
   cerulean run [flags] <image>          イメージを実行する
   cerulean run -snap-load f [flags] [image]
                                         スナップショットから再開する
+  cerulean serve [flags] <image>        ブラウザから対話的に操作する（ローカル HTTP）
+  cerulean serve -snap-load f [flags] [image]
 
 run flags:
   -machine name    マシン構成 (default "smdk2410")
@@ -56,6 +58,17 @@ run flags:
   -touch-raw       スクリプトのタッチ座標を ADC の生値（0〜1023）として渡す（調査用）
   -snap-load f     スナップショット f から再開する（命令数・仮想時刻は保存時点から
                    継続）。image を指定すると保存時のイメージと同一かを照合する
+
+serve flags:
+  -addr host:port  待ち受けアドレス (default 127.0.0.1:8080。認証が無いので既定はローカルのみ)
+  -snap-load f     スナップショット f から始める
+  -rtc time        RTC の初期時刻（run と同じ）
+  -dir d           UI から保存するスナップショット・記録の保存先 (default ".")
+  -no-idle-skip    アイドルループのスキップを無効にする
+  ブラウザで開くと画面が表示される。画面のクリック・ドラッグがタッチ、画面に
+  フォーカスがある間のキー入力がハードウェアキーになる。「記録開始」で起点の
+  スナップショットを保存し、「記録停止」で入力を命令数つきのスクリプトに書き出す
+  （run -snap-load <起点> -script <スクリプト> で同じ画面が再現される）
 `)
 	os.Exit(2)
 }
@@ -69,6 +82,8 @@ func main() {
 		cmdInfo(os.Args[2:])
 	case "run":
 		cmdRun(os.Args[2:])
+	case "serve":
+		cmdServe(os.Args[2:])
 	default:
 		usage()
 	}
@@ -196,44 +211,9 @@ func cmdRun(args []string) {
 		})
 	}
 
-	// imageID は元イメージの SHA-256。スナップショットに記録し、再開時に
-	// 別イメージと取り違えていないかの照合に使う。
-	var imageID string
-	if fs.NArg() == 1 {
-		if imageID, err = fileSHA256(fs.Arg(0)); err != nil {
-			fatal(err)
-		}
-	}
-	if *snapLoad != "" {
-		id, err := loadSnapshot(m, *snapLoad)
-		if err != nil {
-			fatal(err)
-		}
-		if imageID != "" && id != imageID {
-			fatal(fmt.Errorf("-snap-load: snapshot was taken with a different image (sha256 %s, %s is %s)",
-				id, fs.Arg(0), imageID))
-		}
-		imageID = id
-		fmt.Fprintf(os.Stderr, "cerulean: %s: resumed from %s at step %d, PC %08X\n",
-			m.Name(), *snapLoad, m.Steps(), m.CPU().PC())
-	} else {
-		img, err := loader.Load(fs.Arg(0), uint32(*nb0Base))
-		if err != nil {
-			fatal(err)
-		}
-		if err := m.LoadImage(img); err != nil {
-			fatal(err)
-		}
-		rtcTime := time.Now()
-		if *rtcFlag != "" {
-			if rtcTime, err = time.ParseInLocation("2006-01-02T15:04:05", *rtcFlag, time.Local); err != nil {
-				fatal(fmt.Errorf("-rtc: %w", err))
-			}
-		}
-		m.SetRTC(rtcTime)
-		m.Reset()
-		fmt.Fprintf(os.Stderr, "cerulean: %s: loaded %s image, entry %08X (PA %08X)\n",
-			m.Name(), img.Format, img.Entry, m.CPU().PC())
+	imageID, err := startMachine(m, fs.Arg(0), *snapLoad, *rtcFlag, uint32(*nb0Base))
+	if err != nil {
+		fatal(err)
 	}
 
 	events, err := buildEvents(m, *scriptPath, *snapSave, m.Steps())

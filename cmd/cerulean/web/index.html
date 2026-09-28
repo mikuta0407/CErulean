@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CErulean</title>
+<style>
+  :root { --bg: #f4f5f7; --fg: #1d2330; --muted: #667085; --panel: #fff; --line: #d0d5dd; --accent: #1570ef; --rec: #d92d20; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #14171c; --fg: #e4e7ec; --muted: #98a2b3; --panel: #1d222a; --line: #344054; --accent: #53b1fd; --rec: #f97066; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.5 system-ui, sans-serif; }
+  main { display: flex; flex-wrap: wrap; gap: 20px; padding: 16px; align-items: flex-start; }
+  #screenWrap { background: #000; padding: 8px; border-radius: 10px; line-height: 0; }
+  canvas { image-rendering: pixelated; touch-action: none; cursor: crosshair; outline: none; }
+  canvas:focus-visible { outline: 2px solid var(--accent); }
+  aside { flex: 1 1 280px; max-width: 520px; display: grid; gap: 12px; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+  h2 { font-size: 13px; margin: 0 0 8px; color: var(--muted); font-weight: 600; }
+  .row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  button, select { font: inherit; padding: 4px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--fg); cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+  button.rec.on { background: var(--rec); border-color: var(--rec); }
+  dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; margin: 0; font-variant-numeric: tabular-nums; }
+  dt { color: var(--muted); }
+  dd { margin: 0; }
+  #err { color: var(--rec); white-space: pre-wrap; }
+  #log { font: 12px/1.4 ui-monospace, monospace; white-space: pre-wrap; word-break: break-all; max-height: 240px; overflow: auto; margin: 0; }
+  table { border-collapse: collapse; font-size: 12px; }
+  td { padding: 1px 8px 1px 0; }
+  kbd { font: 11px ui-monospace, monospace; border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+</style>
+</head>
+<body>
+<main>
+  <div id="screenWrap"><canvas id="screen" width="240" height="320" tabindex="0" aria-label="WM5 の画面（クリックで操作、フォーカス中はキー入力）"></canvas></div>
+  <aside>
+    <section>
+      <h2>実行</h2>
+      <div class="row">
+        <button id="pause">一時停止</button>
+        <label>速度 <select id="speed">
+          <option value="1" selected>等速</option>
+          <option value="2">2 倍</option>
+          <option value="0">最高速</option>
+        </select></label>
+        <label>表示 <select id="zoom">
+          <option value="1">1x</option>
+          <option value="2" selected>2x</option>
+          <option value="3">3x</option>
+        </select></label>
+      </div>
+    </section>
+    <section>
+      <h2>状態</h2>
+      <dl>
+        <dt>命令数</dt><dd id="steps">-</dd>
+        <dt>仮想時間</dt><dd id="vtime">-</dd>
+        <dt>実時間比</dt><dd id="ratio">-</dd>
+        <dt>速度</dt><dd id="mips">-</dd>
+        <dt>アイドル</dt><dd id="idle">-</dd>
+      </dl>
+      <div id="err"></div>
+    </section>
+    <section>
+      <h2>保存と記録</h2>
+      <div class="row">
+        <button id="snap">スナップショット保存</button>
+        <button id="rec" class="rec">記録開始</button>
+      </div>
+      <pre id="log"></pre>
+    </section>
+    <section>
+      <h2>キー（画面をクリックしてフォーカス）</h2>
+      <table>
+        <tr><td><kbd>↑↓←→</kbd> <kbd>Enter</kbd></td><td>方向キー・決定</td></tr>
+        <tr><td><kbd>F1</kbd>〜<kbd>F5</kbd></td><td>App1〜App5（ソフトキーではない）</td></tr>
+        <tr><td><kbd>A</kbd>〜<kbd>Z</kbd> <kbd>0</kbd>〜<kbd>9</kbd></td><td>英数字</td></tr>
+        <tr><td><kbd>Space</kbd> <kbd>BS</kbd> <kbd>Tab</kbd> <kbd>Esc</kbd> <kbd>Del</kbd></td><td>編集キー</td></tr>
+        <tr><td><kbd>Shift</kbd> <kbd>Ctrl</kbd> <kbd>Alt</kbd> <kbd>CapsLock</kbd></td><td>修飾キー</td></tr>
+      </table>
+    </section>
+  </aside>
+</main>
+<script src="app.js"></script>
+</body>
+</html>
