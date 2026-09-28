@@ -46,7 +46,11 @@ func (m *Machine) chunks() ([]chunk, error) {
 	cs := []chunk{{"machine", m}, {"cpu", m.cpu}, {"mmu", m.mmu}, {"ram", m.bus},
 		{"board:kbd", m.kbd}}
 	for _, d := range m.bus.MMIODevices() {
-		switch dev := d.Dev.(type) {
+		dev := d.Dev
+		if t, ok := dev.(timedDev); ok {
+			dev = t.dev // 時間同期のラッパ（run.go）の中身を保存する
+		}
+		switch dev := dev.(type) {
 		case snapshot.Stateful:
 			cs = append(cs, chunk{"dev:" + d.Name, dev})
 		case openBus:
@@ -61,6 +65,9 @@ func (m *Machine) chunks() ([]chunk, error) {
 // SaveSnapshot は全状態を w に書く。imageID は元イメージの識別子
 // （呼び出し側が決める。CLI はイメージファイルの SHA-256）。
 func (m *Machine) SaveSnapshot(w io.Writer, imageID string) error {
+	// 溜めた仮想時間をデバイスに渡してから保存する（毎命令 Advance して
+	// いた頃と同じ状態・同じバイト列にするため。run.go 参照）。
+	m.syncTime()
 	cs, err := m.chunks()
 	if err != nil {
 		return err
@@ -100,5 +107,8 @@ func (m *Machine) LoadSnapshot(r io.Reader) (imageID string, err error) {
 	if err := sr.Close(); err != nil {
 		return "", err
 	}
+	m.pending = 0
+	m.poll = pollCandidate{}
+	m.updateDeadline()
 	return sr.Header.ImageID, nil
 }

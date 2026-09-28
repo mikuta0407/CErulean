@@ -275,3 +275,18 @@ func (m *MMU) translateFill(a uint32, write bool) (uint32, error) {
 	}
 	return pa, err
 }
+
+// Probe32 は cpu.Prober。TLB にヒットして RAM の実体を直接読める（= 実際の
+// アクセスでも bus を経由せず、TLB も変わらない）場合だけ値を返す。
+// フェッチはフェッチ猶予中なら不可（猶予の残り回数が変わるため）。
+// bus.AddWatch 中は RAM の実体を持たないので常に不可になる。
+func (m *MMU) Probe32(a uint32, fetch bool) (uint32, bool) {
+	if a&3 != 0 || (fetch && m.fetchGrace != 0) {
+		return 0, false
+	}
+	e := m.lookup(a, m.permR)
+	if e == nil || e.ram == nil {
+		return 0, false
+	}
+	return binary.LittleEndian.Uint32(e.ram[a&0xFFF:]), true
+}

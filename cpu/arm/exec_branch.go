@@ -9,6 +9,11 @@ func execBranch(c *Core, word uint32) error {
 		c.regs[14] = c.regs[15] // regs[15] は今 PC+4 = 次命令 = 復帰先
 	}
 	c.regs[15] = uint32(int32(c.regs[15]+4) + offset) // PC+8 基準
+	if word&0x01FFFFFF == 0x00FFFFFC {
+		// L=0 で 2 命令前へ戻る分岐: 3 命令のポーリングループの可能性
+		// （idle.go）。ここでは印を付けるだけで、判定は実行ループに任せる。
+		c.spinHint = true
+	}
 	return nil
 }
 

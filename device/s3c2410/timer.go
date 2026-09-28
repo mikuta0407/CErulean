@@ -98,6 +98,24 @@ func (t *PWMTimer) Advance(ticks int64) {
 	}
 }
 
+// NoEvent は NextEvent の「予定なし」。
+const NoEvent = int64(1<<63 - 1)
+
+// NextEvent は、あと何ティック Advance すると割り込みが上がる（= カウンタの
+// 線形な減少以外の状態変化が起きる）かを返す。予定がなければ NoEvent。
+// machine はこれを期限として Advance をまとめて呼ぶ（性能対策）。期限より
+// 手前までは Advance(a)+Advance(b) と Advance(a+b) の結果が一致する。
+func (t *PWMTimer) NextEvent() int64 {
+	next := NoEvent
+	for n := 0; n < 5; n++ {
+		if t.running[n] {
+			// cnt<=0 で動作中なら、次の 1 ティックで満了する（Advance 参照）。
+			next = min(next, max(t.cnt[n], 1))
+		}
+	}
+	return next
+}
+
 func (t *PWMTimer) Read(off uint32, size int) uint32 {
 	switch off &^ 3 {
 	case regTCFG0:

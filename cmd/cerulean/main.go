@@ -40,6 +40,9 @@ run flags:
   -fb-out f.png    停止時（max-steps・エラー）に LCD のフレームバッファを PNG に書く
   -fb-every n      -fb-out と併用。n 命令ごとに f-<命令数>.png として連番で書く
   -cpuprofile f    Go の CPU プロファイルを f に書く（エミュレータ自体の性能調査用）
+  -stats           停止時に実行速度（命令/秒・実時間比・アイドルスキップの割合）を表示する
+  -no-idle-skip    アイドルループ（割り込み待ちのスピン）のスキップを無効にする。
+                   スキップしても実行結果は同一。-trace 指定時は自動で無効
   -history n       停止時に直前 n 命令を表示する (default 16, 0 = 無効)
   -watch lo[-hi]   物理アドレス範囲へのアクセス（RAM/MMIO）を PC 付きで表示する
                    （複数指定可。例: -watch 0x500F0000-0x500FFFFF）
@@ -141,6 +144,8 @@ func cmdRun(args []string) {
 	scriptPath := fs.String("script", "", "入力スクリプト")
 	snapSave := fs.String("snap-save", "", "f@t: 仮想時刻 t にスナップショットを f に保存")
 	snapLoad := fs.String("snap-load", "", "スナップショットから再開")
+	noIdleSkip := fs.Bool("no-idle-skip", false, "アイドルループのスキップを無効にする")
+	stats := fs.Bool("stats", false, "停止時に実行速度（命令/秒・実時間比）を表示する")
 	fs.BoolVar(&touchRaw, "touch-raw", false, "スクリプトのタッチ座標を ADC 生値として渡す（調査用）")
 	_ = fs.Parse(args)
 	if fs.NArg() > 1 || (fs.NArg() == 0 && *snapLoad == "") {
@@ -245,59 +250,52 @@ func cmdRun(args []string) {
 			fmt.Fprintln(os.Stderr, "cerulean:", err)
 		}
 	}
-	// 直前 N 命令のリングバッファ（停止原因の調査用）。
-	type histEntry struct {
-		pc, word, next uint32 // next は Thumb の BL 表示用の直後ハーフワード
-		thumb          bool
-	}
-	var (
-		hist    []histEntry
-		histPos int
-		histN   int // 記録した件数（len(hist) で頭打ち。再開直後は通算命令数より少ない）
-	)
-	if *history > 0 {
-		hist = make([]histEntry, *history)
-	}
+	// 直前 N 命令の履歴（停止原因の調査用）。記録は CPU コアが PC だけ持ち、
+	// 命令語は表示時に読む（毎命令のディスアセンブルを避けるため）。
+	c.SetHistory(*history)
 	dumpHistory := func() {
-		if hist == nil {
+		h := c.History()
+		if *history <= 0 {
 			return
 		}
-		n := histN
-		fmt.Fprintf(os.Stderr, "last %d instructions:\n", n)
-		for i := 0; i < n; i++ {
-			e := hist[(histPos+len(hist)-n+i)%len(hist)]
-			fmt.Fprintf(os.Stderr, "  PC=%08X  %s  %s\n", e.pc, fmtWord(e.word, e.thumb), disasm(e.word, e.next, e.pc, e.thumb))
+		fmt.Fprintf(os.Stderr, "last %d instructions:\n", len(h))
+		for _, e := range h {
+			word, next := peekAt(m, e.PC, e.Thumb)
+			fmt.Fprintf(os.Stderr, "  PC=%08X  %s  %s\n", e.PC, fmtWord(word, e.Thumb), disasm(word, next, e.PC, e.Thumb))
 		}
+	}
+	// トレース・監視はスキップした命令を表示できないので、アイドルスキップを
+	// 切る（-watch 中は MMU が RAM を直接持たないので元々スキップされない）。
+	if *noIdleSkip || *trace {
+		m.SetIdleSkip(false)
 	}
 
 	// stop は停止時の共通処理（レジスタ・履歴・画面の出力）。
+	started, startSteps := time.Now(), m.Steps()
 	stop := func() {
 		reportPA(m, c.PC())
 		dumpRegs(c)
 		dumpHistory() // どこでループしているかの調査用
 		dumpFB(*fbOut)
 		stopProfile()
+		if *stats {
+			el := time.Since(started).Seconds()
+			n := m.Steps() - startSteps
+			fmt.Fprintf(os.Stderr, "cerulean: %d steps in %.2fs (%.1fM steps/s, %.2fx real time, idle-skipped %.1f%%)\n",
+				n, el, float64(n)/el/1e6, float64(n)/float64(smdk2410.InstructionsPerSecond)/el,
+				100*float64(m.IdleSkipped())/float64(max(n, 1)))
+		}
 	}
 	// スクリプトのイベントは「その命令数に達した時点（次の命令の実行前）」に
-	// 適用する。nextAt は次のイベントの命令数（なければ最大値）で、
-	// 毎命令の判定を比較 1 回にするため。
+	// 適用する。実行は machine.RunUntil に任せ、次に止まるべき命令数
+	// （イベント・-sample・-fb-every・-max-steps・トレース開始のうち最も近いもの）
+	// までまとめて進める。
 	nextEv := 0
-	nextAt := func() uint64 {
-		if nextEv < len(events) {
-			return events[nextEv].Step
-		}
-		return math.MaxUint64
-	}()
 	for {
 		steps := m.Steps()
-		for steps >= nextAt {
+		for nextEv < len(events) && events[nextEv].Step <= steps {
 			ev := events[nextEv]
 			nextEv++
-			if nextEv < len(events) {
-				nextAt = events[nextEv].Step
-			} else {
-				nextAt = math.MaxUint64
-			}
 			quit, err := applyEvent(m, ev, imageID)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "cerulean: script line %d: %v\n", ev.Line, err)
@@ -310,23 +308,31 @@ func cmdRun(args []string) {
 				return
 			}
 		}
-		tracing := *trace && steps >= *traceFrom
-		if tracing || hist != nil {
-			// ディスアセンブル（文字列化）は重いので、履歴には生の命令語だけ
-			// 残して表示時に行う。
-			word, next, thumb := peekInstr(m, c)
-			if tracing {
+		target := uint64(math.MaxUint64)
+		if nextEv < len(events) {
+			target = events[nextEv].Step
+		}
+		if *sample != 0 {
+			target = min(target, (steps / *sample + 1)**sample)
+		}
+		if *fbEvery != 0 {
+			target = min(target, (steps / *fbEvery + 1)**fbEvery)
+		}
+		if *maxSteps != 0 {
+			target = min(target, *maxSteps)
+		}
+		if *trace {
+			if steps >= *traceFrom {
+				word, next, thumb := peekInstr(m, c)
 				fmt.Fprintf(os.Stderr, "%12d  PC=%08X  %s  %s\n", steps, c.PC(), fmtWord(word, thumb), disasm(word, next, c.PC(), thumb))
-			}
-			if hist != nil {
-				hist[histPos] = histEntry{pc: c.PC(), word: word, next: next, thumb: thumb}
-				histPos = (histPos + 1) % len(hist)
-				if histN < len(hist) {
-					histN++
-				}
+				target = steps + 1
+			} else {
+				target = min(target, *traceFrom)
 			}
 		}
-		if err := m.Step(); err != nil {
+		// 少なくとも 1 命令は進める（-max-steps が再開時点以下の場合など）。
+		target = max(target, steps+1)
+		if err := m.RunUntil(target); err != nil {
 			reportStop(c.PC(), m.Steps(), err)
 			stop()
 			os.Exit(1)
@@ -404,17 +410,23 @@ func dumpRegs(c interface{ Reg(int) uint32 }) {
 // フェッチ前なので副作用はない。Thumb 状態ならハーフワードとして取り出し、
 // BL の対を表示するため直後のハーフワードも返す。
 func peekInstr(m *smdk2410.Machine, c *arm.Core) (word, next uint32, thumb bool) {
-	pc := c.PC()
-	if !c.CPSR().T() {
+	thumb = c.CPSR().T()
+	word, next = peekAt(m, c.PC(), thumb)
+	return word, next, thumb
+}
+
+// peekAt は pc の命令語（Thumb ならハーフワードと直後のハーフワード）を読む。
+func peekAt(m *smdk2410.Machine, pc uint32, thumb bool) (word, next uint32) {
+	if !thumb {
 		word, _ = m.Peek32(pc)
-		return word, 0, false
+		return word, 0
 	}
 	w0, _ := m.Peek32(pc &^ 3)
 	if pc&2 == 0 {
-		return w0 & 0xFFFF, w0 >> 16, true
+		return w0 & 0xFFFF, w0 >> 16
 	}
 	w1, _ := m.Peek32(pc&^3 + 4)
-	return w0 >> 16, w1 & 0xFFFF, true
+	return w0 >> 16, w1 & 0xFFFF
 }
 
 func disasm(word, next, pc uint32, thumb bool) string {

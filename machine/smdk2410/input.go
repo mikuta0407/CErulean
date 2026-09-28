@@ -57,7 +57,7 @@ func (m *Machine) TouchDown(x, y int) error {
 		return err
 	}
 	xp, yp := touchToRaw(x, y)
-	m.adc.SetPen(true, xp, yp)
+	m.setPen(true, xp, yp)
 	return nil
 }
 
@@ -66,10 +66,20 @@ func (m *Machine) TouchDown(x, y int) error {
 func (m *Machine) TouchMove(x, y int) error { return m.TouchDown(x, y) }
 
 // TouchUp はペンを上げる（位置は最後の値のまま）。
-func (m *Machine) TouchUp() { m.adc.SetPenUp() }
+func (m *Machine) TouchUp() {
+	m.syncTime()
+	m.adc.SetPenUp()
+	m.updateDeadline()
+}
 
 // TouchRaw はタッチパネルの ADC 生値（0〜1023）を直接与える（調査用）。
 // down=false でペンアップ。
-func (m *Machine) TouchRaw(down bool, rawX, rawY uint32) {
+func (m *Machine) TouchRaw(down bool, rawX, rawY uint32) { m.setPen(down, rawX, rawY) }
+
+// setPen は ADC にペンの状態を渡す。ADC は時間を持つので、溜めた仮想時間を
+// 先に渡してから変える（run.go の timedDev と同じ理由）。
+func (m *Machine) setPen(down bool, rawX, rawY uint32) {
+	m.syncTime()
 	m.adc.SetPen(down, rawX, rawY)
+	m.updateDeadline()
 }

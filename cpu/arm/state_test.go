@@ -9,7 +9,8 @@ import (
 func TestCoreStateFields(t *testing.T) {
 	snapshottest.CheckFields(t, Core{},
 		[]string{"regs", "cpsr", "spsr", "bankR8Usr", "bankR8Fiq", "bankR13", "bankR14", "irq", "fiq"},
-		[]string{"mem", "cp15", "fetch32"})
+		// spinHint は実行ループが毎命令消費する一時値、hist* はデバッグ用の記録。
+		[]string{"mem", "cp15", "fetch32", "prober", "spinHint", "hist", "histPos", "histN"})
 }
 
 func TestCoreStateRoundTrip(t *testing.T) {

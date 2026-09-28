@@ -59,6 +59,14 @@ type Machine struct {
 	// 時刻照合とスナップショット復元後の時間の継続に使う。
 	steps uint64
 
+	// 実行ループの作業領域（run.go。いずれも保存しない）:
+	// pending はデバイスにまだ渡していない PCLK ティック、deadline は
+	// 次のデバイスイベントまでのティック数（s3c2410.NoEvent なら予定なし）。
+	pending, deadline int64
+	idleSkip          bool          // アイドルスキップを行うか（既定 true）
+	poll              pollCandidate // ポーリングループの 1 周前の観測
+	skipped           uint64        // スキップした命令数の累計（計測用）
+
 	entryPA uint32 // リセット時に飛ぶ物理アドレス
 }
 
@@ -130,7 +138,7 @@ func New(uartOut io.Writer) (*Machine, error) {
 	}
 	// 割り込みコントローラとタイマーは実動作（machine が CPU へ配線する）。
 	// m の cpu は後で組み立てるため、コールバックはクロージャで遅延参照する。
-	m := &Machine{}
+	m := &Machine{deadline: s3c2410.NoEvent, idleSkip: true}
 	m.intc = s3c2410.NewINTC(func(irq, fiq bool) {
 		m.cpu.SetIRQ(irq)
 		m.cpu.SetFIQ(fiq)
@@ -141,7 +149,7 @@ func New(uartOut io.Writer) (*Machine, error) {
 	if err := b.MapMMIO("intc", 0x4A000000, 0x1000, m.intc); err != nil {
 		return nil, err
 	}
-	if err := b.MapMMIO("timer", 0x51000000, 0x1000, m.timer); err != nil {
+	if err := b.MapMMIO("timer", 0x51000000, 0x1000, timedDev{m, m.timer}); err != nil {
 		return nil, err
 	}
 	// LCD コントローラ: レジスタからフレームバッファの位置・形式を解釈する。
@@ -151,14 +159,14 @@ func New(uartOut io.Writer) (*Machine, error) {
 	}
 	// RTC: 時刻は仮想時間で進む（Step 参照）。初期時刻は SetRTC で与える。
 	m.rtc = s3c2410.NewRTC(pclkHz)
-	if err := b.MapMMIO("rtc", 0x57000000, 0x1000, m.rtc); err != nil {
+	if err := b.MapMMIO("rtc", 0x57000000, 0x1000, timedDev{m, m.rtc}); err != nil {
 		return nil, err
 	}
 	// ADC/タッチスクリーン: touch.dll がこれを使う（2026-09 に実測。
 	// GPGCON で GPG12〜15 をタッチ用に切り替え、ADCTSC=0xD3 で
 	// 割り込み待ちにする）。割り込みは INT_ADC のサブソース INT_TC/INT_ADC。
 	m.adc = s3c2410.NewADC(func(sub uint) { m.intc.RaiseSub(sub) })
-	if err := b.MapMMIO("adc", 0x58000000, 0x1000, m.adc); err != nil {
+	if err := b.MapMMIO("adc", 0x58000000, 0x1000, timedDev{m, m.adc}); err != nil {
 		return nil, err
 	}
 	// SPI: SPI1 にキーボード用マイコンがつながる（kbd.go）。
@@ -317,22 +325,10 @@ func (m *Machine) LoadImage(img *loader.Image) error {
 func (m *Machine) Reset() {
 	m.cpu.Reset(m.entryPA)
 	m.steps = 0
+	m.poll = pollCandidate{}
+	m.updateDeadline()
 }
 
 // Steps はリセット（またはスナップショットの保存時点から継続して）
 // からの実行命令数。
 func (m *Machine) Steps() uint64 { return m.steps }
-
-func (m *Machine) Step() error {
-	err := m.cpu.Step()
-	m.steps++
-	// 仮想時間を進める: 1 命令 = pclkTicksNum/8 PCLK ティック。
-	m.tickAcc += pclkTicksNum
-	if t := m.tickAcc >> 3; t > 0 {
-		m.tickAcc &= 7
-		m.timer.Advance(int64(t))
-		m.rtc.Advance(int64(t))
-		m.adc.Advance(int64(t))
-	}
-	return err
-}

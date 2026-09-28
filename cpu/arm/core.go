@@ -67,6 +67,9 @@ type Core struct {
 	// 実装していればそれ（MMU 有効化直後のパイプライン近似のため）、
 	// なければ mem.Read32。
 	fetch32 func(addr uint32) (uint32, error)
+	// prober は mem が cpu.Prober を実装していればそれ（アイドルループ検出用。
+	// なければ検出しない）。
+	prober cpu.Prober
 
 	// regs は現在のモードから見えるレジスタ。regs[15] = PC。
 	// モード切替時に bankR13/bankR14（FIQ は bankR8Fiq も）と入れ替える。
@@ -82,6 +85,16 @@ type Core struct {
 	bankR14   [numBanks]uint32
 
 	irq, fiq bool // 割り込み線のレベル（マイルストーン1では参照のみ）
+
+	// spinHint は「直前の命令が 3 命令ループ先頭への後方分岐だった」印
+	// （idle.go）。実行ループ（machine）が毎命令見て消費する一時的な値。
+	spinHint bool
+
+	// hist は直前に実行を始めた命令の記録（デバッグ用のリングバッファ。
+	// SetHistory で有効化。nil なら記録しない）。
+	hist    []uint32 // PC | Thumb(bit0)。長さは 2 のべき乗
+	histPos uint64   // 次に書く位置（通算。添字は len-1 でマスク）
+	histN   int      // 表示する件数
 }
 
 var _ cpu.CPU = (*Core)(nil)
@@ -95,6 +108,7 @@ func New(mem cpu.Memory, cp15 Coprocessor) *Core {
 	} else {
 		c.fetch32 = mem.Read32
 	}
+	c.prober, _ = mem.(cpu.Prober)
 	return c
 }
 
@@ -102,7 +116,9 @@ func New(mem cpu.Memory, cp15 Coprocessor) *Core {
 // TODO: 本来のリセットはベクタ 0x00000000 へ飛ぶが、Device Emulator 同様に
 // ローダーが決めたエントリポイントから直接開始する。実イメージで問題が出たら見直す。
 func (c *Core) Reset(pc uint32) {
-	*c = Core{mem: c.mem, cp15: c.cp15, fetch32: c.fetch32}
+	histLen := c.histN
+	*c = Core{mem: c.mem, cp15: c.cp15, fetch32: c.fetch32, prober: c.prober}
+	c.SetHistory(histLen) // 履歴の設定は保つ（中身は空にする）
 	c.cpsr = PSR(ModeSvc) | FlagI | FlagF
 	c.regs[15] = pc
 	if c.cp15 != nil {
@@ -151,6 +167,9 @@ func (e *UndefinedError) Error() string {
 // 物理アドレス等）は PC を命令の位置に戻してエラーを返す
 // （レジスタ・メモリの部分的な副作用までは巻き戻さない）。
 func (c *Core) Step() error {
+	if c.hist != nil {
+		c.recordHistory()
+	}
 	// 割り込みは命令境界で受け付ける。FIQ が IRQ より優先（ARM ARM A2.6）。
 	// 復帰先は「実行されなかった命令」なので LR = その PC+4
 	// （ハンドラは SUBS pc, lr, #4 で戻る）。

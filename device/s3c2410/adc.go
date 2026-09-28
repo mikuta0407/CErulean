@@ -143,6 +143,15 @@ func (a *ADC) start() {
 	a.converting = a.conversionTicks()
 }
 
+// NextEvent は変換完了まであと何ティックか（変換中でなければ NoEvent）。
+// PWMTimer.NextEvent と同じく machine の Advance まとめ用。
+func (a *ADC) NextEvent() int64 {
+	if a.converting == 0 {
+		return NoEvent
+	}
+	return max(a.converting, 1)
+}
+
 // Advance は仮想時間を PCLK ティック数だけ進める（変換の完了判定）。
 func (a *ADC) Advance(ticks int64) {
 	if a.converting == 0 {

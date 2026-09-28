@@ -77,3 +77,14 @@ func (e *AbortError) Error() string {
 	}
 	return fmt.Sprintf("abort: %s at VA=%08X (status=%X domain=%X)", kind, e.VA, e.Status, e.Domain)
 }
+
+// Prober は Memory 実装が「状態を変えずに読める場合だけ読む」手段を
+// 提供する任意 interface。CPU のアイドルループ検出（arm.Core.PollLoop）が、
+// ループの命令とロード先を実際のアクセスと同じ経路で確かめるのに使う。
+//
+// ok=true を返すのは、同じアクセスを実際に行っても Memory 側の状態
+// （ソフト TLB・フェッチ猶予・監視の表示など）が一切変わらない場合だけ。
+// そうでなければ（TLB ミス・MMIO・監視中など）ok=false を返す。
+type Prober interface {
+	Probe32(addr uint32, fetch bool) (v uint32, ok bool)
+}
