@@ -7,6 +7,9 @@
 //! 呼び出し側（cli・web）から渡す。wasm32 でも同じ結果になるよう、ゲストの値と
 //! カウンタは明示の幅（u32/u64）で持ち、`usize` は添字にだけ使う。
 
+pub mod bus;
+pub mod loader;
+
 /// 仮想時間 1 秒あたりの命令数（Go の smdk2410.InstructionsPerSecond）。
 /// PCLK 50.7MHz、1 命令 = 3/8 PCLK から 50_700_000 × 8 / 3。
 pub const INSTRUCTIONS_PER_SECOND: u64 = 135_200_000;
