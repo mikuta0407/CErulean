@@ -1,0 +1,7 @@
+# boot-today の続きで Start → Calendar → 右キー（today-calendar.script）。
+image=$CERULEAN_IMAGE
+image_sha256=7e5476179912538d9ce1bd4e03fadb966e4e4e3f5cf7213e98c69b487376d840
+rtc=2006-01-02T15:04:05
+script=today-calendar.script
+max_steps=4316660000
+checkpoints=3600000000 3748820000 4032740000

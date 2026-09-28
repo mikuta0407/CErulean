@@ -1,0 +1,7 @@
+# boot-today の続きでタップ 5 回: Start → Settings → System タブ → About → ok（taps-5.script）。
+image=$CERULEAN_IMAGE
+image_sha256=7e5476179912538d9ce1bd4e03fadb966e4e4e3f5cf7213e98c69b487376d840
+rtc=2006-01-02T15:04:05
+script=taps-5.script
+max_steps=5154900000
+checkpoints=3600000000 3748820000 4167940000 4451860000 4870980000

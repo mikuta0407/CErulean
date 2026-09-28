@@ -1,0 +1,5 @@
+# 合成: ADC の変換完了を MMIO でポーリング（synthetic/adc-poll.words）。
+image=synthetic/adc-poll.words
+rtc=2006-01-02T15:04:05
+max_steps=1000000
+checkpoints=100000 500000

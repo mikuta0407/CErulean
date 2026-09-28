@@ -1,0 +1,10 @@
+# today-calendar: Today 画面（36 億命令）の後に Start → Calendar → 右キー。
+# 元の相対表記（押下時間は既定の 100ms = 13,520,000 命令）:
+#   @3600100000i tap 20 10 / +1s tap 50 52 / +2s press Right
+# 基準シナリオは絶対命令数だけを使う（testdata/golden/README.md）。
+@3600100000i down 20 10     # Start
+@3613620000i up
+@3748820000i down 50 52     # Start メニューの Calendar
+@3762340000i up
+@4032740000i key down Right # 翌日へ
+@4046260000i key up Right
