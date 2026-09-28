@@ -7,6 +7,7 @@
 //! 呼び出し側（cli・web）から渡す。wasm32 でも同じ結果になるよう、ゲストの値と
 //! カウンタは明示の幅（u32/u64）で持ち、`usize` は添字にだけ使う。
 
+pub mod arm;
 pub mod bus;
 pub mod cpu;
 pub mod loader;
