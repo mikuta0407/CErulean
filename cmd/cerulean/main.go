@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"image/png"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime/pprof"
@@ -25,6 +26,8 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `Usage:
   cerulean info <image>                 イメージの情報を表示する
   cerulean run [flags] <image>          イメージを実行する
+  cerulean run -snap-load f [flags] [image]
+                                        スナップショットから再開する
 
 run flags:
   -machine name    マシン構成 (default "smdk2410")
@@ -41,6 +44,11 @@ run flags:
   -watch lo[-hi]   物理アドレス範囲へのアクセス（RAM/MMIO）を PC 付きで表示する
                    （複数指定可。例: -watch 0x500F0000-0x500FFFFF）
   -nb0-base addr   .nb0 イメージのロード先アドレス (default 0x30000000)
+  -script f        入力スクリプト（タップ・キー・画面保存を仮想時刻で並べたもの。
+                   書式は script パッケージのコメント参照）
+  -snap-save f@t   仮想時刻 t（例 95s, 3500000000i）に全状態を f に保存する
+  -snap-load f     スナップショット f から再開する（命令数・仮想時刻は保存時点から
+                   継続）。image を指定すると保存時のイメージと同一かを照合する
 `)
 	os.Exit(2)
 }
@@ -129,9 +137,15 @@ func cmdRun(args []string) {
 	fs.Var(&watches, "watch", "監視する物理アドレス範囲 lo[-hi]（複数可）")
 	history := fs.Int("history", 16, "停止時に表示する直前の命令数 (0 = 無効)")
 	nb0Base := fs.Uint64("nb0-base", defaultNB0Base, ".nb0 のロード先アドレス")
+	scriptPath := fs.String("script", "", "入力スクリプト")
+	snapSave := fs.String("snap-save", "", "f@t: 仮想時刻 t にスナップショットを f に保存")
+	snapLoad := fs.String("snap-load", "", "スナップショットから再開")
 	_ = fs.Parse(args)
-	if fs.NArg() != 1 {
+	if fs.NArg() > 1 || (fs.NArg() == 0 && *snapLoad == "") {
 		usage()
+	}
+	if *snapLoad != "" && *rtcFlag != "" {
+		fatal(errors.New("-rtc cannot be used with -snap-load (the RTC state comes from the snapshot)"))
 	}
 
 	if *cpuprofile != "" {
@@ -157,23 +171,50 @@ func cmdRun(args []string) {
 		fatal(err)
 	}
 
-	img, err := loader.Load(fs.Arg(0), uint32(*nb0Base))
+	// imageID は元イメージの SHA-256。スナップショットに記録し、再開時に
+	// 別イメージと取り違えていないかの照合に使う。
+	var imageID string
+	if fs.NArg() == 1 {
+		if imageID, err = fileSHA256(fs.Arg(0)); err != nil {
+			fatal(err)
+		}
+	}
+	if *snapLoad != "" {
+		id, err := loadSnapshot(m, *snapLoad)
+		if err != nil {
+			fatal(err)
+		}
+		if imageID != "" && id != imageID {
+			fatal(fmt.Errorf("-snap-load: snapshot was taken with a different image (sha256 %s, %s is %s)",
+				id, fs.Arg(0), imageID))
+		}
+		imageID = id
+		fmt.Fprintf(os.Stderr, "cerulean: %s: resumed from %s at step %d, PC %08X\n",
+			m.Name(), *snapLoad, m.Steps(), m.CPU().PC())
+	} else {
+		img, err := loader.Load(fs.Arg(0), uint32(*nb0Base))
+		if err != nil {
+			fatal(err)
+		}
+		if err := m.LoadImage(img); err != nil {
+			fatal(err)
+		}
+		rtcTime := time.Now()
+		if *rtcFlag != "" {
+			if rtcTime, err = time.ParseInLocation("2006-01-02T15:04:05", *rtcFlag, time.Local); err != nil {
+				fatal(fmt.Errorf("-rtc: %w", err))
+			}
+		}
+		m.SetRTC(rtcTime)
+		m.Reset()
+		fmt.Fprintf(os.Stderr, "cerulean: %s: loaded %s image, entry %08X (PA %08X)\n",
+			m.Name(), img.Format, img.Entry, m.CPU().PC())
+	}
+
+	events, err := buildEvents(*scriptPath, *snapSave, m.Steps())
 	if err != nil {
 		fatal(err)
 	}
-	if err := m.LoadImage(img); err != nil {
-		fatal(err)
-	}
-	rtcTime := time.Now()
-	if *rtcFlag != "" {
-		if rtcTime, err = time.ParseInLocation("2006-01-02T15:04:05", *rtcFlag, time.Local); err != nil {
-			fatal(fmt.Errorf("-rtc: %w", err))
-		}
-	}
-	m.SetRTC(rtcTime)
-	m.Reset()
-	fmt.Fprintf(os.Stderr, "cerulean: %s: loaded %s image, entry %08X (PA %08X)\n",
-		m.Name(), img.Format, img.Entry, m.CPU().PC())
 
 	// トレースで CPSR（Thumb 状態）を見るため具象型で持つ（cmd は arm に依存してよい）。
 	c := m.CPU().(*arm.Core)
@@ -188,7 +229,6 @@ func cmdRun(args []string) {
 			fmt.Fprintln(os.Stderr, "cerulean:", err)
 		}
 	}
-	var steps uint64
 	for _, w := range watches {
 		// PC は実行中の命令の次（ARM: +4 / Thumb: +2）を指している。
 		m.Bus().AddWatch(w.lo, w.hi, func(region string, addr uint32, size int, v uint32, write bool) {
@@ -197,7 +237,7 @@ func cmdRun(args []string) {
 				kind = "W"
 			}
 			fmt.Fprintf(os.Stderr, "%12d  watch %s%d %-10s PA=%08X v=%08X  (next PC=%08X)\n",
-				steps, kind, size*8, region, addr, v, c.PC())
+				m.Steps(), kind, size*8, region, addr, v, c.PC())
 		})
 	}
 	// 直前 N 命令のリングバッファ（停止原因の調査用）。
@@ -227,7 +267,46 @@ func cmdRun(args []string) {
 		}
 	}
 
+	// stop は停止時の共通処理（レジスタ・履歴・画面の出力）。
+	stop := func() {
+		reportPA(m, c.PC())
+		dumpRegs(c)
+		dumpHistory(m.Steps()) // どこでループしているかの調査用
+		dumpFB(*fbOut)
+		stopProfile()
+	}
+	// スクリプトのイベントは「その命令数に達した時点（次の命令の実行前）」に
+	// 適用する。nextAt は次のイベントの命令数（なければ最大値）で、
+	// 毎命令の判定を比較 1 回にするため。
+	nextEv := 0
+	nextAt := func() uint64 {
+		if nextEv < len(events) {
+			return events[nextEv].Step
+		}
+		return math.MaxUint64
+	}()
 	for {
+		steps := m.Steps()
+		for steps >= nextAt {
+			ev := events[nextEv]
+			nextEv++
+			if nextEv < len(events) {
+				nextAt = events[nextEv].Step
+			} else {
+				nextAt = math.MaxUint64
+			}
+			quit, err := applyEvent(m, ev, imageID)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "cerulean: script line %d: %v\n", ev.Line, err)
+				stop()
+				os.Exit(1)
+			}
+			if quit {
+				fmt.Fprintf(os.Stderr, "cerulean: stopped after %d steps at PC=%08X (script quit)\n", steps, c.PC())
+				stop()
+				return
+			}
+		}
 		tracing := *trace && steps >= *traceFrom
 		if tracing || hist != nil {
 			// ディスアセンブル（文字列化）は重いので、履歴には生の命令語だけ
@@ -242,16 +321,11 @@ func cmdRun(args []string) {
 			}
 		}
 		if err := m.Step(); err != nil {
-			steps++
-			reportStop(c.PC(), steps, err)
-			reportPA(m, c.PC())
-			dumpRegs(c)
-			dumpHistory(steps)
-			dumpFB(*fbOut)
-			stopProfile()
+			reportStop(c.PC(), m.Steps(), err)
+			stop()
 			os.Exit(1)
 		}
-		steps++
+		steps = m.Steps()
 		if *sample != 0 && steps%*sample == 0 {
 			fmt.Fprintf(os.Stderr, "%12d  sample PC=%08X CPSR=%08X\n", steps, c.PC(), uint32(c.CPSR()))
 		}
@@ -260,11 +334,7 @@ func cmdRun(args []string) {
 		}
 		if *maxSteps != 0 && steps >= *maxSteps {
 			fmt.Fprintf(os.Stderr, "cerulean: stopped after %d steps at PC=%08X (max-steps)\n", steps, c.PC())
-			reportPA(m, c.PC())
-			dumpRegs(c)
-			dumpHistory(steps) // どこでループしているかの調査用
-			dumpFB(*fbOut)
-			stopProfile()
+			stop()
 			return
 		}
 	}
