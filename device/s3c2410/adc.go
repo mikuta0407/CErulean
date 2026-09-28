@@ -33,14 +33,21 @@ import "github.com/mikuta0407/cerulean/bus"
 // 確認）。Device Emulator の ADC は bit8 を S3C2440 の UD_SEN と同じ意味で
 // 実装していると判断し、それに合わせる。
 //
-// TODO: 以下はデータシート原本と要照合（記憶ベース）:
-//   - レジスタのビット配置全般、ADCCON のリセット値 0x3FC4
-//   - 変換時間（ここでは (PRSCVL+1)×5 PCLK。プリスケーラ無効時は 5 PCLK）
-//   - ADCDLY の意味（自動変換前の遅延か、どのクロックで数えるか）。未使用
-//   - 割り込み待ちモードに入った時点（または UD_SEN を切り替えた時点）で既に
-//     検出対象の状態なら INT_TC が出るか。ここでは出す（比較器の出力は
-//     レベルなので、と判断）。こうしないと、サンプリング中（ADCTSC=0xDC の
-//     間）にペンが上がった場合にペンアップを取りこぼす。
+// 根拠: S3C2410X User's Manual Rev 1.1 の Ch.16（レジスタ配置・リセット値・
+// 変換時間・ADCDLY は確認済み）。ADCTSC の bit8 はマニュアルでは「予約（0 に
+// すること）」で、上記の UD_SEN の意味は Device Emulator 独自と判断した。
+//
+// 変換時間: 1 回の測定 = ADCDLY の遅延（変換中は PCLK で数える。Figure 16-3）
+// ＋ 5 ADC クロック（ADC クロック = PCLK/(PRSCVL+1)。「50MHz/(49+1)=1MHz、
+// 5 サイクルで 5us」の記述）。自動（逐次）モードは X と Y の 2 回分。
+//
+// TODO: 未確認・未実装:
+//   - プリスケーラ無効（PRSCEN=0）時の ADC クロック（ここでは PCLK として 5 PCLK）
+//   - 割り込み待ちモードでペンダウン中に ADCDLY 間隔で INT_TC を繰り返す動作
+//     （ADCDLY の説明にある。touch.dll は Timer3 でサンプリングするので未実装）
+//   - 割り込み待ちに入った時点で既に検出対象の状態なら INT_TC を出す（レベル扱い）
+//     のは判断。こうしないと、サンプリング中（ADCTSC=0xDC の間）にペンが上がった
+//     場合にペンアップを取りこぼす。
 type ADC struct {
 	adccon, adctsc, adcdly uint32
 	dat0, dat1             uint32 // 変換結果（下位 10 ビット）
@@ -82,7 +89,7 @@ const (
 // NewADC は raiseSub でサブソース（SubTC/SubADC）を通知する ADC を作る。
 func NewADC(raiseSub func(sub uint)) *ADC {
 	return &ADC{
-		adccon:   0x3FC4, // リセット値（TODO: 要照合）
+		adccon:   0x3FC4, // リセット値（マニュアルで確認済み）
 		adctsc:   0x58,
 		adcdly:   0xFF,
 		raiseSub: raiseSub,
@@ -118,11 +125,17 @@ func (a *ADC) raise(sub uint) {
 	}
 }
 
+// conversionTicks は変換開始から完了までの PCLK ティック数（型コメント参照）。
 func (a *ADC) conversionTicks() int64 {
-	if a.adccon&adcconPRSCEN == 0 {
-		return 5
+	conv := int64(5)
+	if a.adccon&adcconPRSCEN != 0 {
+		conv = int64((a.adccon>>6)&0xFF+1) * 5
 	}
-	return int64((a.adccon>>6)&0xFF+1) * 5
+	one := int64(a.adcdly) + conv
+	if a.adctsc&adctscAutoPST != 0 {
+		return 2 * one // X と Y を順に測る
+	}
+	return one
 }
 
 func (a *ADC) start() {

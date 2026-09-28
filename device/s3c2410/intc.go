@@ -37,7 +37,7 @@ const (
 	IntDMA1   = 18
 	IntDMA2   = 19
 	IntDMA3   = 20
-	IntSPI0   = 22 // TODO: ビット番号はデータシートと要照合
+	IntSPI0   = 22 // SPI0/1 のビット番号は User's Manual Rev 1.1 で確認済み
 	IntUART1  = 23
 	IntUART0  = 28
 	IntSPI1   = 29

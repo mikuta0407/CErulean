@@ -29,8 +29,8 @@ import (
 //	0x1C LCDSADDR3 OFFSIZE[21:11] PAGEWIDTH[10:0]（いずれもハーフワード単位）
 //	0x400〜0x7FC   パレット（256 エントリ）
 //
-// TODO: 上記ビット配置は S3C2410 データシート Ch.15 の記憶に基づく。
-// 原本と要照合（特に LCDCON5 の BSWP/HWSWP と 16bpp のピクセル順）。
+// 上記ビット配置と、16bpp で HWSWP=1 なら下位ハーフワードが左ピクセル
+// （Figure 15-5）であることは User's Manual Rev 1.1 の Ch.15 で確認済み。
 type LCD struct {
 	regs    [0x70 / 4]uint32 // 0x00〜0x6C
 	palette [256]uint32

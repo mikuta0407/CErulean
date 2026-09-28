@@ -14,7 +14,7 @@ import "github.com/mikuta0407/cerulean/bus"
 //     「CURR_TC != 0（転送中）」をポーリングするため、0 だとハングする。
 //   - DMASKTRIG の ON_OFF(bit1) が書かれたら、そのチャネルの完了割り込みを
 //     即座に上げる。カーネルが DMA ISR の立てるフラグをスピンで待つため。
-//     TODO: ON_OFF のビット位置（bit1）はデータシートと要再照合。
+//     ON_OFF が bit1 なのは User's Manual Rev 1.1 の DMASKTRIGn で確認済み。
 //
 // TODO: 実 DMA（メモリ↔IIS 等の転送）はオーディオ対応時に実装する。
 // 「CURR_TC == 0（完了）」のポーリングが現れたらこのモデルでは破綻する。

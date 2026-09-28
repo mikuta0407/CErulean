@@ -91,10 +91,11 @@ func TestADCConversion(t *testing.T) {
 		name             string
 		adctsc           uint32
 		wantDat0, wantD1 uint32 // 下位 10 ビット
+		wantTicks        int64  // 変換時間（ADCDLY=100、PRSCVL=49 → 1 回 100+250）
 	}{
-		{"auto sequential X/Y", 0x0C, 0x123, 0x2AB},
-		{"X only", 0x69, 0x123, 0},
-		{"Y only", 0x9A, 0, 0x2AB},
+		{"auto sequential X/Y", 0x0C, 0x123, 0x2AB, 700},
+		{"X only", 0x69, 0x123, 0, 350},
+		{"Y only", 0x9A, 0, 0x2AB, 350},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -102,11 +103,12 @@ func TestADCConversion(t *testing.T) {
 			a := NewADC(log.raise)
 			a.SetPen(true, 0x123, 0x2AB)
 			a.Write(regADCTSC, 4, tt.adctsc)
+			a.Write(regADCDLY, 4, 100)
 			a.Write(regADCCON, 4, adcconPRSCEN|49<<6|adcconENABLESTART)
 			if v := a.Read(regADCCON, 4); v&adcconECFLG != 0 || v&adcconENABLESTART != 0 {
 				t.Fatalf("ADCCON right after start = %08X (want ECFLG=0, ENABLE_START cleared)", v)
 			}
-			a.Advance(249) // (49+1)*5 = 250 ティックで完了
+			a.Advance(tt.wantTicks - 1)
 			if a.Read(regADCCON, 4)&adcconECFLG != 0 || len(log) != 0 {
 				t.Fatal("conversion completed too early")
 			}
@@ -145,9 +147,10 @@ func TestADCPenUpFlag(t *testing.T) {
 
 func TestADCReadStart(t *testing.T) {
 	a := NewADC(nil)
-	a.Write(regADCCON, 4, adcconREADSTART) // プリスケーラ無効: 5 ティック
+	a.Write(regADCDLY, 4, 10)
+	a.Write(regADCCON, 4, adcconREADSTART) // プリスケーラ無効: 10+5 ティック
 	a.Read(regADCDAT0, 4)
-	a.Advance(5)
+	a.Advance(15)
 	if a.Read(regADCCON, 4)&adcconECFLG == 0 {
 		t.Error("reading ADCDAT0 with READ_START did not start a conversion")
 	}

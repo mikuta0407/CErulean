@@ -111,7 +111,8 @@ func TestTimer4PeriodicInterrupt(t *testing.T) {
 	var fired []int
 	tm := NewPWMTimer(func(n int) { fired = append(fired, n) })
 
-	// PCLK/2、プリスケーラ 0 → 1 カウント = 2 PCLK。TCNTB4=100 → 周期 200 PCLK。
+	// PCLK/2、プリスケーラ 0 → 1 カウント = 2 PCLK。TCNTB4=100 → 最初の満了は
+	// 100 カウント（200 PCLK）後、以降の周期は TCNTB+1 = 101 カウント（202 PCLK）。
 	tm.Write(regTCFG0, 4, 0)
 	tm.Write(regTCFG1, 4, 0)
 	tm.Write(0x3C, 4, 100)            // TCNTB4
@@ -126,8 +127,16 @@ func TestTimer4PeriodicInterrupt(t *testing.T) {
 	if len(fired) != 1 || fired[0] != 4 {
 		t.Fatalf("fired = %v, want [4]", fired)
 	}
-	// 自動リロードで周期的に発火する
-	tm.Advance(400)
+	// 自動リロードで周期的に発火する（周期 202 PCLK）
+	tm.Advance(201)
+	if len(fired) != 1 {
+		t.Fatalf("fired = %v after 401 PCLK, want still 1 (period is TCNTB+1 counts)", fired)
+	}
+	tm.Advance(1)
+	if len(fired) != 2 {
+		t.Fatalf("fired = %v after 402 PCLK, want 2", fired)
+	}
+	tm.Advance(202)
 	if len(fired) != 3 {
 		t.Fatalf("fired = %v, want 3 total", fired)
 	}

@@ -79,7 +79,9 @@ const InstructionsPerSecond = pclkHz * 8 / pclkTicksNum
 // ((PDIV+2)×2^SDIV)、Fin=12MHz（SMDK2410 の水晶）で FCLK=202.8MHz、
 // CLKDIVN=3 で PCLK=FCLK/4=50.7MHz。カーネルの Timer4（TCNTB4=25375・1/2 分周）
 // がこれで約 1ms 周期になることとも整合する。
-// TODO: PLL の式と Fin はデータシート・ボード資料と要照合。
+// PLL の式は User's Manual Rev 1.1 の Ch.7 で確認済み（推奨値表にも
+// Fin=12MHz・MDIV=161/PDIV=3/SDIV=1 → 202.80MHz がある）。
+// TODO: Fin=12MHz はボード資料で未確認（推奨値表と整合するので妥当）。
 const pclkHz = 50_700_000
 
 var _ machine.Machine = (*Machine)(nil)
@@ -177,9 +179,9 @@ func New(uartOut io.Writer) (*Machine, error) {
 		{"memc", 0x48000000, nil}, // メモリコントローラ（BWSCON など）
 		{"usbhost", 0x49000000, nil},
 		{"clkpwr", 0x4C000000, map[uint32]uint32{ // クロック・電源管理
-			// リセット値（データシート Ch.7）。カーネルが PLL 設定から
-			// クロックを逆算する場合に 0 だと壊れるため入れておく。
-			// TODO: データシート原本と再照合する（記憶ベースの値）。
+			// リセット値（User's Manual Rev 1.1 の Ch.7 で確認済み）。
+			// カーネルが PLL 設定からクロックを逆算する場合に 0 だと
+			// 壊れるため入れておく。
 			0x00: 0x00FFFFFF, // LOCKTIME
 			0x04: 0x0005C080, // MPLLCON
 			0x08: 0x00028080, // UPLLCON
@@ -188,14 +190,14 @@ func New(uartOut io.Writer) (*Machine, error) {
 		}},
 		{"nand", 0x4E000000, nil}, // NAND フラッシュコントローラ
 		{"wdt", 0x53000000, map[uint32]uint32{
-			0x00: 0x8021, // WTCON リセット値。TODO: データシートと再照合
+			0x00: 0x8021, // WTCON リセット値（User's Manual Rev 1.1 で確認済み）
 		}},
 		{"iic", 0x54000000, nil},
 		{"usbdev", 0x52000000, nil},
 		{"sdi", 0x5A000000, nil},
 		{"gpio", 0x56000000, map[uint32]uint32{
 			// GSTATUS1: チップ ID。BSP が SoC 判別に読む可能性がある。
-			// TODO: データシートと再照合（0x32410000 = S3C2410 のはず）
+			// 0x32410000（User's Manual Rev 1.1 で確認済み）
 			0xB0: 0x32410000,
 		}},
 	} {

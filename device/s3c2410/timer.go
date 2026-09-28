@@ -66,15 +66,13 @@ func (t *PWMTimer) scale(n int) int64 {
 	return int64(presc+1) * div
 }
 
-// period は自動リロード 1 周期分の PCLK ティック数。
-// TODO: 実機の周期が TCNTB か TCNTB+1 かはデータシートの波形図で要確認。
-// ここでは TCNTB カウント（0 なら 1）としている。ずれても 1 カウント。
+// period は自動リロード 1 周期分の PCLK ティック数 = (TCNTB+1) カウント。
+// 根拠: S3C2410X User's Manual Rev 1.1 の Figure 10-2（TCNTB=3 で TCNT が
+// 3→2→1→0 と進み、0 の 1 カウントの後にリロード）と、最大間隔の表
+// （65535 で 65536 カウント分）。マニュアルアップデート直後の最初の満了は
+// TCNTB カウント後（TCNT=TCNTB から 0 に達した時点で割り込み）。
 func (t *PWMTimer) period(n int) int64 {
-	c := int64(t.tcntb[n])
-	if c <= 0 {
-		c = 1
-	}
-	return c * t.scale(n)
+	return (int64(t.tcntb[n]) + 1) * t.scale(n)
 }
 
 // Advance は仮想時間を PCLK ティック数だけ進め、満了したタイマーの

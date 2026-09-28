@@ -20,9 +20,10 @@ import "github.com/mikuta0407/cerulean/bus"
 // 常に REDY=1 にする理由: ブート時にドライバが SPSTA1 の REDY をポーリング
 // するため（2026-09 に実測。以前は値保持スタブで REDY を立てていた）。
 //
-// TODO: データシート原本と要照合（記憶ベース）: レジスタ配置・SMOD の値の
-// 意味・INT_SPI0/1 のビット番号（22/29）。DMA モード（SMOD=10）と
-// スレーブモード、TAGD（自動ガベージ送信）、DCOL/MULF は未実装。
+// レジスタ配置・SMOD（00 ポーリング/01 割り込み/10 DMA）・リセット値・
+// INT_SPI0/1（22/29）は User's Manual Rev 1.1 の Ch.22・Ch.14 で確認済み。
+// TODO: DMA モード（SMOD=10）とスレーブモード、TAGD（自動ガベージ送信）、
+// DCOL/MULF は未実装。
 type SPI struct {
 	ch [2]spiChannel
 
@@ -60,7 +61,7 @@ const (
 func NewSPI(raise func(ch int)) *SPI {
 	s := &SPI{raise: raise}
 	for i := range s.ch {
-		// リセット値（TODO: 要照合）。SPPIN の KEEP=1・bit1=1。
+		// リセット値 0x02（KEEP[0]=0、予約 bit1 は「1 にすること」）。
 		s.ch[i].sppin = 0x02
 	}
 	return s
