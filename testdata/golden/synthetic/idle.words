@@ -1,0 +1,77 @@
+# idle: WinCE の OAL と同じ形のアイドル待ちをする合成プログラム
+# （元は machine/smdk2410/run_test.go の idleProgram）。
+# MMU を有効にして VA 0（例外ベクタ）を RAM に割り当て、Timer4 の割り込み
+# （約 5339 命令周期）を許可したうえで、RAM 上のフラグを LDR/CMP/BEQ の
+# 3 命令ループで待つ。IRQ ハンドラがフラグを立て、ループを抜けた側が
+# カウンタ（PA 0x30001004）を増やしてまた待つ。
+#
+# 物理配置: 0x30000000 ベクタ、0x30000100 リセット、0x30000164 ループ、
+# 0x30000200 IRQ ハンドラ、0x30001000 フラグ、0x30004000 変換テーブル。
+# ロード時は VA 0x80000000 → PA 0x30000000（smdk2410 の vaToPA）。
+
+entry 80000100
+
+org 80000000
+EA00003E    # B 0x100
+org 80000018
+EA000078    # B 0x200 (IRQ)
+
+org 80000100
+E3A00203    # MOV r0, #0x30000000
+E3800901    # ORR r0, r0, #0x4000
+EE020F10    # MCR p15, 0, r0, c2, c0, 0   (TTB)
+E3E00000    # MVN r0, #0
+EE030F10    # MCR p15, 0, r0, c3, c0, 0   (DACR = 全マネージャ)
+E3A00001    # MOV r0, #1
+EE010F10    # MCR p15, 0, r0, c1, c0, 0   (M=1)
+E1A00000    # NOP
+E1A00000    # NOP
+E321F0D2    # MSR cpsr_c, #0xD2           (IRQ モード)
+E3A0D203    # MOV sp, #0x30000000
+E38DD902    # ORR sp, sp, #0x8000
+E321F053    # MSR cpsr_c, #0x53           (SVC、IRQ 許可)
+E3A04451    # MOV r4, #0x51000000         (PWM タイマー)
+E3A05FFA    # MOV r5, #1000
+E584503C    # STR r5, [r4, #0x3C]         (TCNTB4)
+E3A05606    # MOV r5, #0x600000           (manual update + auto reload)
+E5845008    # STR r5, [r4, #8]            (TCON)
+E3A05605    # MOV r5, #0x500000           (start + auto reload)
+E5845008    # STR r5, [r4, #8]
+E3A0444A    # MOV r4, #0x4A000000         (INTC)
+E3E05901    # MVN r5, #0x4000             (Timer4 = INT 14 だけ許可)
+E5845008    # STR r5, [r4, #8]            (INTMSK)
+E3A06203    # MOV r6, #0x30000000
+E3866A01    # ORR r6, r6, #0x1000         (フラグ)
+# loop (0x164):
+E5963000    # LDR r3, [r6]
+E3530000    # CMP r3, #0
+0AFFFFFC    # BEQ loop
+E3A03000    # MOV r3, #0
+E5863000    # STR r3, [r6]
+E2877001    # ADD r7, r7, #1
+E5867004    # STR r7, [r6, #4]
+EAFFFFF7    # B loop
+
+org 80000200
+E92D0003    # STMFD sp!, {r0, r1}
+E3A0044A    # MOV r0, #0x4A000000
+E3A01901    # MOV r1, #0x4000
+E5801000    # STR r1, [r0]                (SRCPND クリア)
+E5801010    # STR r1, [r0, #0x10]         (INTPND クリア)
+E3A00203    # MOV r0, #0x30000000
+E3800A01    # ORR r0, r0, #0x1000
+E3A01001    # MOV r1, #1
+E5801000    # STR r1, [r0]                (フラグを立てる)
+E8BD0003    # LDMFD sp!, {r0, r1}
+E25EF004    # SUBS pc, lr, #4
+
+# 1 段目の変換テーブル（PA 0x30004000。セクション、AP=11、ドメイン 0）。
+# 添字は VA[31:20]、1 項目 4 バイト。
+org 80004000
+30000C12    # VA 0x00000000 → PA 0x30000000（ベクタ）
+org 80004C00
+30000C12    # VA 0x30000000 → PA 0x30000000
+org 80005280
+4A000C12    # VA 0x4A000000 → PA 0x4A000000（INTC）
+org 80005440
+51000C12    # VA 0x51000000 → PA 0x51000000（PWM タイマー）

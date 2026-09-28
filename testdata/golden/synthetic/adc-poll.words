@@ -1,0 +1,22 @@
+# adc-poll: touch.dll と同じ形で、ADC の変換完了（ADCCON の ECFLG）を
+# LDR/TST/BEQ のループで待つ合成プログラム（MMIO のポーリング。元は
+# machine/smdk2410/run_test.go の adcPollProgram）。
+# 変換を開始 → 完了を待つ → カウンタ r7 を増やす、を繰り返す。
+# ADCDLY=0xC000 なので 1 回の変換は約 13 万命令。MMU は無効のまま
+# （ソフト TLB は恒等変換で働く）。
+# コードは PA 0x30001000 に置く: 0x30000000 だと直接マップのソフト TLB で
+# ADC（0x58000000）と同じスロットになり、毎周詰め替えが起きる（状態が
+# 変わるのでスキップされない。それ自体は正しい挙動）。
+
+entry 80001000
+org 80001000
+E3A04458    # MOV r4, #0x58000000   (ADC)
+E3A05903    # MOV r5, #0xC000
+E5845008    # STR r5, [r4, #8]      (ADCDLY)
+E3A05001    # loop: MOV r5, #1
+E5845000    # STR r5, [r4]          (ADCCON: ENABLE_START)
+E5943000    # wait: LDR r3, [r4]
+E3130902    # TST r3, #0x8000       (ECFLG)
+0AFFFFFC    # BEQ wait
+E2877001    # ADD r7, r7, #1
+EAFFFFF8    # B loop

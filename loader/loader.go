@@ -28,7 +28,7 @@ type Segment struct {
 
 // Image は形式共通の中間表現。
 type Image struct {
-	Format string    // "bin" or "nb0"
+	Format string    // "bin", "nb0" or "words"
 	Start  uint32    // イメージ全体の開始アドレス
 	Length uint32    // イメージ全体の長さ（バイト）
 	Entry  uint32    // エントリポイント
@@ -36,7 +36,8 @@ type Image struct {
 }
 
 // Load はパスからイメージを読み込む。形式はファイル先頭のマジックで判別し、
-// マジックがなければ拡張子 .nb0 のとき生形式として扱う。
+// マジックがなければ拡張子 .nb0 のとき生形式、.words のとき命令語の
+// テキスト（LoadWords）として扱う。
 // nb0Base は .nb0 のときのロード先アドレス（BIN 形式では無視される）。
 func Load(path string, nb0Base uint32) (*Image, error) {
 	data, err := os.ReadFile(path)
@@ -53,7 +54,10 @@ func Load(path string, nb0Base uint32) (*Image, error) {
 	if strings.HasSuffix(strings.ToLower(path), ".nb0") {
 		return LoadNB0(bytes.NewReader(data), nb0Base)
 	}
-	return nil, fmt.Errorf("loader: %s: unknown image format (no B000FF magic and not .nb0)", path)
+	if strings.HasSuffix(strings.ToLower(path), ".words") {
+		return LoadWords(bytes.NewReader(data))
+	}
+	return nil, fmt.Errorf("loader: %s: unknown image format (no B000FF magic and not .nb0/.words)", path)
 }
 
 // LoadNB0 はヘッダなしの生イメージを読み込む。base にそのまま配置され、
