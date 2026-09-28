@@ -16,6 +16,18 @@ type Device interface {
 	Write(off uint32, size int, v uint32)
 }
 
+// StableReader は MMIO デバイスが任意で実装する interface（CPU のアイドル
+// スキップ用。machine/smdk2410 の run.go 参照）。
+//
+// StableRead は off のレジスタを 32 ビットで読んだときに Read が返す値を返す。
+// ok=true を返してよいのは、(1) その読み出しに副作用がなく、(2) 値が
+// 「デバイスのイベント（時間経過による状態変化。machine が NextEvent で
+// 管理する）・バスからの書き込み・外部入力」以外では変わらない場合だけ。
+// ポーリングで待たれるステータスレジスタ（変換完了フラグ等）が対象。
+type StableReader interface {
+	StableRead(off uint32, size int) (v uint32, ok bool)
+}
+
 // BusError は未マップアドレスへのアクセス。実機ならバスフォールト相当。
 type BusError struct {
 	Addr  uint32
@@ -204,6 +216,29 @@ func (b *Bus) read(addr uint32, size int) (uint32, error) {
 		return v, err
 	}
 	return b.read1(addr, size)
+}
+
+// Probe32 は物理アドレスの 32 ビット読み出しを、副作用なしで行える場合だけ
+// 行う（mmu の Probe32 から使う）。RAM はそのまま読み、MMIO は StableReader を
+// 実装したデバイスだけ。監視（AddWatch）中は、実際のアクセスなら表示が
+// 出るので常に不可。
+func (b *Bus) Probe32(addr uint32) (uint32, bool) {
+	if b.hasWatch || addr&3 != 0 {
+		return 0, false
+	}
+	r := b.find(addr)
+	if r == nil || int(addr-r.base)+4 > int(r.size) {
+		return 0, false
+	}
+	if r.ram != nil {
+		v, err := b.read1(addr, 4)
+		return v, err == nil
+	}
+	sr, ok := r.dev.(StableReader)
+	if !ok {
+		return 0, false
+	}
+	return sr.StableRead(addr-r.base, 4)
 }
 
 func (b *Bus) read1(addr uint32, size int) (uint32, error) {

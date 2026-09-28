@@ -207,3 +207,50 @@ func TestUnalignedRegionAndRAMPage(t *testing.T) {
 		t.Error("RAMPage must be nil while watching")
 	}
 }
+
+// stableDev はオフセット 0 だけ StableRead で読めるデバイス。
+type stableDev struct{ stubDev }
+
+func (d *stableDev) StableRead(off uint32, size int) (uint32, bool) {
+	if off != 0 {
+		return 0, false
+	}
+	return d.Read(off, size), true
+}
+
+func TestProbe32(t *testing.T) {
+	b := New()
+	if err := b.MapRAM("ram", 0x1000, 0x1000); err != nil {
+		t.Fatal(err)
+	}
+	sd := &stableDev{stubDev{readVal: 0x1234}}
+	if err := b.MapMMIO("stable", 0x2000, 0x100, sd); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.MapMMIO("plain", 0x3000, 0x100, &stubDev{readVal: 1}); err != nil {
+		t.Fatal(err)
+	}
+	_ = b.Write32(0x1010, 0xCAFEBABE)
+	for _, c := range []struct {
+		addr uint32
+		v    uint32
+		ok   bool
+	}{
+		{0x1010, 0xCAFEBABE, true}, // RAM
+		{0x1012, 0, false},         // 非アライン
+		{0x2000, 0x1234, true},     // StableRead できるレジスタ
+		{0x2004, 0, false},         // StableRead が断るレジスタ
+		{0x3000, 0, false},         // StableReader でないデバイス
+		{0x9000, 0, false},         // 未マップ
+	} {
+		v, ok := b.Probe32(c.addr)
+		if v != c.v || ok != c.ok {
+			t.Errorf("Probe32(%X) = %X,%v, want %X,%v", c.addr, v, ok, c.v, c.ok)
+		}
+	}
+	// 監視中は、実アクセスなら表示が出るので常に不可。
+	b.AddWatch(0x9000, 0x9000, func(string, uint32, int, uint32, bool) {})
+	if _, ok := b.Probe32(0x1010); ok {
+		t.Error("Probe32 must fail while a watch is active")
+	}
+}

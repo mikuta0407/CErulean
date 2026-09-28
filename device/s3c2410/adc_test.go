@@ -155,3 +155,31 @@ func TestADCReadStart(t *testing.T) {
 		t.Error("reading ADCDAT0 with READ_START did not start a conversion")
 	}
 }
+
+// StableRead は Read と同じ値を返し、読み出しで変換が始まる場合
+// （READ_START 有効時の ADCDAT0）だけ断る。
+func TestADCStableRead(t *testing.T) {
+	a := NewADC(func(uint) {})
+	a.Write(regADCCON, 4, 1) // ENABLE_START
+	for _, off := range []uint32{regADCCON, regADCTSC, regADCDLY, regADCDAT0, regADCDAT1} {
+		v, ok := a.StableRead(off, 4)
+		if !ok || v != a.Read(off, 4) {
+			t.Errorf("StableRead(%X) = %X,%v, Read = %X", off, v, ok, a.Read(off, 4))
+		}
+	}
+	// 変換中は ECFLG=0、完了後は 1（値は変換完了のイベントでだけ変わる）。
+	if v, _ := a.StableRead(regADCCON, 4); v&adcconECFLG != 0 {
+		t.Error("ECFLG set during conversion")
+	}
+	a.Advance(a.NextEvent())
+	if v, _ := a.StableRead(regADCCON, 4); v&adcconECFLG == 0 {
+		t.Error("ECFLG not set after conversion")
+	}
+	a.Write(regADCCON, 4, adcconREADSTART)
+	if _, ok := a.StableRead(regADCDAT0, 4); ok {
+		t.Error("ADCDAT0 with READ_START starts a conversion; must not be stable")
+	}
+	if a.converting != 0 {
+		t.Error("StableRead started a conversion")
+	}
+}

@@ -212,6 +212,19 @@ func (a *ADC) Read(off uint32, size int) uint32 {
 	return 0
 }
 
+// StableRead は bus.StableReader。touch.dll は変換完了を ADCCON の ECFLG の
+// ポーリングで待つ（2026-09 観察: touch.dll の 0x015317F4 の LDR/TST #0x8000/BEQ。
+// 操作中の実処理の約 1 割）。ECFLG は変換完了（NextEvent の期限）でしか
+// 変わらないので、アイドルスキップの対象にできる。
+// 読み出しに副作用があるのは READ_START 有効時の ADCDAT0（次の変換を開始）
+// だけなので、それ以外は Read と同じ値を返す。
+func (a *ADC) StableRead(off uint32, size int) (uint32, bool) {
+	if off&^3 == regADCDAT0 && a.adccon&adcconREADSTART != 0 {
+		return 0, false
+	}
+	return a.Read(off, size), true
+}
+
 func (a *ADC) Write(off uint32, size int, v uint32) {
 	switch off &^ 3 {
 	case regADCCON:

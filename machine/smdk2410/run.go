@@ -143,6 +143,17 @@ func (t timedDev) Read(off uint32, size int) uint32 {
 	return v
 }
 
+// StableRead は包んだデバイスの bus.StableReader に委ねる（時間を同期して
+// から読むので Read と同じ値になる。同期は状態の見え方を変えない）。
+func (t timedDev) StableRead(off uint32, size int) (uint32, bool) {
+	sr, ok := t.dev.(bus.StableReader)
+	if !ok {
+		return 0, false
+	}
+	t.m.syncTime()
+	return sr.StableRead(off, size)
+}
+
 func (t timedDev) Write(off uint32, size int, v uint32) {
 	t.m.syncTime()
 	t.dev.Write(off, size, v)

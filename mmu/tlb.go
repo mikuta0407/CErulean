@@ -276,17 +276,34 @@ func (m *MMU) translateFill(a uint32, write bool) (uint32, error) {
 	return pa, err
 }
 
-// Probe32 は cpu.Prober。TLB にヒットして RAM の実体を直接読める（= 実際の
-// アクセスでも bus を経由せず、TLB も変わらない）場合だけ値を返す。
+// PhysProber は物理空間が副作用なしの読み出しを提供する場合に実装する
+// 任意 interface（bus.Bus が実装。bus.StableReader 参照）。
+type PhysProber interface {
+	Probe32(pa uint32) (uint32, bool)
+}
+
+// Probe32 は cpu.Prober。TLB にヒットし（= 実際のアクセスでも TLB が変わらない）、
+// かつ読み出しに副作用が無い場合だけ値を返す:
+//   - RAM ページ: 実体を直接読む。bus.AddWatch 中は RAM の実体を持たないので
+//     下の MMIO と同じ扱いになり、bus 側が監視中は不可と答える。
+//   - それ以外（MMIO）: データの読み出しに限り、物理空間の PhysProber に問う
+//     （ポーリングされるステータスレジスタ。命令フェッチは RAM だけ）。
+//
 // フェッチはフェッチ猶予中なら不可（猶予の残り回数が変わるため）。
-// bus.AddWatch 中は RAM の実体を持たないので常に不可になる。
 func (m *MMU) Probe32(a uint32, fetch bool) (uint32, bool) {
 	if a&3 != 0 || (fetch && m.fetchGrace != 0) {
 		return 0, false
 	}
 	e := m.lookup(a, m.permR)
-	if e == nil || e.ram == nil {
+	if e == nil {
 		return 0, false
 	}
-	return binary.LittleEndian.Uint32(e.ram[a&0xFFF:]), true
+	if e.ram != nil {
+		return binary.LittleEndian.Uint32(e.ram[a&0xFFF:]), true
+	}
+	p, ok := m.phys.(PhysProber)
+	if fetch || !ok {
+		return 0, false
+	}
+	return p.Probe32(e.pa | a&0xFFF)
 }
