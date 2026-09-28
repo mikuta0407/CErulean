@@ -18,8 +18,11 @@ import (
 
 	"github.com/mikuta0407/cerulean/bus"
 	"github.com/mikuta0407/cerulean/cpu/arm"
+	"github.com/mikuta0407/cerulean/emu"
 	"github.com/mikuta0407/cerulean/loader"
+	"github.com/mikuta0407/cerulean/machine"
 	"github.com/mikuta0407/cerulean/machine/smdk2410"
+	"github.com/mikuta0407/cerulean/script"
 )
 
 func usage() {
@@ -233,8 +236,7 @@ func cmdRun(args []string) {
 			m.Name(), img.Format, img.Entry, m.CPU().PC())
 	}
 
-	screenW, screenH = m.TouchScreenSize()
-	events, err := buildEvents(*scriptPath, *snapSave, m.Steps())
+	events, err := buildEvents(m, *scriptPath, *snapSave, m.Steps())
 	if err != nil {
 		fatal(err)
 	}
@@ -286,45 +288,35 @@ func cmdRun(args []string) {
 				100*float64(m.IdleSkipped())/float64(max(n, 1)))
 		}
 	}
-	// スクリプトのイベントは「その命令数に達した時点（次の命令の実行前）」に
-	// 適用する。実行は machine.RunUntil に任せ、次に止まるべき命令数
-	// （イベント・-sample・-fb-every・-max-steps・トレース開始のうち最も近いもの）
-	// までまとめて進める。
-	nextEv := 0
+	// スクリプトのイベントは emu.Session が「その命令数に達した時点（次の
+	// 命令の実行前）」に適用する。ここでは -sample・-fb-every・-max-steps・
+	// トレースのために止まるべき命令数を決めて、そこまで Session.Run で進める。
+	sess := emu.New(m)
+	sess.Apply = func(_ machine.Machine, ev script.Event) (bool, error) {
+		return applyEvent(m, ev, imageID)
+	}
+	sess.Schedule(events...)
 	for {
+		// 今の命令数に予定されたイベントを先に適用する（トレース表示を
+		// 適用後の状態で出すため）。
+		quit, err := sess.Run(m.Steps())
 		steps := m.Steps()
-		for nextEv < len(events) && events[nextEv].Step <= steps {
-			ev := events[nextEv]
-			nextEv++
-			quit, err := applyEvent(m, ev, imageID)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "cerulean: script line %d: %v\n", ev.Line, err)
-				stop()
-				os.Exit(1)
-			}
-			if quit {
-				fmt.Fprintf(os.Stderr, "cerulean: stopped after %d steps at PC=%08X (script quit)\n", steps, c.PC())
-				stop()
-				return
-			}
+		if err == nil && !quit && *trace && steps >= *traceFrom {
+			word, next, thumb := peekInstr(m, c)
+			fmt.Fprintf(os.Stderr, "%12d  PC=%08X  %s  %s\n", steps, c.PC(), fmtWord(word, thumb), disasm(word, next, c.PC(), thumb))
 		}
 		target := uint64(math.MaxUint64)
-		if nextEv < len(events) {
-			target = events[nextEv].Step
-		}
 		if *sample != 0 {
-			target = min(target, (steps / *sample + 1)**sample)
+			target = min(target, nextMultiple(steps, *sample))
 		}
 		if *fbEvery != 0 {
-			target = min(target, (steps / *fbEvery + 1)**fbEvery)
+			target = min(target, nextMultiple(steps, *fbEvery))
 		}
 		if *maxSteps != 0 {
 			target = min(target, *maxSteps)
 		}
 		if *trace {
 			if steps >= *traceFrom {
-				word, next, thumb := peekInstr(m, c)
-				fmt.Fprintf(os.Stderr, "%12d  PC=%08X  %s  %s\n", steps, c.PC(), fmtWord(word, thumb), disasm(word, next, c.PC(), thumb))
 				target = steps + 1
 			} else {
 				target = min(target, *traceFrom)
@@ -332,10 +324,23 @@ func cmdRun(args []string) {
 		}
 		// 少なくとも 1 命令は進める（-max-steps が再開時点以下の場合など）。
 		target = max(target, steps+1)
-		if err := m.RunUntil(target); err != nil {
+		if err == nil && !quit {
+			quit, err = sess.Run(target)
+		}
+		var evErr *emu.EventError
+		switch {
+		case errors.As(err, &evErr):
+			fmt.Fprintln(os.Stderr, "cerulean:", err)
+			stop()
+			os.Exit(1)
+		case err != nil:
 			reportStop(c.PC(), m.Steps(), err)
 			stop()
 			os.Exit(1)
+		case quit:
+			fmt.Fprintf(os.Stderr, "cerulean: stopped after %d steps at PC=%08X (script quit)\n", m.Steps(), c.PC())
+			stop()
+			return
 		}
 		steps = m.Steps()
 		if *sample != 0 && steps%*sample == 0 {
@@ -351,6 +356,9 @@ func cmdRun(args []string) {
 		}
 	}
 }
+
+// nextMultiple は n より大きい最小の k の倍数。
+func nextMultiple(n, k uint64) uint64 { return (n/k + 1) * k }
 
 // writeFramebuffer は LCD の現在の表示内容を PNG で書く。PNG 化・ファイル
 // 出力は OS 依存なので cmd の責務（コアは画像を返すだけ）。

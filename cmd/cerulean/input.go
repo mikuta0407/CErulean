@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/mikuta0407/cerulean/emu"
 	"github.com/mikuta0407/cerulean/machine/smdk2410"
 	"github.com/mikuta0407/cerulean/script"
 )
@@ -70,7 +71,7 @@ func saveSnapshot(m *smdk2410.Machine, path, imageID string) error {
 // （スナップショットから再開した時点の命令数）より前のイベントは、保存
 // 前の実行で適用済みとみなして読み飛ばす（同じスクリプトを再開に使い
 // 回せるように。件数は表示する）。
-func buildEvents(scriptPath, snapSave string, start uint64) ([]script.Event, error) {
+func buildEvents(m *smdk2410.Machine, scriptPath, snapSave string, start uint64) ([]script.Event, error) {
 	var events []script.Event
 	if scriptPath != "" {
 		f, err := os.Open(scriptPath)
@@ -95,7 +96,7 @@ func buildEvents(scriptPath, snapSave string, start uint64) ([]script.Event, err
 		events = insertEvent(events, script.Event{Step: step, Kind: script.Snap, Path: path})
 	}
 	for _, ev := range events {
-		if err := validateEvent(ev); err != nil {
+		if err := validateEvent(m, ev); err != nil {
 			return nil, fmt.Errorf("script line %d: %w", ev.Line, err)
 		}
 	}
@@ -122,27 +123,16 @@ func insertEvent(events []script.Event, ev script.Event) []script.Event {
 }
 
 // validateEvent は実行前にマシン依存の妥当性（座標範囲・キー名）を検査する
-// （長い実行の途中でスクリプトの誤りに気づくのを避けるため）。
-func validateEvent(ev script.Event) error {
-	switch ev.Kind {
-	case script.TouchDown, script.TouchMove:
-		if touchRaw {
-			if ev.X > 1023 || ev.Y > 1023 {
-				return fmt.Errorf("%v: raw ADC value out of range (0-1023): %d %d", ev.Kind, ev.X, ev.Y)
-			}
-		} else if ev.X >= screenW || ev.Y >= screenH {
-			return fmt.Errorf("%v: (%d,%d) outside the %dx%d screen", ev.Kind, ev.X, ev.Y, screenW, screenH)
+// （-touch-raw のときだけ座標を ADC 生値の範囲で見る）。
+func validateEvent(m *smdk2410.Machine, ev script.Event) error {
+	if touchRaw && (ev.Kind == script.TouchDown || ev.Kind == script.TouchMove) {
+		if ev.X > 1023 || ev.Y > 1023 {
+			return fmt.Errorf("%v: raw ADC value out of range (0-1023): %d %d", ev.Kind, ev.X, ev.Y)
 		}
-	case script.KeyDown, script.KeyUp:
-		if !smdk2410.ValidKey(ev.Key) {
-			return fmt.Errorf("unknown key %q (available: %s)", ev.Key, strings.Join(smdk2410.KeyNames(), " "))
-		}
+		return nil
 	}
-	return nil
+	return emu.Validate(m, ev)
 }
-
-// screenW/screenH はタッチ座標の範囲（main で machine から設定する）。
-var screenW, screenH int
 
 // touchRaw は -touch-raw（スクリプトの座標を ADC 生値として渡す調査用モード）。
 var touchRaw bool
@@ -165,18 +155,11 @@ func applyEvent(m *smdk2410.Machine, ev script.Event, imageID string) (quit bool
 			m.TouchRaw(true, lastRawX, lastRawY)
 			return false, nil
 		}
-		return false, m.TouchMove(ev.X, ev.Y)
-	case script.KeyDown:
-		return false, m.KeyDown(ev.Key)
-	case script.KeyUp:
-		return false, m.KeyUp(ev.Key)
 	case script.TouchUp:
 		if touchRaw {
 			m.TouchRaw(false, lastRawX, lastRawY)
-		} else {
-			m.TouchUp()
+			return false, nil
 		}
-		return false, nil
 	}
-	return false, fmt.Errorf("%v: not implemented", ev.Kind)
+	return emu.ApplyInput(m, ev)
 }

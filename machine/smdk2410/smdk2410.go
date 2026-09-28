@@ -274,6 +274,15 @@ func (m *Machine) Framebuffer() (*image.RGBA, s3c2410.LCDConfig, error) {
 	return m.lcd.Frame(m.bus.Read32)
 }
 
+// Frame は machine.Machine の画面取得（Framebuffer の設定値を除いたもの）。
+func (m *Machine) Frame() (*image.RGBA, error) {
+	img, _, err := m.Framebuffer()
+	return img, err
+}
+
+// InstructionsPerSecond は仮想時間 1 秒あたりの命令数（定数と同じ値）。
+func (m *Machine) InstructionsPerSecond() uint64 { return InstructionsPerSecond }
+
 // SetRTC は RTC の現在時刻を設定する（Reset 前に呼ぶ）。t の壁時計の値
 // （年月日時分秒）がそのまま RTC に入る。ホストの時計を読むのは呼び出し側
 // （cmd）の責務で、コアは渡された時刻からの仮想時間で決定論的に進める。

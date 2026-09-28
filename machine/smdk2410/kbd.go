@@ -103,6 +103,9 @@ func KeyNames() []string {
 	return names
 }
 
+// KeyNames は machine.Machine のキー名一覧（パッケージ関数と同じ）。
+func (m *Machine) KeyNames() []string { return KeyNames() }
+
 // ValidKey はキー名が使えるか。
 func ValidKey(name string) bool {
 	_, ok := keyScanCodes[name]
