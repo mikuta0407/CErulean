@@ -1,6 +1,9 @@
 package arm
 
-import "math/bits"
+import (
+	"encoding/binary"
+	"math/bits"
+)
 
 // ロード/ストア命令（ARM ARM A3.11、アドレッシングは A5.2/A5.3/A5.4）。
 
@@ -236,6 +239,37 @@ func (c *Core) execLdmStmUser(word uint32, load bool) error {
 	return nil
 }
 
+// loadPC は LDM で PC をロードする（S=1 なら例外復帰: CPSR ← SPSR を先に
+// 行い、復帰後の state（ARM/Thumb）で PC をアラインする）。
+func (c *Core) loadPC(v uint32, sBit bool) {
+	if !sBit {
+		c.writeReg(15, v)
+		return
+	}
+	if b := c.curBank(); b != bankUsr {
+		c.setCPSR(c.spsr[b])
+	}
+	if c.cpsr.T() {
+		v &^= 1
+	} else {
+		v &^= 3
+	}
+	c.regs[15] = v
+}
+
+// ramRun は LDM/STM の転送範囲（start から n ワード）を 1 ページ内の RAM として
+// 直接扱えるなら、その範囲を返す（RunMemory。条件を満たさなければ nil）。
+func (c *Core) ramRun(start, n uint32, write bool) []byte {
+	if c.runs == nil {
+		return nil
+	}
+	ram, ok := c.runs.RAMRun(start&^3, 4*n, write)
+	if !ok {
+		return nil
+	}
+	return ram
+}
+
 // execLdmStm は LDM/STM（A3.12、アドレッシングは A5.4）。
 func execLdmStm(c *Core, word uint32) error {
 	var (
@@ -287,6 +321,20 @@ func execLdmStm(c *Core, word uint32) error {
 		if writeback {
 			c.writeReg(rn, newBase)
 		}
+		if ram := c.ramRun(start, n, false); ram != nil {
+			// 1 ページ内・TLB ヒット: 直接読む（下の 1 ワードずつと同じ結果）。
+			for k := 0; list != 0; k += 4 {
+				i := uint32(bits.TrailingZeros32(list))
+				list &= list - 1
+				v := binary.LittleEndian.Uint32(ram[k:])
+				if i == 15 {
+					c.loadPC(v, sBit)
+				} else {
+					c.regs[i] = v
+				}
+			}
+			return nil
+		}
 		addr := start
 		for i := uint32(0); i < 16; i++ {
 			if list&(1<<i) == 0 {
@@ -303,21 +351,7 @@ func execLdmStm(c *Core, word uint32) error {
 				return err
 			}
 			if i == 15 {
-				if sBit {
-					// LDM {..pc}^: 例外復帰。CPSR ← SPSR を先に行い、
-					// 復帰後の state（ARM/Thumb）で PC をアラインする。
-					if b := c.curBank(); b != bankUsr {
-						c.setCPSR(c.spsr[b])
-					}
-					if c.cpsr.T() {
-						v &^= 1
-					} else {
-						v &^= 3
-					}
-					c.regs[15] = v
-				} else {
-					c.writeReg(15, v)
-				}
+				c.loadPC(v, sBit)
 			} else {
 				c.regs[i] = v
 			}
@@ -327,6 +361,22 @@ func execLdmStm(c *Core, word uint32) error {
 		// STM: 先に全ストアしてからライトバック。これにより rn がリストに
 		// 含まれていても格納されるのは変更前の値になる（リスト先頭が rn の
 		// 場合の ARM ARM の規定と一致。それ以外の位置は UNPREDICTABLE）。
+		if ram := c.ramRun(start, n, true); ram != nil {
+			// 1 ページ内・TLB ヒット・コードページでない: 直接書く。
+			for k := 0; list != 0; k += 4 {
+				i := uint32(bits.TrailingZeros32(list))
+				list &= list - 1
+				v := c.regs[i]
+				if i == 15 {
+					v = c.readReg(15)
+				}
+				binary.LittleEndian.PutUint32(ram[k:], v)
+			}
+			if writeback {
+				c.writeReg(rn, newBase)
+			}
+			return nil
+		}
 		addr := start
 		for i := uint32(0); i < 16; i++ {
 			if list&(1<<i) == 0 {

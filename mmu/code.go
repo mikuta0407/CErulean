@@ -42,6 +42,34 @@ func (m *MMU) CodePage(va uint32) (pa uint32, ram []byte, ok bool) {
 	return e.pa, e.ram, true
 }
 
+// RAMRun は va から nbytes バイト（同じ 4KB ページ内）を、CPU が直接読み書き
+// できる RAM の範囲として返す（LDM/STM の高速化用）。TLB ヒットで権限があり、
+// 読み出しなら RAM、書き込みなら直接書き込み可（コードページでない RAM）の
+// ときだけ ok=true。状態は変えない（同じページへの連続アクセスがすべて TLB
+// ヒットになる場合と同じ）。ミスなら CPU は 1 ワードずつアクセスする。
+func (m *MMU) RAMRun(va, nbytes uint32, write bool) ([]byte, bool) {
+	off := va & 0xFFF
+	if va&3 != 0 || nbytes == 0 || off+nbytes > 0x1000 {
+		return nil, false
+	}
+	need := m.permR
+	if write {
+		need = m.permW
+	}
+	e := m.lookup(va, need)
+	if e == nil {
+		return nil, false
+	}
+	ram := e.ram
+	if write {
+		ram = e.wram
+	}
+	if ram == nil {
+		return nil, false
+	}
+	return ram[off : off+nbytes], true
+}
+
 // CodeGen は変換の世代番号へのポインタ。
 func (m *MMU) CodeGen() *uint64 { return &m.gen }
 

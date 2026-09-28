@@ -75,3 +75,27 @@ func TestSpecializedMatchesGeneric(t *testing.T) {
 		t.Errorf("only %d specialized words tested", special)
 	}
 }
+
+// fullMem はデコードキャッシュ・LDM/STM 高速化の interface を持つ Memory の代役。
+type fullMem struct {
+	testMem
+	gen uint64
+}
+
+func (m *fullMem) CodePage(va uint32) (uint32, []byte, bool)      { return 0, nil, false }
+func (m *fullMem) CodeGen() *uint64                               { return &m.gen }
+func (m *fullMem) MarkCode(pa uint32)                             {}
+func (m *fullMem) SetCodeInvalidator(func(pa uint32))             {}
+func (m *fullMem) SetGenHook(func())                              {}
+func (m *fullMem) RAMRun(va, n uint32, write bool) ([]byte, bool) { return nil, false }
+func (m *fullMem) Probe32(a uint32, fetch bool) (uint32, bool)    { return 0, false }
+
+// Reset はコアを作り直すが、Memory から得た配線（キャッシュ・高速化の相手）は
+// 保つこと（以前 runs を落として LDM/STM の高速化が無効になっていた）。
+func TestResetKeepsWiring(t *testing.T) {
+	c := New(&fullMem{testMem: testMem{data: make([]byte, 16)}}, nil)
+	c.Reset(0)
+	if c.code == nil || c.runs == nil || c.prober == nil || c.fetch32 == nil || c.codeGen == &noCodeGen {
+		t.Errorf("Reset dropped wiring: code=%v runs=%v prober=%v", c.code != nil, c.runs != nil, c.prober != nil)
+	}
+}

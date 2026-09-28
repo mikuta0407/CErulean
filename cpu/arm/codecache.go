@@ -41,6 +41,13 @@ type CodeMemory interface {
 	SetGenHook(func())
 }
 
+// RunMemory は LDM/STM の高速化に使う任意の Memory 機能（mmu.MMU が実装する）。
+// RAMRun は va から nbytes バイト（1 ページ内）を直接読み書きしてよい RAM の
+// 範囲として返す。TLB ヒット等の条件を満たすときだけ ok=true で、状態を変えない。
+type RunMemory interface {
+	RAMRun(va, nbytes uint32, write bool) ([]byte, bool)
+}
+
 // codePage は物理 4KB ページ 1 枚分のデコード済み ARM 命令。
 type codePage struct {
 	pa     uint32
@@ -53,6 +60,7 @@ type codePage struct {
 var noCodeGen uint64
 
 func (c *Core) initCodeCache() {
+	c.runs, _ = c.mem.(RunMemory)
 	c.codeGen = &noCodeGen
 	if cm, ok := c.mem.(CodeMemory); ok {
 		c.code = cm

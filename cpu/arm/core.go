@@ -78,6 +78,7 @@ type Core struct {
 	cur     *codePage            // 実行中のページ
 	curVA   uint32               // cur の仮想ページ先頭（無効なら非 4KB 境界の値）
 	vpages  [1 << vpageBits]vpageEnt
+	runs    RunMemory // LDM/STM の高速化（nil なら 1 ワードずつ）
 
 	// Run（ブロック実行）の作業領域。runN は今の Run で実行を終えた命令数、
 	// runBudget はそこまでで止まる上限（実行中に LimitRun で下げられる）。
@@ -131,7 +132,7 @@ func New(mem cpu.Memory, cp15 Coprocessor) *Core {
 func (c *Core) Reset(pc uint32) {
 	histLen := c.histN
 	*c = Core{mem: c.mem, cp15: c.cp15, fetch32: c.fetch32, prober: c.prober,
-		code: c.code, codeGen: c.codeGen}
+		code: c.code, codeGen: c.codeGen, runs: c.runs}
 	c.SetHistory(histLen) // 履歴の設定は保つ（中身は空にする）
 	c.resetCodeCache()
 	c.cpsr = PSR(ModeSvc) | FlagI | FlagF
