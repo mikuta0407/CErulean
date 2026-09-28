@@ -65,6 +65,14 @@ func New(uartOut io.Writer) (*Machine, error) {
 	if err := b.MapRAM("sdram", sdramBase, sdramSize); err != nil {
 		return nil, err
 	}
+	// バンク0〜5（0x00000000〜0x30000000）: ROM/SROM 未実装。フラッシュ
+	// ドライバが NOR フラッシュの CFI/JEDEC プローブ（0xAAAA/0x5500 の
+	// 書き込み）を PA 0 に対して行うので、オープンバスで空振りさせる
+	// （Device Emulator 構成はフラッシュではなく RAMFMD を使う）。
+	// TODO: バンク3 の Ethernet（CS8900 相当）等が必要になったら分割する。
+	if err := b.MapMMIO("bank0-5-empty", 0, sdramBase, openBus{}); err != nil {
+		return nil, err
+	}
 	// バンク7（0x38000000）: SDRAM 未実装。メモリサイズ検出が触るので
 	// オープンバスとして応答だけする。
 	if err := b.MapMMIO("bank7-empty", sdramBase+sdramSize, sdramSize, openBus{}); err != nil {
