@@ -5,6 +5,7 @@ package smdk2410
 
 import (
 	"fmt"
+	"image"
 	"io"
 
 	"github.com/mikuta0407/cerulean/bus"
@@ -44,6 +45,7 @@ type Machine struct {
 
 	intc  *s3c2410.INTC
 	timer *s3c2410.PWMTimer
+	lcd   *s3c2410.LCD
 
 	// 仮想時間: 命令数から PCLK ティックを固定比で生成する（決定論的。
 	// ユーザー確認済み 2026-09）。tickAcc は 1/8 ティック単位の端数累積。
@@ -118,6 +120,11 @@ func New(uartOut io.Writer) (*Machine, error) {
 	if err := b.MapMMIO("timer", 0x51000000, 0x1000, m.timer); err != nil {
 		return nil, err
 	}
+	// LCD コントローラ: レジスタからフレームバッファの位置・形式を解釈する。
+	m.lcd = s3c2410.NewLCD()
+	if err := b.MapMMIO("lcd", 0x4D000000, 0x1000, m.lcd); err != nil {
+		return nil, err
+	}
 	// 当面は値保持スタブで済ませる周辺ブロック（S3C2410 データシート Figure 5-1）。
 	for _, p := range []struct {
 		name string
@@ -136,7 +143,6 @@ func New(uartOut io.Writer) (*Machine, error) {
 			0x0C: 0x0007FFF0, // CLKCON
 			0x10: 0x00000004, // CLKSLOW
 		}},
-		{"lcd", 0x4D000000, nil},  // LCD コントローラ
 		{"nand", 0x4E000000, nil}, // NAND フラッシュコントローラ
 		{"wdt", 0x53000000, map[uint32]uint32{
 			0x00: 0x8021, // WTCON リセット値。TODO: データシートと再照合
@@ -206,6 +212,17 @@ func (m *Machine) Bus() *bus.Bus { return m.bus }
 // 注意: MMIO を指すと副作用が出得るが、コード領域を覗く用途では問題ない。
 func (m *Machine) Peek32(addr uint32) (uint32, error) {
 	return m.mmu.Read32(addr)
+}
+
+// Framebuffer は LCD コントローラの現在の設定でフレームバッファを画像化する。
+// 表示無効・未対応モードなら error（設定値は診断用に返す）。
+func (m *Machine) Framebuffer() (*image.RGBA, s3c2410.LCDConfig, error) {
+	return m.lcd.Frame(m.bus.Read32)
+}
+
+// Translate は CPU から見た VA を現在の MMU 状態で PA に変換する（デバッグ用）。
+func (m *Machine) Translate(va uint32) (uint32, error) {
+	return m.mmu.Translate(va)
 }
 
 // vaToPA はイメージ内アドレス（CE 仮想アドレス）をロード先物理アドレスに変換する。
