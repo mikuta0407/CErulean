@@ -61,6 +61,7 @@ func (m *MMU) LoadState(d *snapshot.Decoder) {
 		t.pa = d.U32()
 		t.perm = d.U8()
 		t.ram = nil
+		t.watched = false
 		if t.tag&tlbValid != 0 && pager != nil {
 			t.ram = pager.RAMPage(t.pa)
 		}

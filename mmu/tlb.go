@@ -47,6 +47,9 @@ type tlbEntry struct {
 	// wram は書き込みの fast path 用の実体。ram と同じだが、コードページ
 	// （code.go）では nil にして書き込みを遅い経路に回す。
 	wram []byte
+	// watched は CPU がこのエントリの変換を覚えている（CodePage で渡した）印。
+	// 詰め替えるときに世代を上げる（code.go）。
+	watched bool
 }
 
 // RAMPager は物理空間が RAM ページの実体を渡せる場合に実装する任意 interface
@@ -60,8 +63,9 @@ func (m *MMU) flushTLB() {
 		m.tlb[i].tag = 0
 		m.tlb[i].ram = nil
 		m.tlb[i].wram = nil
+		m.tlb[i].watched = false
 	}
-	m.gen++
+	m.bumpGen()
 }
 
 // updatePermMask は現在の特権状態に対応する読み/書き権限ビットを選ぶ。
@@ -113,7 +117,11 @@ func (m *MMU) fill(va uint32) {
 	if m.isCode(pa) {
 		e.wram = nil
 	}
-	m.gen++ // 詰め替えたスロットにコードページがあったかもしれない（code.go）
+	if e.watched {
+		// CPU が覚えているページのエントリを追い出した（code.go）。
+		e.watched = false
+		m.bumpGen()
+	}
 }
 
 // pageInfo は MVA を含む 4KB ページの物理先頭と、4 通りの権限を求める。

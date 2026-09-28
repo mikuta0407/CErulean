@@ -77,7 +77,7 @@ type Core struct {
 	pages   map[uint32]*codePage // 物理ページ番号 → デコード済み命令
 	cur     *codePage            // 実行中のページ
 	curVA   uint32               // cur の仮想ページ先頭（無効なら非 4KB 境界の値）
-	curGen  uint64               // cur を引いたときの世代
+	vpages  [1 << vpageBits]vpageEnt
 
 	// Run（ブロック実行）の作業領域。runN は今の Run で実行を終えた命令数、
 	// runBudget はそこまでで止まる上限（実行中に LimitRun で下げられる）。

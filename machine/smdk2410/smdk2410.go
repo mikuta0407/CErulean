@@ -260,6 +260,9 @@ func (m *Machine) Name() string { return "smdk2410" }
 
 func (m *Machine) CPU() cpu.CPU { return m.cpu }
 
+// MMU は MMU/CP15（デバッグ・性能調査用）。
+func (m *Machine) MMU() *mmu.MMU { return m.mmu }
+
 // Bus は物理バス（デバッグ・テスト用）。
 func (m *Machine) Bus() *bus.Bus { return m.bus }
 

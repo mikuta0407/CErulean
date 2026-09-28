@@ -14,8 +14,15 @@ type Instr struct {
 
 // Decode は ARM 命令語 1 個をデコードする。未実装・未定義の命令も
 // 「実行するとエラーを返す関数」として返す（デコード自体は失敗しない）。
+//
+// 頻出する形には専用の実行関数（special.go）を、それ以外には汎用の
+// 実行関数を選ぶ。
 func Decode(word uint32) Instr {
-	return Instr{Word: word, exec: decodeFn(word)}
+	fn := specialize(word)
+	if fn == nil {
+		fn = decodeFn(word)
+	}
+	return Instr{Word: word, exec: fn}
 }
 
 // unimpl は「実行時に UndefinedError を返す」exec 関数を作る。

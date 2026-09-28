@@ -6,8 +6,8 @@ import "encoding/binary"
 //
 // 物理 RAM ページ（4KB）ごとに、デコード済みの ARM 命令（Instr）の表を持つ。
 // 実行中のページ（cur）とその仮想ページ（curVA）を覚えておき、PC が同じ
-// ページにあり、MMU の変換世代（codeGen）が変わっていなければ、TLB を引かず
-// 表から命令を取る。Decode は命令語だけの純関数なので、物理ページ単位で
+// ページにあれば TLB を引かず表から命令を取る。MMU の変換世代（codeGen）が
+// 上がると MMU が SetGenHook で curVA を無効にする。Decode は命令語だけの純関数なので、物理ページ単位で
 // 共有してよい（decode.go のコメント参照）。
 //
 // 正しさ（1 命令ずつフェッチ・デコードしていた頃と全状態が一致すること）:
@@ -36,6 +36,9 @@ type CodeMemory interface {
 	MarkCode(pa uint32)
 	// SetCodeInvalidator は印を付けたページへの書き込みの通知先を設定する。
 	SetCodeInvalidator(func(pa uint32))
+	// SetGenHook は世代が上がるたびに呼ぶ関数を設定する（CPU は実行中の
+	// ページの記憶を捨てる。毎命令の世代比較を省くため）。
+	SetGenHook(func())
 }
 
 // codePage は物理 4KB ページ 1 枚分のデコード済み ARM 命令。
@@ -55,6 +58,7 @@ func (c *Core) initCodeCache() {
 		c.code = cm
 		c.codeGen = cm.CodeGen()
 		cm.SetCodeInvalidator(c.invalidateCode)
+		cm.SetGenHook(func() { c.curVA = 1 })
 	}
 	c.resetCodeCache()
 }
@@ -63,15 +67,37 @@ func (c *Core) initCodeCache() {
 // 復元時。MMU 側も印を全部外す）。
 func (c *Core) resetCodeCache() {
 	c.pages = map[uint32]*codePage{}
+	c.vpages = [1 << vpageBits]vpageEnt{}
+	for i := range c.vpages {
+		c.vpages[i].va = 1 // 無効
+	}
 	c.cur = nil
 	c.curVA = 1 // 4KB 境界でない値 = 無効
 }
+
+// vpageEnt は仮想ページ → デコード済みページの対応（世代つき）。関数呼び出し
+// などでページをまたぐたびに TLB とマップを引かないためのもの。同じ世代の
+// 間は、その仮想ページの TLB エントリが残っている（CPU が覚えたエントリの
+// 詰め替えで世代が上がる。mmu/code.go）ので、CodePage を呼んだのと同じ結果になる。
+type vpageEnt struct {
+	va  uint32
+	gen uint64
+	p   *codePage
+}
+
+const vpageBits = 6
 
 // enterCodePage は PC が別のページに移った（または世代が変わった）ときに、
 // そのページのキャッシュを引き当てる。キャッシュできなければ nil。
 func (c *Core) enterCodePage(pc uint32) *codePage {
 	if c.code == nil {
 		return nil
+	}
+	va := pc &^ 0xFFF
+	v := &c.vpages[(pc>>12)&(1<<vpageBits-1)]
+	if v.va == va && v.gen == *c.codeGen {
+		c.cur, c.curVA = v.p, va
+		return v.p
 	}
 	pa, ram, ok := c.code.CodePage(pc)
 	if !ok {
@@ -83,7 +109,8 @@ func (c *Core) enterCodePage(pc uint32) *codePage {
 		p = &codePage{pa: pa, ram: ram}
 		c.pages[pa>>12] = p
 	}
-	c.cur, c.curVA, c.curGen = p, pc&^0xFFF, *c.codeGen
+	c.cur, c.curVA = p, va
+	*v = vpageEnt{va: va, gen: *c.codeGen, p: p}
 	return p
 }
 
@@ -154,7 +181,7 @@ func (c *Core) Run(budget uint64) (uint64, error) {
 
 		pc := c.regs[15]
 		var in Instr
-		if pc&^0xFFF == c.curVA && *c.codeGen == c.curGen {
+		if pc&^0xFFF == c.curVA {
 			// 同じページを実行中で変換も変わっていない: TLB を引かずに
 			// デコード済みの命令を取る。
 			in = c.cur.arm[(pc>>2)&0x3FF]

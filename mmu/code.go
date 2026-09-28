@@ -11,11 +11,13 @@ package mmu
 //     通常のフェッチでこの命令を取り、TLB が埋まる。TLB の状態の変化は
 //     1 命令ずつ Fetch32 していた頃と同一になる）。
 //   - CodeGen: 「CPU が覚えたページの変換がまだ有効か」の世代番号。変換・権限・
-//     TLB の中身が変わり得る操作（TLB の全無効化、エントリの詰め替え、特権状態・
-//     FCSE PID の変化）で増やす。CPU は毎命令これを比べる。詰め替えで世代を
-//     上げるのは、コードページの TLB エントリがデータアクセスで追い出された
-//     場合に、CPU が次のフェッチで元どおり TLB を埋め直すため（TLB の状態を
-//     通常のフェッチと一致させる）。
+//     TLB の中身が変わり得る操作（TLB の全無効化、特権状態・FCSE PID の変化、
+//     CPU が覚えているエントリの詰め替え）で増やし、SetGenHook の関数を呼ぶ
+//     （CPU は実行中のページの記憶をそこで捨てるので、毎命令の比較が要らない）。詰め替えで世代を上げるのは、コードページの
+//     TLB エントリがデータアクセスで追い出された場合に、CPU が次のフェッチで
+//     元どおり TLB を埋め直すため（TLB の状態を通常のフェッチと一致させる）。
+//     CodePage で渡したエントリに watched の印を付け、そのエントリの詰め替え
+//     だけで世代を上げる（関係ないスロットの詰め替えでは上げない）。
 //   - コードページの書き込み検出（書き込み保護方式）: CPU がデコードした
 //     物理ページは codePages に印を付け、そのページを指す TLB エントリの
 //     wram（直接書き込み用の実体）を外す。そのページへのストアだけ遅い経路に
@@ -36,11 +38,23 @@ func (m *MMU) CodePage(va uint32) (pa uint32, ram []byte, ok bool) {
 	if e == nil || e.ram == nil {
 		return 0, nil, false
 	}
+	e.watched = true
 	return e.pa, e.ram, true
 }
 
-// CodeGen は変換の世代番号へのポインタ（CPU が毎命令読む）。
+// CodeGen は変換の世代番号へのポインタ。
 func (m *MMU) CodeGen() *uint64 { return &m.gen }
+
+// SetGenHook は世代が上がるたびに呼ぶ関数を設定する。
+func (m *MMU) SetGenHook(f func()) { m.onGen = f }
+
+// bumpGen は世代を上げて CPU に知らせる。
+func (m *MMU) bumpGen() {
+	m.gen++
+	if m.onGen != nil {
+		m.onGen()
+	}
+}
 
 // SetCodeInvalidator は、印を付けた物理ページへの書き込みを通知する先を
 // 設定する（CPU がそのページのデコード結果を捨てる）。
@@ -100,7 +114,7 @@ func (m *MMU) resetCode() {
 	for i := range m.tlb {
 		m.tlb[i].wram = m.tlb[i].ram
 	}
-	m.gen++
+	m.bumpGen()
 }
 
 // CodeStats はコードページの印付け・書き込み検出の回数（性能調査用）。

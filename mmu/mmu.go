@@ -78,6 +78,7 @@ type MMU struct {
 	gen         uint64   // 変換の世代番号
 	codePages   []uint64 // デコード済み物理ページの印（1 ビット / 4KB）
 	onCodeWrite func(pa uint32)
+	onGen       func()
 	codeMarks   uint64 // 計測用
 	codeWrites  uint64
 }
@@ -332,7 +333,7 @@ func (m *MMU) Write(opc1, crn, crm, opc2 uint8, v uint32) error {
 		m.flushTLB()
 	case 13:
 		m.pid = v & 0xFE000000
-		m.gen++ // VA<32MB の MVA が変わる
+		m.bumpGen() // VA<32MB の MVA が変わる
 	default:
 		m.regs[crn&15] = v
 	}
@@ -350,7 +351,7 @@ func (m *MMU) VectorBase() uint32 {
 // SetPrivileged は CPU の特権状態の通知を受ける（arm.Coprocessor）。
 func (m *MMU) SetPrivileged(priv bool) {
 	if m.priv != priv {
-		m.gen++ // フェッチの権限判定が変わる
+		m.bumpGen() // フェッチの権限判定が変わる
 	}
 	m.priv = priv
 	m.updatePermMask()
