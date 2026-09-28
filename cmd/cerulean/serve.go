@@ -115,12 +115,12 @@ type server struct {
 	cmds    chan func()
 
 	// loop 専用
-	paused   bool
-	speed    float64 // 実時間の何倍で進めるか。0 = 最高速（待たない）
-	rebase   bool    // 壁時計との対応を取り直す
-	runErr   error   // エミュレーションが止まった原因
-	recSnap  string  // 記録中なら起点のスナップショット
-	lastPix  []byte  // 最後に公開した画面（変化の判定用）
+	paused     bool
+	speed      float64   // 実時間の何倍で進めるか。0 = 最高速（待たない）
+	rebase     bool      // 壁時計との対応を取り直す
+	runErr     error     // エミュレーションが止まった原因
+	recSnap    string    // 記録中なら起点のスナップショット
+	lastPix    []byte    // 最後に公開した画面（変化の判定用）
 	winStart   time.Time // 実時間比の計測窓の始点
 	winSteps   uint64
 	winSkipped uint64
@@ -138,8 +138,8 @@ type server struct {
 type serveStatus struct {
 	Steps       uint64  `json:"steps"`
 	VirtualSec  float64 `json:"virtualSec"`
-	Ratio       float64 `json:"ratio"` // 直近の実時間比（仮想秒/実秒）
-	MIPS        float64 `json:"mips"`  // 直近の命令/秒（百万、アイドルスキップ込み）
+	Ratio       float64 `json:"ratio"`       // 直近の実時間比（仮想秒/実秒）
+	MIPS        float64 `json:"mips"`        // 直近の命令/秒（百万、アイドルスキップ込み）
 	IdleSkipped float64 `json:"idleSkipped"` // 直近でアイドルスキップした命令の割合
 	Paused      bool    `json:"paused"`
 	Speed       float64 `json:"speed"`
