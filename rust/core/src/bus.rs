@@ -448,6 +448,68 @@ impl<D: Copy> Bus<D> {
     }
 }
 
+/// MMU から見た物理アドレス空間（ボードが bus とデバイスを束ねて実装する）。
+pub trait PhysMem {
+    /// 物理アドレスの読み出し（size は 1/2/4）。
+    fn read(&mut self, pa: u32, size: u32) -> Result<u32, BusError>;
+    /// 物理アドレスへの書き込み（size は 1/2/4）。
+    fn write(&mut self, pa: u32, size: u32, v: u32) -> Result<(), BusError>;
+    /// [`Bus::ram_page`]。
+    fn ram_page(&self, pa: u32) -> Option<RamOff>;
+    /// [`Bus::arena`]。
+    fn arena(&self) -> &[u8];
+    /// [`Bus::arena_mut`]。
+    fn arena_mut(&mut self) -> &mut [u8];
+    /// [`Bus::probe32`]。
+    fn probe32(&mut self, pa: u32) -> Option<u32>;
+}
+
+/// バスとデバイス群の組を [`PhysMem`] として使う。
+pub struct BusPhys<'a, D, V> {
+    pub bus: &'a mut Bus<D>,
+    pub devs: &'a mut V,
+}
+
+impl<D: Copy, V: Devices<D>> PhysMem for BusPhys<'_, D, V> {
+    #[inline(always)]
+    fn read(&mut self, pa: u32, size: u32) -> Result<u32, BusError> {
+        self.bus.read(pa, size, self.devs)
+    }
+    #[inline(always)]
+    fn write(&mut self, pa: u32, size: u32, v: u32) -> Result<(), BusError> {
+        self.bus.write(pa, size, v, self.devs)
+    }
+    #[inline(always)]
+    fn ram_page(&self, pa: u32) -> Option<RamOff> {
+        self.bus.ram_page(pa)
+    }
+    #[inline(always)]
+    fn arena(&self) -> &[u8] {
+        self.bus.arena()
+    }
+    #[inline(always)]
+    fn arena_mut(&mut self) -> &mut [u8] {
+        self.bus.arena_mut()
+    }
+    #[inline(always)]
+    fn probe32(&mut self, pa: u32) -> Option<u32> {
+        self.bus.probe32(pa, self.devs)
+    }
+}
+
+/// デバイスのないバス用（RAM だけの構成・テスト）。MMIO 領域があれば読みは 0。
+pub struct NoDevices;
+
+impl<D> Devices<D> for NoDevices {
+    fn read(&mut self, _: D, _: u32, _: u32) -> u32 {
+        0
+    }
+    fn write(&mut self, _: D, _: u32, _: u32, _: u32) {}
+    fn stable_read(&mut self, _: D, _: u32, _: u32) -> Option<u32> {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -8,7 +8,9 @@
 //! カウンタは明示の幅（u32/u64）で持ち、`usize` は添字にだけ使う。
 
 pub mod bus;
+pub mod cpu;
 pub mod loader;
+pub mod mmu;
 
 /// 仮想時間 1 秒あたりの命令数（Go の smdk2410.InstructionsPerSecond）。
 /// PCLK 50.7MHz、1 命令 = 3/8 PCLK から 50_700_000 × 8 / 3。
