@@ -1,18 +1,13 @@
 #!/bin/bash
 # check.sh: コミット前のローカルの確認（CI は置かない方針。2026-09 ユーザー確認）。
-#   - Go: vet・テスト（CERULEAN_IMAGE があれば実イメージのテストも走る）
 #   - Rust: fmt・clippy・テスト（ネイティブと wasm32-wasip1）
 #   - web: wasm32-unknown-unknown でビルドし、wasm-bindgen の出力を Node で読み込む
-# 必要なツール: go、rustup（rust/rust-toolchain.toml の版）、wasm-bindgen-cli
+# CERULEAN_IMAGE があれば実イメージのテストも走る（数十秒）。
+# 必要なツール: rustup（rust/rust-toolchain.toml の版）、wasm-bindgen-cli
 # （rust/Cargo.toml の wasm-bindgen と同じ版）、Node.js。
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
-
-echo "== go"
-test -z "$(gofmt -l $(git ls-files '*.go'))" || { gofmt -l $(git ls-files '*.go'); echo "gofmt: above files need formatting"; exit 1; }
-go vet ./...
-go test ./...
 
 echo "== rust"
 cd "$root/rust"

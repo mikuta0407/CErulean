@@ -1,12 +1,16 @@
 # CErulean
 
-Windows Mobile 5.0（Windows CE 5.0 ベース）の LLE エミュレータを目指す Go 製プロジェクト。
+Windows Mobile 5.0（Windows CE 5.0 ベース）の LLE エミュレータ。Rust 製（2026-09 に
+Go から移行）。
 
 Microsoft Device Emulator 向けの WM5 エミュレータイメージ（英語版・日本語版）を、
-Samsung S3C2410（ARM920T）構成のマシンで起動することを最初のゴールとする。
-将来的には PXA27x 系の実機構成の追加と、gomobile bind による iOS/Android 対応を予定。
+Samsung S3C2410（ARM920T）構成のマシンで動かす。最初の出荷先はブラウザ（wasm。PC と
+iOS/iPadOS の Safari）で、将来はネイティブ（iOS/Android/PC）と JIT にも対応する予定。
+将来的には PXA27x 系の実機構成の追加も予定。
 
 ## 状態
+
+マイルストーン1〜5 は Go 版での記録（フラグ名は Go 版のもの）。
 
 マイルストーン1（完了）: ローダー・ARM インタプリタの骨組み・バス/UART・CLI。
 
@@ -55,14 +59,15 @@ Today 画面の完成まで約 35 億命令（マイルストーン3 時点の�
       一時停止、スナップショット保存）
 - [x] 操作の記録と再生（記録を絶対命令数のスクリプトに書き出し、`run` で同じ画面を再現）
 
-Rust 移行（進行中、2026-09〜）: コアを Rust に移し、最初はブラウザ（wasm）で
+Rust 移行（2026-09〜）: コアを Rust に移し、最初はブラウザ（wasm）で
 動かす。計画は [docs/rust-migration-plan.md](docs/rust-migration-plan.md)。
 
 - [x] 段階0（準備）: Go 版に一致確認の道具（`-result`・`-checkpoint`・`-trace-hash`）、
       基準シナリオと期待値（`testdata/golden/`）、Rust のワークスペースの骨組み（`rust/`）
 - [x] 段階1: コアの移植（インタプリタ。ネイティブで Go 版と完全一致）。全基準シナリオで
       Go と一致し、Go の高速化（デコードキャッシュ・特化・アイドルスキップ等）と
-      新しいスナップショット形式も移した。速度は Go と同等（実処理の区間で約 5% 速い）
+      新しいスナップショット形式も移した。速度は Go と同等（実処理の区間で約 5% 速い）。
+      基準を Rust 版に切り替え、Go 版を削除した（最後の Go 版のコミットは 039ccb4）
 - [ ] 段階2〜5: wasm での計測、ブラウザ版、インタプリタの高速化、JIT-to-wasm
 
 ## テスト用イメージの入手
@@ -83,44 +88,52 @@ mv _208PPC_USA_bin PPC_USA.bin
 rm wm5sdk.msi  # 抽出後は不要
 
 # 確認（B000FF 形式、start=80070000 / entry=80076CF0 / 99 レコードのはず）
-cd ../.. && go run ./cmd/cerulean info tmp/images/PPC_USA.bin
+cd ../.. && rust/target/release/cerulean info tmp/images/PPC_USA.bin
 ```
 
 ## ビルドと実行
 
+必要なツール: rustup（`rust/rust-toolchain.toml` の版が自動で入る）。wasm のビルドと
+`tools/check.sh` には wasm-bindgen-cli（`rust/Cargo.toml` の wasm-bindgen と同じ版）と
+Node.js も要る。
+
 ```sh
-go build ./cmd/cerulean
+cd rust && cargo build --release && cd ..
+R=rust/target/release/cerulean
 
-# イメージの情報表示（開始アドレス・長さ・エントリポイント）
-./cerulean info path/to/nk.bin
+# イメージの情報表示（開始アドレス・長さ・エントリポイント・レコード）
+$R info tmp/images/PPC_USA.bin
 
-# 実行（カーネルのデバッグシリアル出力が標準出力に流れる。
-# 未実装のデバイス等に当たると PC と直前の命令履歴を表示して停止する）
-./cerulean run path/to/nk.bin
+# 実行（カーネルのデバッグシリアル UART1 の出力が標準出力に流れる。未実装の
+# 命令等に当たると PC と直前の命令履歴を表示して停止する）
+$R run --rtc 2006-01-02T15:04:05 tmp/images/PPC_USA.bin
 
-# トレース実行（ディスアセンブル付き）・ステップ数制限
-./cerulean run -trace -max-steps 1000000 path/to/nk.bin
+# トレース（逆アセンブル付き）・命令数の上限
+$R run --trace --max-steps 1000 tmp/images/PPC_USA.bin
 
-# Today 画面が出るところまで実行し、停止時の画面を PNG に保存
-./cerulean run -max-steps 3600000000 -fb-out screen.png path/to/nk.bin
+# Today 画面まで起動（36 億命令、約 45 秒）して画面を PNG に保存。
+# 1 億命令ごとの連番 PNG は --fb-every 100000000 を足す
+$R run --rtc 2006-01-02T15:04:05 --max-steps 3600000000 --fb-out screen.png tmp/images/PPC_USA.bin
 
-# 起動の様子を 1 億命令ごとの連番 PNG で見る（RTC を固定して再現可能に）
-./cerulean run -rtc 2006-01-02T15:04:05 -max-steps 3600000000 \
-  -fb-out shot.png -fb-every 100000000 path/to/nk.bin
-
-# 物理アドレス範囲へのアクセスを PC 付きで記録（周辺機器の調査用）
-./cerulean run -watch 0x4D000000-0x4D000FFF -max-steps 100000000 path/to/nk.bin
+# 物理アドレス範囲へのアクセスを表示（周辺機器の調査用。1 命令ずつ進むので遅い）
+$R run --watch 0x4D000000-0x4D000FFF --max-steps 100000000 tmp/images/PPC_USA.bin
 ```
+
+`--rtc` を省くとホストの現在時刻（UTC）になる。固定すると実行が完全に再現可能になる。
+全フラグは `$R`（引数なし）で表示される。
 
 ### 入力スクリプトとスナップショット
 
 ```sh
-# 一度だけ: Today 画面まで起動してスナップショットを保存（約 50 秒）
-./cerulean run -rtc 2006-01-02T15:04:05 -snap-save today.snap@3600000000i \
-  -max-steps 3600000001 path/to/nk.bin
+# 一度だけ: Today 画面まで起動してスナップショットを保存（無圧縮で約 134MB）
+$R run --rtc 2006-01-02T15:04:05 --max-steps 3600000001 \
+  --snap-save today.snap@3600000000i tmp/images/PPC_USA.bin
 
-# 以後はスナップショットから数秒で再開し、スクリプトで操作する
-./cerulean run -snap-load today.snap -script calendar.txt path/to/nk.bin
+# 以後はスナップショットから再開し、スクリプトで操作する（イメージを渡すと照合する）
+$R run --snap-load today.snap --script calendar.txt
+
+# スナップショットのチャンクの一覧・2 つの比較
+$R snapdump today.snap
 ```
 
 `calendar.txt` の例（`@` は絶対時刻、`+` は直前のコマンドの終了からの相対時刻。
@@ -138,104 +151,58 @@ go build ./cmd/cerulean
 
 コマンドは `tap x y [押下時間]`・`down x y`・`move x y`・`up`・`key down|up 名前`・
 `press 名前 [押下時間]`・`shot ファイル`・`snap ファイル`・`quit`。書式の詳細は
-`script` パッケージのコメントを参照。
-
-`run` の全フラグは `./cerulean` を引数なしで実行すると表示される。
-
-### ブラウザから操作する（serve）
-
-```sh
-./cerulean serve -snap-load today.snap -dir rec/
-# → http://127.0.0.1:8080/ をブラウザで開く
-```
-
-- 画面のクリック・ドラッグがタッチ。画面をクリックしてフォーカスがある間は、
-  PC のキーがハードウェアキーになる（矢印・Enter・英数字・Space/BS/Tab/Esc/Del・
-  修飾キー、F1〜F5 = App1〜App5）。ソフトキーは画面下端のタップで操作する
-- 等速・2 倍・最高速の切り替え、一時停止、スナップショット保存（`-dir` に保存）
-- 「記録開始」で起点のスナップショットを保存し、「記録停止」で入力を命令数つきの
-  スクリプトと停止時の画面（`-expected.png`）に書き出す。
-  `./cerulean run -snap-load rec-….snap -script rec-….script` で再生すると、
-  最後に同じ画面が `-replay.png` に書かれる
-- 認証が無いので、既定ではローカル（127.0.0.1）でだけ待ち受ける
+`rust/core/src/script.rs` の先頭コメントを参照。
 
 ## 開発
 
 ```sh
-go test ./...
-go vet ./...
-
-# コミット前の確認（Go と Rust の全テスト、wasm のビルド）。
-# 必要なツール: rustup・wasm-bindgen-cli（rust/Cargo.toml と同じ版）・Node.js
+# コミット前の確認（fmt・clippy・テスト〔ネイティブと wasm32〕・wasm のビルド）
 tools/check.sh
+# コアの動作に関わる変更では、全基準シナリオの照合も（約 4 分）
+CERULEAN_IMAGE=tmp/images/PPC_USA.bin tools/golden/verify.sh
 ```
 
 設計方針は [CLAUDE.md](CLAUDE.md) を参照。
 
-### Rust 版（移行中）
-
-```sh
-cd rust && cargo build --release && cd ..
-R=rust/target/release/cerulean
-
-# Today 画面まで起動してスナップショットを保存（Rust の形式。無圧縮で約 134MB）
-$R run --rtc 2006-01-02T15:04:05 --max-steps 3600000001 \
-  --snap-save today-rs.snap@3600000000i tmp/images/PPC_USA.bin
-# スナップショットから再開してスクリプトで操作（書式は Go 版と同じ。--fb-out で画面を PNG に）
-$R run --snap-load today-rs.snap --script calendar.txt --fb-out cal.png
-# チャンクの一覧・2 つのスナップショットの比較
-$R snapdump today-rs.snap
-```
-
-フラグは `$R`（引数なし）で表示される。Go 版とフラグ名・スナップショット形式は互換でない。
-
-### 一致確認（Go 版と Rust 版）
+### 一致確認
 
 `testdata/golden/` に基準シナリオ（リセット起点。イメージ＋固定の RTC＋絶対命令数の
-スクリプト）と、Go 版で作った期待値（CPU 状態・RAM・UART1・画面のハッシュ）がある。
-定義は [testdata/golden/README.md](testdata/golden/README.md)。
+スクリプト）と期待値（CPU 状態・RAM・UART1・画面のハッシュ）がある。定義は
+[testdata/golden/README.md](testdata/golden/README.md)。コアの動作を意図して変えたときは
+`tools/golden/regen.sh` で作り直す。
 
 ```sh
-# 期待値との照合（実イメージのシナリオは CERULEAN_IMAGE が必要。無ければ合成だけ）
-CERULEAN_IMAGE=tmp/images/PPC_USA.bin tools/golden/verify.sh go
-CERULEAN_IMAGE=tmp/images/PPC_USA.bin tools/golden/verify.sh rust
-# Go と Rust の CPU の 1 命令ずつの差分テスト（20 万件）
-tools/armvec.sh
-# 期待値の作り直し
-CERULEAN_IMAGE=tmp/images/PPC_USA.bin tools/golden/regen.sh [シナリオ名...]
-
 # run の一致確認用フラグ
-./cerulean run -rtc 2006-01-02T15:04:05 -max-steps 1200000000 \
-  -result r.jsonl -checkpoint 400000000 \
-  -trace-hash 10000000 -trace-hash-ram 100000000 -trace-hash-out th.txt tmp/images/PPC_USA.bin
+$R run --rtc 2006-01-02T15:04:05 --max-steps 1200000000 \
+  --result r.jsonl --checkpoint 400000000 \
+  --trace-hash 10000000 --trace-hash-ram 100000000 --trace-hash-out th.txt tmp/images/PPC_USA.bin
+$R goldencmp testdata/golden/expected/boot-1200M.jsonl r.jsonl
 ```
 
-### 調査・計測の道具（`tools/`）
+### 調査・計測の道具
 
 | 道具 | 用途 |
 |---|---|
 | `tools/bench/bench.sh` | 基準のリビジョン（既定 HEAD）と作業ツリーの速度を交互に計測 |
-| `tools/bench/compare.sh` | Go 版と Rust 版の速度を交互に計測 |
-| `go run ./tools/segspeed <snap> <script>` | スクリプト再生中の仮想 0.25 秒ごとの実時間比・アイドル割合 |
-| `go run ./tools/ihist <snap>` | 実行した ARM 命令の種類の分布 |
-| `go run ./tools/genrate <image>` | MMU の変換世代・コードページの印付けの頻度 |
-| `go run ./tools/goldencmp <a.jsonl> <b.jsonl>` | 一致確認の結果の比較（レジスタ単位で差を表示） |
+| `$R segspeed <snap> <script>` | スクリプト再生中の仮想 0.25 秒ごとの実時間比・アイドル割合 |
+| `$R ihist <snap>` | 実行した ARM 命令の種類の分布 |
+| `$R genrate <image>` | MMU の変換世代・コードページの印付けの頻度・デコード済みページ数 |
+| `$R goldencmp <a.jsonl> <b.jsonl>` | 一致確認の結果の比較（レジスタ単位で差を表示） |
+| `$R snapdump <snap> [snap2]` | スナップショットのチャンクの一覧・比較 |
 
-## パッケージ構成
+## 構成
 
-| パッケージ | 役割 |
+| 場所 | 役割 |
 |---|---|
-| `cmd/cerulean` | CLI フロントエンド（PC 開発用）と、ブラウザ型フロントエンド `serve` |
-| `emu` | フロントエンド共通の実行制御（入力イベントを命令境界で適用・記録。純 Go） |
-| `loader` | イメージローダー（B000FF / .nb0 / 合成プログラムの命令語テキスト .words） |
-| `cpu` | CPU コアの境界 interface（実装非依存） |
-| `cpu/arm` | ARMv4T インタプリタ実装 |
-| `mmu` | MMU / CP15（ARMv4 テーブルウォーク・権限チェック・FCSE） |
-| `bus` | 物理アドレス空間（RAM と MMIO ディスパッチ） |
-| `device/s3c2410` | S3C2410 周辺機器（UART・割り込み・タイマー・LCD・RTC・ADC/タッチ・SPI など） |
-| `machine` | SoC＋周辺機器の構成定義。`smdk2410` が最初のターゲット（入力 API もここ） |
-| `snapshot` | 全状態の保存形式（SoC 非依存のコンテナとエンコーダ） |
-| `script` | 入力スクリプトの解釈（純 Go。CLI 以外からも使える） |
-| `rust/` | Rust 版（移行中）: `core`（cerulean-core）・`cli`・`web` |
-| `tools/` | 一致確認・調査・計測の道具（上記） |
+| `rust/core` | エミュレータのコア（`cerulean-core`。std のみ・プラットフォーム非依存） |
+| `rust/core/src/arm` | ARMv4T インタプリタ（デコードキャッシュ・特化・アイドル検出・逆アセンブラ） |
+| `rust/core/src/mmu.rs` | MMU / CP15（テーブルウォーク・権限・FCSE・ソフト TLB） |
+| `rust/core/src/bus.rs` | 物理アドレス空間（RAM と MMIO の振り分け・監視） |
+| `rust/core/src/s3c2410` | S3C2410 周辺機器（UART・割り込み・タイマー・LCD・RTC・ADC/タッチ・SPI など） |
+| `rust/core/src/smdk2410` | ボード構成・実行ループ・入力 API・スナップショットの並び |
+| `rust/core/src/{snapshot,script,emu,loader}.rs` | 保存形式・入力スクリプト・イベントの適用・イメージローダー |
+| `rust/cli` | ネイティブの開発用 CLI（`cerulean`） |
+| `rust/web` | ブラウザ版（wasm）のエントリ（段階2・3 で作る） |
+| `tools/` | 一致確認・計測・確認のスクリプト |
 | `testdata/golden/` | 一致確認の基準（シナリオ・期待値・合成プログラム） |
+| `docs/` | Rust 移行の計画 |

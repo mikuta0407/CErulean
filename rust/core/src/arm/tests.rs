@@ -1824,9 +1824,9 @@ fn shift_reg_all_amounts() {
     }
 }
 
-// ---- Go 版との差分テスト（Go の cpu/arm/vector_test.go の出力と突き合わせる）----
+// ---- 乱数（テスト用）----
 
-/// Go の splitmix（同じ乱数列を作る）。
+/// splitmix64（テストの入力を決まった列で作る）。
 struct SplitMix(u64);
 
 impl SplitMix {
@@ -1843,149 +1843,6 @@ impl SplitMix {
     fn choose(&mut self, n: u32) -> u32 {
         self.u32() % n
     }
-    fn reg_val(&mut self) -> u32 {
-        const SPECIAL: [u32; 12] = [
-            0, 1, 2, 31, 32, 33, 0x7FFFFFFF, 0x80000000, 0x80000001, 0xFFFFFFFF, 0xFFFFFFFE, 0x100,
-        ];
-        match self.choose(8) {
-            0..=3 => self.u32() & 0xFFFC,
-            4 => self.u32() & 0xFFFF,
-            5 => self.u32(),
-            6 => SPECIAL[self.choose(SPECIAL.len() as u32) as usize],
-            _ => self.choose(64),
-        }
-    }
-}
-
-/// 1 件分の入力（Go の genVecCase と同じ順に乱数を使う）。
-fn gen_vec_case(r: &mut SplitMix) -> (Cpu, TestSys, u32, bool) {
-    let thumb = r.choose(10) < 3;
-    let modes = [
-        MODE_USR, MODE_FIQ, MODE_IRQ, MODE_SVC, MODE_ABT, MODE_UND, MODE_SYS,
-    ];
-    let m = modes[r.choose(7) as usize];
-    let mut c = Cpu::new();
-    c.cpsr = r.u32() & 0xF0000000 | r.choose(4) << 6 | m | if thumb { FLAG_T } else { 0 };
-    for i in 0..16 {
-        c.regs[i] = r.reg_val();
-    }
-    c.regs[15] = if thumb {
-        0x1000 + r.choose(0x6000) * 2
-    } else {
-        0x1000 + r.choose(0x3000) * 4
-    };
-    for i in 0..NUM_BANKS {
-        c.spsr[i] = r.u32();
-    }
-    for i in 0..5 {
-        c.bank_r8_usr[i] = r.reg_val();
-    }
-    for i in 0..5 {
-        c.bank_r8_fiq[i] = r.reg_val();
-    }
-    for i in 0..NUM_BANKS {
-        c.bank_r13[i] = r.reg_val();
-    }
-    for i in 0..NUM_BANKS {
-        c.bank_r14[i] = r.reg_val();
-    }
-    let mut s = TestSys::new();
-    for (i, b) in s.mem.iter_mut().enumerate() {
-        *b = ((i as u32).wrapping_mul(0x9E3779B1) >> 24) as u8;
-    }
-    s.irq = r.choose(8) == 0;
-    s.fiq = r.choose(16) == 0;
-    s.vec_base = if r.choose(2) != 0 { 0xFFFF0000 } else { 0 };
-    if r.choose(4) == 0 {
-        s.bad = Some(r.u32() & 0xFFFC);
-    }
-    let word = if thumb {
-        r.u32() & 0xFFFF
-    } else {
-        let w = r.u32();
-        if r.choose(10) < 6 {
-            w & 0x0FFFFFFF | 0xE0000000
-        } else {
-            w
-        }
-    };
-    (c, s, word, thumb)
-}
-
-/// Go の出力と同じ書式の 1 行。
-fn vec_line(i: usize, r: Result<(), StopError>, c: &Cpu, s: &TestSys, before: &[u8]) -> String {
-    use std::fmt::Write;
-    let mut b = format!("{i} ");
-    match r {
-        Ok(()) => b.push_str("ok"),
-        Err(StopError::Undefined(u)) => {
-            write!(b, "undef {:08X} {:08X} {}", u.pc, u.word, u.arch).unwrap()
-        }
-        Err(StopError::Bus(_)) => b.push_str("stop"),
-    }
-    b.push_str(" |");
-    for x in c.regs {
-        write!(b, " {x:08X}").unwrap();
-    }
-    write!(b, " | {:08X} |", c.cpsr).unwrap();
-    for x in c.spsr {
-        write!(b, " {x:08X}").unwrap();
-    }
-    b.push_str(" |");
-    for x in c
-        .bank_r8_usr
-        .iter()
-        .chain(&c.bank_r8_fiq)
-        .chain(&c.bank_r13)
-        .chain(&c.bank_r14)
-    {
-        write!(b, " {x:08X}").unwrap();
-    }
-    write!(b, " | {:08X} {:08X} {} |", s.fsr, s.far, s.privileged).unwrap();
-    for a in (0..s.mem.len()).step_by(4) {
-        if s.mem[a..a + 4] != before[a..a + 4] {
-            let m = &s.mem;
-            write!(
-                b,
-                " {a:04X}={:02X}{:02X}{:02X}{:02X}",
-                m[a + 3],
-                m[a + 2],
-                m[a + 1],
-                m[a]
-            )
-            .unwrap();
-        }
-    }
-    b
-}
-
-/// CERULEAN_ARMVEC=<Go の出力> のときだけ走る。作り方は tools/armvec.sh。
-#[test]
-fn vector_diff() {
-    let Some(path) = std::env::var_os("CERULEAN_ARMVEC") else {
-        return;
-    };
-    let want = std::fs::read_to_string(path).unwrap();
-    let mut r = SplitMix(0x43455255); // "CERU"
-    let mut n = 0;
-    let mut fails = 0;
-    for (i, line) in want.lines().enumerate() {
-        let (mut c, mut s, word, thumb) = gen_vec_case(&mut r);
-        let pc = c.regs[15];
-        s.w(pc, if thumb { 2 } else { 4 }, word);
-        let before = s.mem.clone();
-        let res = c.step(&mut s);
-        let got = vec_line(i, res, &c, &s, &before);
-        if got != line {
-            fails += 1;
-            if fails <= 5 {
-                eprintln!("case {i}: word={word:08X} thumb={thumb}\n  go:   {line}\n  rust: {got}");
-            }
-        }
-        n += 1;
-    }
-    assert_eq!(fails, 0, "{fails} of {n} cases differ");
-    eprintln!("vector_diff: {n} cases match");
 }
 
 // ---- 特化（Go の special_test）----

@@ -1,18 +1,25 @@
 # CErulean 設計方針
 
-Windows Mobile 5.0（WinCE 5.0）LLE エミュレータ。Go 製。最終的に gomobile bind で iOS/Android に載せる。
+Windows Mobile 5.0（WinCE 5.0）LLE エミュレータ。**Rust 製**（`rust/`）。最初の出荷先は
+ブラウザ（wasm）で、将来はネイティブ（iOS/Android/PC）と JIT も揃える。
+移行の計画・段階・決定事項は `docs/rust-migration-plan.md`。
 
-**2026-09 から Rust への全面移行中**（最初の出荷先はブラウザ）。計画は
-`docs/rust-migration-plan.md`、移行中の規則は下の「Rust 移行中の規則」。
-段階1（ネイティブでの移植）の完了までは Go 版が動作の正解の基準で、
-Go・Rust とも**コアの動作を凍結**する（不具合の修正だけ両方に入れて基準を作り直す）。
-以下の Go の設計の節は、Rust 版でも同じ理由で守る。
+2026-09 まで Go で開発し、Rust に全面移行した（段階1 で全基準シナリオの完全一致を確認し、
+2026-09-28 に基準を Rust 版へ切り替えて Go 版を削除。最後の Go 版のコミットは 039ccb4）。
+Go 版の設計の理由コメントは Rust のコードに移してある。下の「確認済みの事実」の
+フラグ名（-trace・-watch・-fb-out など）は Go 版の CLI のもの（Rust 版は `--` 形式）。
 
 ## 絶対条件
 
-- **コアは純 Go**。cgo 禁止。UI・OS 依存コードをコア（cmd 以外の全パッケージ）に入れない。
-- **CPU はインタプリタ**。iOS では JIT 不可のため。ただし命令デコードと実行を分離してあり、
-  将来デコードキャッシュ・ブロック単位実行を追加できる構造を保つこと。
+- **コアは std のみ・プラットフォーム非依存**（`rust/core`、パッケージ名 `cerulean-core`）。
+  ファイル・時計・スレッドに触れない（入出力は cli・web から渡す）。UI・OS 依存は
+  `rust/cli`（ネイティブの開発用 CLI）と `rust/web`（wasm）に置く。
+- **CPU はインタプリタが基準**（App Store 版 iOS では JIT 不可）。命令デコードと実行を
+  分離してあり、IR・JIT（段階4・5）を足せる構造を保つこと。どの実行方式も
+  インタプリタと完全に一致させる。
+- **決定論性**: 同じイメージ（またはスナップショット）と入力からは、どの実行方式・
+  プラットフォームでも同じ命令数で同じ状態になる。仮想時間は命令数から決まり、
+  壁時計を見るのはフロントエンドだけ。
 - **既存エミュレータのコードをコピー・参照しない**。実装の根拠は一次資料のみ:
   - ARM Architecture Reference Manual（DDI 0100、ARMv4T/v5TE）
   - Samsung S3C2410 データシート（S3C2410X User's Manual Rev 1.1。bitsavers のミラー
@@ -20,182 +27,123 @@ Go・Rust とも**コアの動作を凍結**する（不具合の修正だけ両
     `tmp/docs/`（非コミット）に置く。テキスト化は pypdf で `tmp/docs/um.txt`）
   - Windows CE 5.0 のドキュメント（BIN 形式、OEMAddressTable 等）
 - **仕様が不確かな箇所は推測で埋めない**。`TODO:` コメントで疑問点を残し、ユーザーに質問する。
-- 設計判断には短い理由コメントを残す（ユーザーは Go は読めるがエミュレータ開発は初めて）。
+- 設計判断には短い理由コメントを残す（エミュレータとしての理由・根拠を日本語で。
+  Rust の言語機能の説明は付けない。2026-09 ユーザー確認済み）。
+- **コアの動作（ゲストから見える動作）を変えたら**、基準（`testdata/golden/expected`）を
+  `tools/golden/regen.sh` で作り直し、理由をコミットに残す。変えない変更（高速化・
+  形式・UI）は `tools/golden/verify.sh` で一致を確かめる。
 
-## Rust 移行中の規則（2026-09 ユーザー確認済み）
+## Rust の規則（2026-09 ユーザー確認済み）
 
-- 配置: 同じリポジトリの `rust/`（Cargo ワークスペース。`core`＝パッケージ名
-  `cerulean-core`、`cli`、`web`）。コアは 1 クレートにまとめ、Go のパッケージは
-  モジュールで再現する（ホットパスがクレートをまたぐとインライン化されにくいため）。
-- コアは std のみ。ファイル・時計・スレッドに触れない（入出力は cli・web から渡す）。
-  wasm では panic でインスタンスが使えなくなるので、壊れた入力・未実装命令・
-  BusError は panic ではなく `Result` で返す。
-- **コメントの方針**: Go 版と同じ詳しさ（エミュレータとしての理由・根拠・TODO を
-  日本語で残す）。Rust の言語機能（所有権・ライフタイム等）の説明は付けない。
-  Go の理由コメントは移植先に移す（Go 版を消す前に移っていることを確かめる）。
-- **ゲストの演算**は 32 ビットの折り返しを `wrapping_*` で明示する（デバッグビルドの
-  オーバーフロー検査で落ちないように）。シフト量が 32 以上になり得る箇所は
-  必ず場合分けする（Rust の `<<`/`>>` はシフト量 ≥ 32 で panic または結果が変わる）。
-  結果は Go の shiftImm/shiftReg に合わせる。
+- ゲストの演算は 32 ビットの折り返しを `wrapping_*` で明示する（デバッグビルドの
+  オーバーフロー検査で落ちないように）。シフト量が 32 以上になり得る箇所は必ず
+  場合分けする（`<<`/`>>` はシフト量 ≥ 32 で panic または結果が変わる）。
 - **`usize` は配列の添字にだけ使う**（wasm32 では 32 ビット）。命令数・ティック・
   時刻・ゲストの値は u32/u64/i64 の明示の幅で持つ。バイト列は
   `to_le_bytes`/`from_le_bytes`。浮動小数はコアの状態・時刻計算に使わない。
+  wasm32 のテスト（`tools/check.sh`）がこの種の誤りを見つける。
 - 状態を持つ集合の反復順に依存しない（`BTreeMap` にするか、反復時にソートする）。
+- コアは panic させない: 壊れた入力・未実装命令・BusError は `Result` で返す
+  （wasm では panic でインスタンスが使えなくなる）。
 - **`unsafe` は原則使わない**。使うなら `// SAFETY:` に理由と安全性の根拠を書き、
   計測で効果が確かめられた場合だけにし、テストで守る。
 - **依存の追加はユーザーの承認を取る**（計画書 §8）。現在の依存: web の
-  `wasm-bindgen`（=0.2.129、wasm-bindgen-cli と同じ版に固定）、CLI の `sha2`・`png`
-  （段階0 で「段階1 の CLI で入れる」と合意済み）。コアは依存なし。圧縮は計測の後に相談する。
+  `wasm-bindgen`（=0.2.129、wasm-bindgen-cli と同じ版に固定）、CLI の `sha2`・`png`。
+  コアは依存なし。
 - **版の固定**: `rust/rust-toolchain.toml`（1.98.1）と `rust/Cargo.lock` をコミット。
   wasm-bindgen を上げるときは wasm-bindgen-cli も同じ版を入れ直す。
-- **一致確認**（計画書 §5、定義は `testdata/golden/README.md`）:
-  - 比べるのはゲストから見える値だけ（CPU 状態のダンプ・RAM・UART1・画面の RGBA の
-    SHA-256・停止の種類）。スナップショット・スクリプト・CLI の形式は Go と合わせない。
-  - 基準シナリオはリセット起点（イメージ＋固定の RTC＋絶対命令数のスクリプト）。
-    `tools/golden/verify.sh <go|rust> [名前...]` で照合、`regen.sh` で期待値を作り直す
-    （実イメージのシナリオは `CERULEAN_IMAGE` が必要）。
-  - 食い違ったら: 両実装を `-trace-hash N`（Go の run の追加フラグ。Rust の CLI にも
-    同じものを作る）で走らせて最初に食い違った区間を二分探索 → `-trace` の PC と
-    命令語で比べる → 割り込みの時刻の違いなら `-watch` でデバイスへのアクセスを比べる。
-  - 合成プログラムは `testdata/golden/synthetic/*.words`（Go のテストも読む）。
-- **コミット前の確認**: `tools/check.sh`（Go の vet・テスト、Rust の fmt・clippy・
-  テスト〔ネイティブと wasm32-wasip1〕、web の wasm ビルドと Node での読み込み）。
-  CI は置かない。
+- **コミット前の確認**: `tools/check.sh`（fmt・clippy・テスト〔ネイティブと
+  wasm32-wasip1〕、web の wasm ビルドと Node での読み込み。CERULEAN_IMAGE があれば
+  実イメージのテストも）。CI は置かない。コアの動作に関わる変更では加えて
+  `CERULEAN_IMAGE=tmp/images/PPC_USA.bin tools/golden/verify.sh`（全基準シナリオ、約 4 分）。
 - 手元のツール（2026-09 導入）: rustup（~/.cargo。ターゲット wasm32-unknown-unknown・
   wasm32-wasip1）、wasm-bindgen-cli（`cargo install --locked`）、Node.js 24 LTS
   （~/.local/node）。いずれも ~/.local/bin にリンクしてある。/tmp は tmpfs で小さいので、
   `cargo install` 等の大きなビルドは `CARGO_TARGET_DIR`・`TMPDIR` をプロジェクトの
   tmp/ に向ける。
 - 計測は必ず release ビルドで、交互に 3 回以上走らせて最良値で比べる
-  （Go は `tools/bench/bench.sh`、Go と Rust の比較は `tools/bench/compare.sh`）。
+  （`tools/bench/bench.sh`。この環境は ±4% 程度ばらつく）。
 
-## Rust 版の設計（段階1、2026-09-28 時点）
+## 一致確認（定義は `testdata/golden/README.md`、計画書 §5）
 
-所有権は **案 A「CPU の状態とシステムを並べて持つ」**（ユーザー確認済み。計画書 §3.3）。
-Go のコールバックはすべて `sys` の中の直接の呼び出しか戻り値にした。
+- 比べるのはゲストから見える値だけ（CPU 状態のダンプ・RAM・UART1・画面の RGBA の
+  SHA-256・停止の種類）。基準シナリオはリセット起点（イメージ＋固定の RTC＋絶対命令数の
+  スクリプト）。期待値は Go 版で作り、Rust 版で完全一致を確認して基準にしたもの。
+- 食い違ったら: 基準のビルドと調べるビルドを `--trace-hash N` で走らせて最初に食い違った
+  区間を二分探索 → `--trace` の PC と命令語で比べる → 割り込みの時刻の違いなら
+  `--watch` でデバイスへのアクセスを比べる。
+- 合成プログラムは `testdata/golden/synthetic/*.words`（コアのテストも読む）。
+- 特化した実行関数は汎用版とのランダム差分テスト（`arm/tests.rs`）、アイドルスキップは
+  有無での全状態一致のテスト（`smdk2410/tests.rs`）で守る。
 
-- モジュール（`rust/core/src`）: `arm`（`Cpu` は状態だけのデータ。メモリ・CP15・
-  割り込み線・実行の上限は `System` trait。`code.rs` デコードキャッシュ、
-  `special.rs` 特化、`idle.rs` アイドル検出、`disasm.rs`）、`bus`（MMIO は
-  `Devices` trait で番号をボードに渡す。RAM は 1 本のアリーナ、TLB はアリーナ内の
-  位置を持つ。監視は `watch_log` にためる）、`mmu`（物理アクセスは `PhysMem`）、
-  `s3c2410`（デバイスは上げた割り込みを戻り値で返す）、`smdk2410`（`Machine { cpu, sys }`、
-  `Sys { mmu, bus, board, code }`、`Board` がデバイス・仮想時間・`RunCtl`、MMIO の
-  振り分けは `Dev` 列挙と match）、`snapshot`、`script`、`emu`、`loader`。
-- Go からの置き換え:
-  - 割り込み線は INTC の `irq`/`fiq` フィールド（CPU が命令境界で読む）。
-  - `runN/runBudget` は `RunCtl`（sys 側）。時間の同期で machine が上限を下げる。
-  - 実行中のコードページ（Go の `curVA`）は MMU の `code_cur_va`。世代が上がる・
-    コードページに書き込まれると MMU が無効にする（Go の SetGenHook の代わり）。
-    書き込まれたページは MMU が記録し、CPU が次にページに入るときに捨てる。
-  - デコード済み命令は `Instr { exec, word, imm }`（16 バイト）。特化は const
-    ジェネリクスの専用関数＋デコード時に求めた即値（Go のクロージャの代わり）。
-  - MMIO の読み書きはバスでアクセス幅に切り詰める（Go は Read8/Read16 の型で
-    切り詰めていた。移植で一度漏れた）。
-  - 表示用の読み出し（`Machine::peek32`）は TLB を埋めない（Go の Peek32 は
-    Read32 経由で TLB を埋め得た）。
-  - RTC は Go の `time.Date` と同じ正規化のグレゴリオ暦を自前で計算（Go で求めた
-    値と照合するテストあり）。UART1 の出力は `take_uart1` で取り出す。
-- Go の動作で、段階1 は Rust も合わせているもの: ARM 状態の cond=1111 の命令は
-  実行ループの条件判定で「不成立」になり NOP として飛ばされる（デコード上は
-  「未実装で停止」だが到達しない。TODO(v5TE) で見直す）。
-- 状態の保存漏れの防止（CheckFields の代わり）: 保存・読み込みで構造体を `..`
-  なしで全フィールド分解する。派生情報は `_` と明示する。
-- スナップショット（Rust の新形式。`snapshot.rs` の先頭コメント）: 署名 `CRLNSNAP`・
-  形式の版数・マシン名・イメージ ID、各チャンクは名前・版数・長さを前置きし
-  CRC-32 を後置。コアは無圧縮（Today で約 134MB。圧縮は段階2 の計測の後に決める）。
-- 検証の道具: `tools/golden/verify.sh rust`（基準シナリオ）、`tools/armvec.sh`
-  （Go と Rust で同じ乱数列から作ったランダムな CPU 状態・命令語の 1 命令実行を
-  20 万件突き合わせる。Rust はデバッグビルドでオーバーフロー検査込み）。
-- CLI（`rust/target/release/cerulean`）: `run`（`--rtc`・`--max-steps`・`--script`・
-  `--trace`・`--sample`・`--watch`・`--fb-out`・`--snap-save F@T`・`--snap-load`・
-  `--result`・`--checkpoint`・`--trace-hash` など）、`info`、`snapdump`。
-  既定の RTC はホストの UTC（TODO: ローカル時刻。std にタイムゾーンがない）。
+## 構成（`rust/core/src`）
 
-## パッケージ境界
+所有権は **「CPU の状態とシステムを並べて持つ」**（2026-09 ユーザー確認済み。計画書 §3.3）。
 
 ```
-cmd/cerulean → emu → machine (interface) ← machine/smdk2410 → { cpu/arm, mmu, bus, device/s3c2410, loader }
-                                     cpu/arm → cpu (interface), mmu → bus
+cli / web → emu → smdk2410::Machine { cpu: arm::Cpu, sys: Sys { mmu, bus, board, code } }
+arm::run(&mut Cpu, &mut impl arm::System)   System = メモリ・CP15・割り込み線・実行の上限
+mmu → bus::PhysMem、bus → bus::Devices（ボードが MMIO を振り分ける）
 ```
 
-- `cpu` パッケージは **interface のみ**。コア実装（`cpu/arm`）は将来 Rust 等に差し替えられるよう、
-  この境界を跨ぐ依存を作らない。
-- **S3C2410 固有の知識（アドレスマップ、レジスタ配置）は `device/s3c2410` と `machine/smdk2410` だけが持つ**。
-  cpu・bus・mmu に SoC 固有の定数を入れない。machine は差し替え可能（将来 PXA27x 構成を追加する）。
-- ロード時の CE 仮想アドレス→物理アドレス変換（OEMAddressTable 相当）は machine の責務。
-
-## メモリアクセスの設計
-
-- `cpu.Memory` interface（error 返し）を経由する。error はアボート相当で、
-  当面はエミュレーション停止、将来はデータアボート例外に変換する。
+- `arm`: `Cpu` は状態だけのデータ。`code.rs` デコードキャッシュ、`special.rs` 特化、
+  `idle.rs` アイドル検出、`disasm.rs`。未実装命令は `UndefinedError{pc, word, ..}` で
+  止める（黙って NOP にしない）。アーキテクチャ上の未定義命令（arch=true）はゲストに
+  例外として配送する。
+- `bus`: 領域の表と RAM（1 本のアリーナ）。MMIO はデバイス番号を `Devices` に渡す。
+  未マップは `BusError`（停止）。監視（`--watch`）は `watch_log` にためる。
+  MMIO の読み書きはアクセス幅に切り詰める。
+- `mmu`: CP15・ソフト TLB（ゲストから見える状態として埋める・捨てる規則まで固定）・
+  フェッチ猶予・デコードキャッシュの支援。フォルトは `MemError::Abort`（ゲストに配送）。
+- `s3c2410`: 周辺機器。割り込みは戻り値でボードに返し、ボードが INTC に渡す。
+  INTC が割り込み線のレベルを持つ。**S3C2410 固有の知識は `s3c2410` と `smdk2410` だけが
+  持つ**（arm・bus・mmu に SoC 固有の定数を入れない。将来 PXA27x 構成を足す）。
+- `smdk2410`: ボード構成（メモリマップ・スタブの初期値・OEMAddressTable 相当のロード時
+  変換）、実行ループ（`run_until`）、仮想時間、入力 API、スナップショットのチャンクの並び。
+- `snapshot`（形式）・`script`（入力スクリプト）・`emu`（イベントを命令境界で適用・記録）・
+  `loader`（B000FF・.nb0・.words）。
 - リトルエンディアン固定（WinCE/ARM は LE）。
-- 性能面: mmu のソフト TLB（4KB 直接マップ）が RAM ページの実体を持ち、
-  ヒット時は bus を経由せず直接読み書きする。MMIO は常に bus 経由。
-  bus.AddWatch（-watch）が有効な間は fast path を使わない。
-- 命令実行の高速化（2026-09 ユーザー確認済み。いずれも全状態の完全一致が条件）:
-  - デコードキャッシュ（cpu/arm/codecache.go）: 物理 4KB ページ単位のデコード済み
-    命令。無効化は書き込み保護方式（デコードしたページを指す TLB エントリの
-    wram を外し、そのページへのストアだけ遅い経路で CPU に通知。mmu/code.go）。
-    実行中ページの有効性は MMU の世代で管理し、世代が上がると SetGenHook で
-    CPU の記憶を捨てる。世代は TLB 全無効化・特権状態/FCSE PID の変化・コード
-    ページの印付け・CPU が覚えている（watched）エントリの詰め替えで上がる。
-  - ブロック実行: machine が「次のデバイスイベントの期限を生む命令まで」の
-    命令数を Core.Run に渡す。ブロック途中の MMIO では Executed() から仮想時間を
-    追いつかせ（catchUp）、期限が早まれば LimitRun で打ち切る。
-  - 頻出命令の特化（special.go）: デコード時にフィールド取り出し済みの専用関数を
-    選ぶ。汎用版との一致はランダム差分テスト（special_test.go）で確認する。
-  - LDM/STM は 1 ページ内・TLB ヒットなら RAMRun で直接読み書き。
-  - Core に配線フィールドを足したら Reset の作り直しで引き継ぐこと
-    （TestResetKeepsWiring。runs を落として高速化が無効になっていたことがある）。
-  - 効果がなく取り下げたもの（計測済み）: CPU 側のデータ用ページキャッシュ
-    （TLB 引きは減るがキャッシュミス待ちが移るだけ）、PGO（かえって約 5% 遅い）、
-    GOAMD64=v3（誤差）。計測は tmp/m5ref/bench.sh（HEAD と作業ツリーを交互に
-    3 回。この環境は ±4% 程度ばらつく）。
-- 実行ループは machine の RunUntil（2026-09 ユーザー確認済み）。以下はどれも
-  「1 命令ずつ Step した場合と全状態が完全一致する」ことが条件:
-  - デバイス時間のまとめ進め: PCLK ティックを溜め、次のデバイスイベント
-    （NextEvent）の期限か、時間を持つデバイスの MMIO アクセス（timedDev）・
-    入力 API・スナップショット保存の直前にだけ Advance する。時間を持つデバイスを
-    足したら NextEvent を実装し、timedDev で包み、syncTime に加えること。
-  - アイドルスキップ: cpu/arm の PollLoop が副作用のない 3 命令ループを検出し、
-    machine が 2 周の状態一致を確かめて、次のイベント直前まで命令数と仮想時間
-    だけ進める（-trace・-watch 中は無効。命令履歴はループの PC 列で補う）。
-    ロード先は RAM か、bus.StableReader を実装したデバイスのレジスタ（読んでも
-    副作用がなく、値がデバイスイベント・書き込み・外部入力でしか変わらないもの。
-    現状 ADC）。ソフト TLB は直接マップなので、コードとロード先が同じスロットに
-    当たるループは毎周詰め替えが起きてスキップされない（正しい挙動）。
-  - 検証は変更前バイナリとの出力比較（UART・レジスタ・履歴・PNG・スナップ
-    ショット）。tmp/m5ref に比較スクリプトがある（非コミット）。
 
-## スナップショット・入力の設計（2026-09 ユーザー確認済み）
+## 実行の設計（いずれも「1 命令ずつ実行した場合と全状態が完全一致する」ことが条件）
 
-- 全状態は `snapshot` パッケージの形式で保存する（`CERUSNAP`＋形式版数＋flate。
-  中身はコンポーネント単位のチャンクで、各チャンクが独立した版数を持つ。末尾の
-  バイト数トレーラで書き手と読み手の食い違いを検出）。未知・非対応は必ずエラー。
-- **状態を持つフィールドを足したら SaveState/LoadState を更新し StateVersion を上げる**。
-  各パッケージの `CheckFields` テストが、保存対象か配線かの分類漏れを検出する。
-  MMIO デバイスは machine がバスから列挙し、Stateful でないものはエラーになる
-  （状態のない openBus だけ例外）。ソフト TLB も保存する（通し実行との完全一致のため）。
-- 入力 API（TouchDown/Move/Up・KeyDown/Up）は machine に置き、スクリプトの解釈は
-  純 Go の `script` パッケージ、ファイル読み込みと時刻照合は cmd。時刻は命令数
-  （machine.Steps、InstructionsPerSecond=135.2M/仮想秒）で、決定論的。
-- 対話フロントエンドはブラウザ型の `cerulean serve`（2026-09 ユーザー確認済み）。
-  画面は /frame のロングポーリング（RGBA）、入力は POST /input（JSON）。
-  エミュレーション goroutine がマシンを専有し、壁時計との同期は serve 側
-  （コアは決定論的なまま）。記録は emu.Session.Inject の命令数つき入力を
-  script.Format で絶対命令数（@<n>i）として書き出す。
+- **ソフト TLB**（4KB 直接マップ、1024 エントリ）が RAM ページの位置を持ち、ヒット時は
+  バスを経由しない。MMIO は常にバス経由。監視中は fast path を使わない。
+- **デコードキャッシュ**: 物理 4KB ページ単位のデコード済み命令（`Instr { exec, word, imm }`、
+  16 バイト）を sys が持つ。無効化は書き込み保護方式（デコードしたページを指す TLB
+  エントリの wram を外し、そのページへのストアだけ遅い経路で MMU が記録する）。
+  実行中ページは MMU の `code_cur_va` で、世代（TLB 全無効化・特権状態/FCSE PID の変化・
+  CPU が覚えている watched エントリの詰め替え）が上がると MMU が無効にする。
+- **ブロック実行と時間のまとめ進め**: PCLK ティック（1 命令 = 3/8）を溜め、次の
+  デバイスイベントの期限か、時間を持つデバイス（タイマー・RTC・ADC）の MMIO・入力 API・
+  スナップショット保存の直前にだけ advance する。machine は期限を生む命令までの命令数を
+  CPU に渡し、ブロック途中の MMIO では実行済み命令数から追いつかせ（catch_up）、期限が
+  早まれば `RunCtl` の上限を下げる。時間を持つデバイスを足したら next_event を実装し、
+  board.rs の同期（sync_time・update_deadline・MMIO の振り分け）に加えること。
+- **頻出命令の特化**: const ジェネリクスの専用関数＋デコード時の即値。
+- **LDM/STM**: 1 ページ内・TLB ヒットなら RAM を直接読み書き（`ram_run`）。
+- **アイドルスキップ**: 副作用のない 3 命令ループ（LDR/比較/後方分岐）を検出し、2 周の
+  状態一致を確かめて、次のイベント直前まで命令数と仮想時間だけ進める（`--trace` 中は
+  無効。監視中は自然に無効。命令履歴はループの PC 列で補う）。ロード先は RAM か、
+  `stable_read` に応じるデバイスのレジスタ（現状 ADC）。
+- Go 版の動作で合わせているもの: ARM 状態の cond=1111 の命令は条件判定で「不成立」に
+  なり NOP として飛ばされる（TODO(v5TE) で見直す）。
+- Go 版で効果がなく取り下げたもの（計測済み）: CPU 側のデータ用ページキャッシュ、PGO。
+  Rust で必要なら計測し直す（計画書 §6.1）。
 
-## 例外・エラーの扱い
+## スナップショット・入力の設計
 
-- 未実装命令は `arm.UndefinedError{PC, Word, ...}` を返して停止し、CLI が PC と命令語を表示する。
-  黙って NOP にしない（デバッグ不能になるため）。
-- 未マップアドレスへのアクセスは `bus.BusError`（アドレス付き）。
-
-## テスト方針
-
-- テーブル駆動。フラグ計算（NZCV、シフタキャリー）を重点的に。
-- ローダーのテストは合成バイナリで書く（実イメージをリポジトリに入れない）。
+- 形式は `rust/core/src/snapshot.rs` の先頭コメント（署名 `CRLNSNAP`・形式の版数・マシン名・
+  イメージ ID、名前・版数・長さを前置きし CRC-32 を後置したチャンクの列）。コアは無圧縮
+  （Today で約 134MB。圧縮は段階2 の計測の後に決める）。未知・非対応は必ずエラー。
+  **段階3 で公開した後は旧版の読み込みを残す**。
+- **状態を持つフィールドを足したら save_state/load_state を更新し版数を上げる**。保存・
+  読み込みでは構造体を `..` なしで全フィールド分解する（足したフィールドの保存漏れが
+  コンパイルエラーになる）。派生情報は `_` と明示する。ソフト TLB も保存する。
+- 入力 API（touch_down/up・key_down/up）は smdk2410 の Machine に置き、スクリプトの解釈は
+  `script`、イベントの適用は `emu`。時刻は命令数（`INSTRUCTIONS_PER_SECOND` =
+  135.2M/仮想秒）で、決定論的。スクリプトの書式は当面 Go 版と同じ。
+- 対話フロントエンドは段階3 のブラウザ版（Worker＋wasm）。Go 版の serve の UI は
+  `rust/web/www/legacy-serve/` に参考として置いてある（入力の対応表を移したら消す）。
 
 ## 実イメージについて確認済みの事実（2026-09 検証）
 
@@ -299,14 +247,9 @@ cmd/cerulean → emu → machine (interface) ← machine/smdk2410 → { cpu/arm,
   デバイスへのアクセスを -watch とトレースで確認）。
 - **電源ボタン**（pwrbtn2410.dll、GPF0/EINT0）: 押すとサスペンド（OEMPowerOff・
   スリープ・起床要因）の実装が必要になり範囲が大きい。UI 操作には不要なので後回し。
-- 性能改善の続き。アプリ起動のような実処理の区間はまだ実時間の約 0.5 倍。
-  Go のインタプリタとしては頭打ちに近い（上記の計測）。さらに上げるなら
-  ネイティブ化（下記）かブロック単位のより大きな変換（スーパー命令等）。
-- ネイティブ言語（Rust/C/C++）化の検討（2026-09 ユーザーと相談）: 同じ設計なら
-  1.5〜3 倍程度の見込み（推定・未計測）。ただし cgo が必要（現方針は禁止）で、
-  Go との境界呼び出しが 1 回数十 ns かかるため、境界は cpu.CPU ではなく
-  「CPU＋MMU（ソフト TLB）＋RAM」をまとめた外側（RunUntil 単位と MMIO だけが
-  往復する形）にする必要がある。Go でデコードキャッシュ等を入れて計測してから判断する。
+- 性能改善の続き（計画書の段階4・5）: アプリ起動のような実処理の区間はまだ実時間の
+  約 0.6 倍。同じ設計のままでは Go と Rust の差は小さかった（段階1 の計測）ので、
+  IR・スーパー命令（段階4）と JIT-to-wasm（段階5）で上げる。
 
 ## 未確定事項・次の課題（随時更新）
 
@@ -338,7 +281,7 @@ cmd/cerulean → emu → machine (interface) ← machine/smdk2410 → { cpu/arm,
 - MMU: アライメントフォルト（A ビット）未実装（CPU がアドレスをマスクしてから
   発行するため現状は到達しない）。
 - 性能: アイドルスキップは ARM の 3 命令ループのみ対応（Thumb や別形のループが
-  現れたら PollLoop に追加）。Thumb はデコードキャッシュ・特化の対象外
+  現れたら poll_loop に追加）。Thumb はデコードキャッシュ・特化の対象外
   （WM5 の操作中の実行では 0%）。
 - INTC の PRIORITY（回転アービトレーション）は固定優先度に簡略化中。
 - BLX 等 ARMv5TE 拡張は未実装（PXA27x 対応時）。

@@ -1,23 +1,20 @@
 #!/bin/bash
-# run.sh <impl> <シナリオ名> <出力.jsonl> [追加の引数...]
+# run.sh <シナリオ名> <出力.jsonl> [追加の引数...]
 #
-# testdata/golden/scenarios/<シナリオ名>.scenario の定義どおりに実装 <impl> を
+# testdata/golden/scenarios/<シナリオ名>.scenario の定義どおりに Rust 版（release）を
 # リセットから走らせ、結果の JSON Lines（testdata/golden/README.md）を書く。
-# 追加の引数はその実装の CLI にそのまま渡す（例: go なら -trace-hash 1000000）。
-#
-# impl:
-#   go    Go 版。$CERULEAN_GO（既定: リポジトリ直下の ./cerulean。無ければビルド）
-#   rust  Rust 版。$CERULEAN_RUST（既定: rust/target/release/cerulean。無ければビルド）
+# 追加の引数は CLI にそのまま渡す（例: --trace-hash 1000000）。
+# CLI は $CERULEAN_BIN（既定: rust/target/release/cerulean。無ければビルド）。
 #
 # 実イメージのシナリオは環境変数 CERULEAN_IMAGE（PPC_USA.bin のパス）が必要。
 # UART1 の出力は <出力>.uart に、CLI の標準エラーは <出力>.err に書く。
 set -euo pipefail
-if [ $# -lt 3 ]; then
-  echo "usage: run.sh <go|rust> <scenario> <out.jsonl> [args...]" >&2
+if [ $# -lt 2 ]; then
+  echo "usage: run.sh <scenario> <out.jsonl> [args...]" >&2
   exit 2
 fi
-impl=$1 name=$2 out=$3
-shift 3
+name=$1 out=$2
+shift 2
 root=$(cd "$(dirname "$0")/../.." && pwd)
 gdir=$root/testdata/golden
 def=$gdir/scenarios/$name.scenario
@@ -53,35 +50,14 @@ if [ -n "$image_sha256" ]; then
   fi
 fi
 
-case $impl in
-  go)
-    bin=${CERULEAN_GO:-$root/cerulean}
-    if [ ! -x "$bin" ]; then
-      (cd "$root" && go build -o "$bin" ./cmd/cerulean)
-    fi
-    args=(run -history 0 -rtc "$rtc" -max-steps "$max_steps" -result "$out")
-    [ -n "$script" ] && args+=(-script "$gdir/scenarios/$script")
-    for c in $checkpoints; do args+=(-checkpoint "$c"); done
-    "$bin" "${args[@]}" "$@" "$image" > "$out.uart" 2> "$out.err" || {
-      echo "run.sh: $name: go exited with $? (see $out.err)" >&2
-      exit 1
-    }
-    ;;
-  rust)
-    bin=${CERULEAN_RUST:-$root/rust/target/release/cerulean}
-    if [ ! -x "$bin" ]; then
-      (cd "$root/rust" && cargo build --release -p cerulean-cli)
-    fi
-    args=(run --history 0 --rtc "$rtc" --max-steps "$max_steps" --result "$out")
-    [ -n "$script" ] && args+=(--script "$gdir/scenarios/$script")
-    for c in $checkpoints; do args+=(--checkpoint "$c"); done
-    "$bin" "${args[@]}" "$@" "$image" > "$out.uart" 2> "$out.err" || {
-      echo "run.sh: $name: rust exited with $? (see $out.err)" >&2
-      exit 1
-    }
-    ;;
-  *)
-    echo "run.sh: unknown implementation $impl" >&2
-    exit 2
-    ;;
-esac
+bin=${CERULEAN_BIN:-$root/rust/target/release/cerulean}
+if [ ! -x "$bin" ]; then
+  (cd "$root/rust" && cargo build --release -q -p cerulean-cli)
+fi
+args=(run --history 0 --quiet-uart --rtc "$rtc" --max-steps "$max_steps" --result "$out")
+[ -n "$script" ] && args+=(--script "$gdir/scenarios/$script")
+for c in $checkpoints; do args+=(--checkpoint "$c"); done
+"$bin" "${args[@]}" "$@" "$image" > "$out.uart" 2> "$out.err" || {
+  echo "run.sh: $name: exited with $? (see $out.err)" >&2
+  exit 1
+}

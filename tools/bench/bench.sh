@@ -1,9 +1,9 @@
 #!/bin/bash
-# bench.sh [-n 回数] [-steps 命令数] [基準のリビジョン]
+# bench.sh [-n 回数] [-s 命令数] [基準のリビジョン]
 #
-# Go 版の性能比較: 基準のリビジョン（既定 HEAD）と作業ツリーのビルドを交互に
-# n 回（既定 3）ずつ走らせ、リセットから指定の命令数（既定 4 億。実処理の区間）
-# の命令/秒の最良値を比べる。この環境の計測は ±4% 程度ばらつくので、交互に
+# 性能比較: 基準のリビジョン（既定 HEAD）と作業ツリーの Rust 版（release）を交互に
+# n 回（既定 3）ずつ走らせ、リセットから指定の命令数（既定 4 億。実処理の区間）の
+# 命令/秒の最良値を比べる。この環境の計測は ±4% 程度ばらつくので、交互に
 # 走らせて最良値で比べる（計画書 §6.3）。
 #
 # 基準は git archive で tmp/bench/base に展開してビルドする（作業ツリーには触れない）。
@@ -25,14 +25,16 @@ image=${CERULEAN_IMAGE:-$root/tmp/images/PPC_USA.bin}
 w=$root/tmp/bench
 rm -rf "$w/base"
 mkdir -p "$w/base"
-git archive "$rev" | tar -x -C "$w/base"
-(cd "$w/base" && go build -o "$w/c_base" ./cmd/cerulean)
-go build -o "$w/c_work" ./cmd/cerulean
+git archive "$rev" rust | tar -x -C "$w/base"
+(cd "$w/base/rust" && CARGO_TARGET_DIR=$w/target-base cargo build --release -q -p cerulean-cli)
+(cd rust && cargo build --release -q -p cerulean-cli)
+cp "$w/target-base/release/cerulean" "$w/c_base"
+cp rust/target/release/cerulean "$w/c_work"
 : > "$w/r_base"
 : > "$w/r_work"
 for _ in $(seq "$n"); do
   for b in base work; do
-    "$w/c_$b" run -history 0 -stats -rtc 2006-01-02T15:04:05 -max-steps "$steps" "$image" 2>&1 >/dev/null |
+    "$w/c_$b" run --history 0 --stats --quiet-uart --rtc 2006-01-02T15:04:05 --max-steps "$steps" "$image" 2>&1 |
       grep -o '[0-9.]*M steps/s' | cut -dM -f1 >> "$w/r_$b"
   done
 done

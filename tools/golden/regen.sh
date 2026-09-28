@@ -1,21 +1,17 @@
 #!/bin/bash
 # regen.sh [シナリオ名...]
 #
-# 基準の期待値 testdata/golden/expected/<名前>.jsonl を Go 版で作り直す
-# （段階1 の完了後は Rust 版で作り直す。docs/rust-migration-plan.md §5.2）。
-# 名前を省略すると全シナリオ。実イメージのシナリオは CERULEAN_IMAGE が必要で、
-# 無ければ飛ばす。Go の版（go version）も表示する（基準を作り直すときに
-# Go の版が変わっていないことを確かめるため。計画書 §8）。
+# 基準の期待値 testdata/golden/expected/<名前>.jsonl を Rust 版（ネイティブの
+# インタプリタ）で作り直す。名前を省略すると全シナリオ。実イメージのシナリオは
+# CERULEAN_IMAGE が必要で、無ければ飛ばす。
+#
+# 期待値を変えるのはコアの動作を意図して変えたときだけ（理由をコミットに残す。
+# 計画書 §1）。段階1 までは Go 版で作った値で、2026-09-28 に Rust 版と一致を確認して
+# 基準を Rust 版に切り替えた。
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
 gdir=$root/testdata/golden
-impl=${GOLDEN_IMPL:-go}
-go version
-if [ "$impl" = go ]; then
-  export CERULEAN_GO=${CERULEAN_GO:-$root/tmp/golden-bin/cerulean}
-  mkdir -p "$(dirname "$CERULEAN_GO")"
-  (cd "$root" && go build -o "$CERULEAN_GO" ./cmd/cerulean)
-fi
+(cd "$root/rust" && cargo build --release -q -p cerulean-cli)
 names=("$@")
 if [ ${#names[@]} -eq 0 ]; then
   for f in "$gdir"/scenarios/*.scenario; do names+=("$(basename "$f" .scenario)"); done
@@ -28,7 +24,7 @@ for n in "${names[@]}"; do
     continue
   fi
   start=$(date +%s)
-  "$root/tools/golden/run.sh" "$impl" "$n" "$work/$n.jsonl"
+  "$root/tools/golden/run.sh" "$n" "$work/$n.jsonl"
   cp "$work/$n.jsonl" "$gdir/expected/$n.jsonl"
   echo "wrote expected/$n.jsonl ($(( $(date +%s) - start ))s)"
 done

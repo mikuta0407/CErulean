@@ -457,3 +457,43 @@ fn snapshot_rejects_corruption() {
     assert!(Machine::new().load_snapshot(&buf[..buf.len() - 1]).is_err());
     assert!(Machine::new().load_snapshot(&buf[..100]).is_err());
 }
+
+/// 実イメージでのスナップショット往復（CERULEAN_IMAGE があるときだけ。Go の
+/// TestRealImageSnapshotResume）。「N 命令で保存 → 復元して M 命令」と「通しで
+/// N+M 命令」で、UART 出力と最終状態（スナップショットのバイト列）が一致する。
+#[test]
+fn real_image_snapshot_resume() {
+    let Some(path) = std::env::var_os("CERULEAN_IMAGE") else {
+        return;
+    };
+    const N: u64 = 300_000_000;
+    const M: u64 = 100_000_000;
+    let data = std::fs::read(path).unwrap();
+    let img = crate::loader::load(&data, "image.bin", 0x30000000).unwrap();
+    let boot = || {
+        let mut m = Machine::new();
+        m.load_image(&img).unwrap();
+        m.set_rtc(2006, 1, 2, 15, 4, 5);
+        m.reset();
+        m
+    };
+    let mut a = boot();
+    a.run_until(N + M).unwrap();
+    let out_a = a.take_uart1();
+
+    let mut b = boot();
+    b.run_until(N).unwrap();
+    let mut out_b = b.take_uart1();
+    let mut buf = vec![];
+    b.save_snapshot(&mut buf, "id").unwrap();
+    let mut c = Machine::new();
+    c.load_snapshot(&buf[..]).unwrap();
+    c.run_until(N + M).unwrap();
+    out_b.extend(c.take_uart1());
+    assert!(out_a == out_b, "UART output differs");
+
+    let (mut sa, mut sc) = (vec![], vec![]);
+    a.save_snapshot(&mut sa, "id").unwrap();
+    c.save_snapshot(&mut sc, "id").unwrap();
+    assert!(sa == sc, "final state differs");
+}
