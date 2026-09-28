@@ -52,6 +52,9 @@ type Machine struct {
 	// 仮想時間: 命令数から PCLK ティックを固定比で生成する（決定論的。
 	// ユーザー確認済み 2026-09）。tickAcc は 1/8 ティック単位の端数累積。
 	tickAcc uint32
+	// steps はリセットからの実行命令数（= 仮想時間の基準）。入力スクリプトの
+	// 時刻照合とスナップショット復元後の時間の継続に使う。
+	steps uint64
 
 	entryPA uint32 // リセット時に飛ぶ物理アドレス
 }
@@ -61,6 +64,11 @@ type Machine struct {
 // → 約 0.375 PCLK/命令 = 3/8。カーネルの時間の流れの速さが変わるだけで
 // 正しさには影響しない（タイマーは同じ仮想時間軸で数えるため）。
 const pclkTicksNum = 3
+
+// InstructionsPerSecond は仮想時間 1 秒あたりの命令数
+// （pclkHz / (pclkTicksNum/8) = 50.7M × 8/3 = 135.2M）。入力スクリプトの
+// 時刻（ms 等）を命令数に換算するのに使う。
+const InstructionsPerSecond = pclkHz * 8 / pclkTicksNum
 
 // pclkHz は仮想時間 1 秒あたりの PCLK ティック数（RTC の進みに使う）。
 // 根拠（2026-09 実測）: ブートコードが MPLLCON=0x000A1031（MDIV=161, PDIV=3,
@@ -296,10 +304,16 @@ func (m *Machine) LoadImage(img *loader.Image) error {
 // MMU は無効の状態で始まる。
 func (m *Machine) Reset() {
 	m.cpu.Reset(m.entryPA)
+	m.steps = 0
 }
+
+// Steps はリセット（またはスナップショットの保存時点から継続して）
+// からの実行命令数。
+func (m *Machine) Steps() uint64 { return m.steps }
 
 func (m *Machine) Step() error {
 	err := m.cpu.Step()
+	m.steps++
 	// 仮想時間を進める: 1 命令 = pclkTicksNum/8 PCLK ティック。
 	m.tickAcc += pclkTicksNum
 	if t := m.tickAcc >> 3; t > 0 {

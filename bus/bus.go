@@ -276,3 +276,21 @@ func (b *Bus) Read32(addr uint32) (uint32, error) { return b.read(addr, 4) }
 func (b *Bus) Write8(addr uint32, v uint8) error   { return b.write(addr, 1, uint32(v)) }
 func (b *Bus) Write16(addr uint32, v uint16) error { return b.write(addr, 2, uint32(v)) }
 func (b *Bus) Write32(addr uint32, v uint32) error { return b.write(addr, 4, v) }
+
+// MMIODevice は登録済みの MMIO 領域（スナップショットでデバイスを列挙する用）。
+type MMIODevice struct {
+	Name string
+	Base uint32
+	Dev  Device
+}
+
+// MMIODevices は MMIO 領域を登録順に返す。
+func (b *Bus) MMIODevices() []MMIODevice {
+	var ds []MMIODevice
+	for _, r := range b.regions {
+		if r.dev != nil {
+			ds = append(ds, MMIODevice{Name: r.name, Base: r.base, Dev: r.dev})
+		}
+	}
+	return ds
+}
