@@ -203,3 +203,31 @@ func (a *ADC) LoadState(d *snapshot.Decoder) {
 	a.ecflg = d.Bool()
 	a.penDown = d.Bool()
 }
+
+// ---- SPI ----
+
+var _ snapshot.Stateful = (*SPI)(nil)
+
+func (s *SPI) StateVersion() uint16 { return 1 }
+
+// 相手デバイス（slave）は配線。状態は相手側が自分で保存する。
+func (s *SPI) SaveState(e *snapshot.Encoder) {
+	for i := range s.ch {
+		c := &s.ch[i]
+		for _, v := range []uint32{c.spcon, c.sppin, c.sppre, c.rx} {
+			e.U32(v)
+		}
+	}
+}
+
+func (s *SPI) LoadState(d *snapshot.Decoder) {
+	if !d.CheckVersion(1) {
+		return
+	}
+	for i := range s.ch {
+		c := &s.ch[i]
+		for _, p := range []*uint32{&c.spcon, &c.sppin, &c.sppre, &c.rx} {
+			*p = d.U32()
+		}
+	}
+}

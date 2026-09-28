@@ -37,8 +37,10 @@ const (
 	IntDMA1   = 18
 	IntDMA2   = 19
 	IntDMA3   = 20
+	IntSPI0   = 22 // TODO: ビット番号はデータシートと要照合
 	IntUART1  = 23
 	IntUART0  = 28
+	IntSPI1   = 29
 	IntRTC    = 30
 	IntADC    = 31
 )

@@ -49,6 +49,8 @@ type Machine struct {
 	lcd   *s3c2410.LCD
 	rtc   *s3c2410.RTC
 	adc   *s3c2410.ADC
+	spi   *s3c2410.SPI
+	kbd   *kbdMCU
 
 	// 仮想時間: 命令数から PCLK ティックを固定比で生成する（決定論的。
 	// ユーザー確認済み 2026-09）。tickAcc は 1/8 ティック単位の端数累積。
@@ -157,6 +159,15 @@ func New(uartOut io.Writer) (*Machine, error) {
 	if err := b.MapMMIO("adc", 0x58000000, 0x1000, m.adc); err != nil {
 		return nil, err
 	}
+	// SPI: SPI1 にキーボード用マイコンがつながる（kbd.go）。
+	m.spi = s3c2410.NewSPI(func(ch int) {
+		m.intc.Raise(uint([]int{s3c2410.IntSPI0, s3c2410.IntSPI1}[ch]))
+	})
+	m.kbd = &kbdMCU{raise: func() { m.intc.Raise(s3c2410.IntEINT0 + 1) }} // EINT1
+	m.spi.Attach(1, m.kbd)
+	if err := b.MapMMIO("spi", 0x59000000, 0x1000, m.spi); err != nil {
+		return nil, err
+	}
 	// 当面は値保持スタブで済ませる周辺ブロック（S3C2410 データシート Figure 5-1）。
 	for _, p := range []struct {
 		name string
@@ -181,14 +192,6 @@ func New(uartOut io.Writer) (*Machine, error) {
 		}},
 		{"iic", 0x54000000, nil},
 		{"usbdev", 0x52000000, nil},
-		{"spi", 0x59000000, map[uint32]uint32{
-			// SPSTA0/1 の REDY(bit0)=1: 転送は常に即完了として見せる。
-			// ドライバが SPSTA1 の REDY をポーリングし続けてハングするため
-			// （2026-09 に実測。SPI 接続デバイスのドライバと推定）。
-			// TODO: SPI 実装時（タッチスクリーン対応など）に置き換える。
-			0x04: 0x01, // SPSTA0
-			0x24: 0x01, // SPSTA1
-		}},
 		{"sdi", 0x5A000000, nil},
 		{"gpio", 0x56000000, map[uint32]uint32{
 			// GSTATUS1: チップ ID。BSP が SoC 判別に読む可能性がある。

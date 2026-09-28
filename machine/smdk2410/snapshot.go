@@ -13,6 +13,7 @@ import (
 //	cpu            arm.Core
 //	mmu            mmu.MMU（CP15 とソフト TLB）
 //	ram            bus の RAM 領域の中身
+//	board:kbd      SPI1 のキーボード用マイコン（バス外のボード部品）
 //	dev:<領域名>   バスに登録した MMIO デバイス（登録順）
 //
 // MMIO デバイスはバスの登録から列挙する。snapshot.Stateful を実装して
@@ -42,7 +43,8 @@ type chunk struct {
 }
 
 func (m *Machine) chunks() ([]chunk, error) {
-	cs := []chunk{{"machine", m}, {"cpu", m.cpu}, {"mmu", m.mmu}, {"ram", m.bus}}
+	cs := []chunk{{"machine", m}, {"cpu", m.cpu}, {"mmu", m.mmu}, {"ram", m.bus},
+		{"board:kbd", m.kbd}}
 	for _, d := range m.bus.MMIODevices() {
 		switch dev := d.Dev.(type) {
 		case snapshot.Stateful:

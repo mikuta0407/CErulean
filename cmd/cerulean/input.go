@@ -134,7 +134,9 @@ func validateEvent(ev script.Event) error {
 			return fmt.Errorf("%v: (%d,%d) outside the %dx%d screen", ev.Kind, ev.X, ev.Y, screenW, screenH)
 		}
 	case script.KeyDown, script.KeyUp:
-		return fmt.Errorf("%v: key input is not implemented yet", ev.Kind)
+		if !smdk2410.ValidKey(ev.Key) {
+			return fmt.Errorf("unknown key %q (available: %s)", ev.Key, strings.Join(smdk2410.KeyNames(), " "))
+		}
 	}
 	return nil
 }
@@ -164,6 +166,10 @@ func applyEvent(m *smdk2410.Machine, ev script.Event, imageID string) (quit bool
 			return false, nil
 		}
 		return false, m.TouchMove(ev.X, ev.Y)
+	case script.KeyDown:
+		return false, m.KeyDown(ev.Key)
+	case script.KeyUp:
+		return false, m.KeyUp(ev.Key)
 	case script.TouchUp:
 		if touchRaw {
 			m.TouchRaw(false, lastRawX, lastRawY)
