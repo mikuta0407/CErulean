@@ -199,11 +199,15 @@ fn key_names_sorted() {
 
 // ---- 実行ループ（Go の run_test）と Go との一致 ----
 
-const SYNTHETIC: &str = "../../testdata/golden/synthetic/";
-
+/// testdata の合成プログラム（コンパイル時に埋め込む。wasm32-wasip1 のテストでは
+/// ファイルを読めないため）。
 fn synthetic(name: &str) -> Machine {
-    let data = std::fs::read(format!("{SYNTHETIC}{name}")).unwrap();
-    let img = load_words(&data).unwrap();
+    let data: &[u8] = match name {
+        "idle.words" => include_bytes!("../../../../testdata/golden/synthetic/idle.words"),
+        "adc-poll.words" => include_bytes!("../../../../testdata/golden/synthetic/adc-poll.words"),
+        _ => panic!("unknown synthetic program {name}"),
+    };
+    let img = load_words(data).unwrap();
     let mut m = Machine::new();
     m.load_image(&img).unwrap();
     m.set_rtc(2006, 1, 2, 15, 4, 5);
@@ -228,8 +232,15 @@ fn step_matches_run_until() {
 /// 期待値の JSON Lines（testdata/golden/expected）から、命令数ごとの CPU 状態の
 /// ダンプ（16 進）を取り出す（serde を使わない最小の読み取り）。
 fn expected_cpu_dumps(name: &str) -> Vec<(u64, String)> {
-    let text =
-        std::fs::read_to_string(format!("../../testdata/golden/expected/{name}.jsonl")).unwrap();
+    let text = match name {
+        "synthetic-idle" => {
+            include_str!("../../../../testdata/golden/expected/synthetic-idle.jsonl")
+        }
+        "synthetic-adc-poll" => {
+            include_str!("../../../../testdata/golden/expected/synthetic-adc-poll.jsonl")
+        }
+        _ => panic!("unknown scenario {name}"),
+    };
     let field = |line: &str, key: &str| -> String {
         let k = format!("\"{key}\":");
         let rest = &line[line.find(&k).unwrap() + k.len()..];

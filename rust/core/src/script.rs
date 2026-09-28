@@ -556,11 +556,18 @@ mod tests {
     /// 基準シナリオのスクリプトが読めること（絶対命令数だけ・入力だけ）。
     #[test]
     fn golden_scripts() {
-        for name in ["today-calendar", "taps-5"] {
-            let src =
-                std::fs::read_to_string(format!("../../testdata/golden/scenarios/{name}.script"))
-                    .unwrap();
-            let evs = parse(&src, 135_200_000).unwrap();
+        // テストデータはコンパイル時に埋め込む（wasm32-wasip1 のテストではファイルを読めない）。
+        for (name, src) in [
+            (
+                "today-calendar",
+                include_str!("../../../testdata/golden/scenarios/today-calendar.script"),
+            ),
+            (
+                "taps-5",
+                include_str!("../../../testdata/golden/scenarios/taps-5.script"),
+            ),
+        ] {
+            let evs = parse(src, 135_200_000).unwrap();
             assert!(!evs.is_empty());
             assert!(
                 evs.iter()

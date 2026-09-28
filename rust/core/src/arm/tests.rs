@@ -48,7 +48,8 @@ impl TestSys {
                 write,
             }));
         }
-        if a as usize + size as usize > self.mem.len() {
+        // u64 で比べる（wasm32 では usize が 32 ビットで、a+size が溢れるため）。
+        if a as u64 + size as u64 > self.mem.len() as u64 {
             return Err(MemError::Bus(crate::bus::BusError { addr: a, write }));
         }
         Ok(())

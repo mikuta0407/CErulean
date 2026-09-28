@@ -44,8 +44,8 @@ Go・Rust とも**コアの動作を凍結**する（不具合の修正だけ両
 - **`unsafe` は原則使わない**。使うなら `// SAFETY:` に理由と安全性の根拠を書き、
   計測で効果が確かめられた場合だけにし、テストで守る。
 - **依存の追加はユーザーの承認を取る**（計画書 §8）。現在の依存: web の
-  `wasm-bindgen`（=0.2.129、wasm-bindgen-cli と同じ版に固定）だけ。コアは依存なし。
-  sha2・png は段階1 で CLI に、圧縮は計測の後に相談する。
+  `wasm-bindgen`（=0.2.129、wasm-bindgen-cli と同じ版に固定）、CLI の `sha2`・`png`
+  （段階0 で「段階1 の CLI で入れる」と合意済み）。コアは依存なし。圧縮は計測の後に相談する。
 - **版の固定**: `rust/rust-toolchain.toml`（1.98.1）と `rust/Cargo.lock` をコミット。
   wasm-bindgen を上げるときは wasm-bindgen-cli も同じ版を入れ直す。
 - **一致確認**（計画書 §5、定義は `testdata/golden/README.md`）:
@@ -67,7 +67,50 @@ Go・Rust とも**コアの動作を凍結**する（不具合の修正だけ両
   `cargo install` 等の大きなビルドは `CARGO_TARGET_DIR`・`TMPDIR` をプロジェクトの
   tmp/ に向ける。
 - 計測は必ず release ビルドで、交互に 3 回以上走らせて最良値で比べる
-  （Go は `tools/bench/bench.sh`）。
+  （Go は `tools/bench/bench.sh`、Go と Rust の比較は `tools/bench/compare.sh`）。
+
+## Rust 版の設計（段階1、2026-09-28 時点）
+
+所有権は **案 A「CPU の状態とシステムを並べて持つ」**（ユーザー確認済み。計画書 §3.3）。
+Go のコールバックはすべて `sys` の中の直接の呼び出しか戻り値にした。
+
+- モジュール（`rust/core/src`）: `arm`（`Cpu` は状態だけのデータ。メモリ・CP15・
+  割り込み線・実行の上限は `System` trait。`code.rs` デコードキャッシュ、
+  `special.rs` 特化、`idle.rs` アイドル検出、`disasm.rs`）、`bus`（MMIO は
+  `Devices` trait で番号をボードに渡す。RAM は 1 本のアリーナ、TLB はアリーナ内の
+  位置を持つ。監視は `watch_log` にためる）、`mmu`（物理アクセスは `PhysMem`）、
+  `s3c2410`（デバイスは上げた割り込みを戻り値で返す）、`smdk2410`（`Machine { cpu, sys }`、
+  `Sys { mmu, bus, board, code }`、`Board` がデバイス・仮想時間・`RunCtl`、MMIO の
+  振り分けは `Dev` 列挙と match）、`snapshot`、`script`、`emu`、`loader`。
+- Go からの置き換え:
+  - 割り込み線は INTC の `irq`/`fiq` フィールド（CPU が命令境界で読む）。
+  - `runN/runBudget` は `RunCtl`（sys 側）。時間の同期で machine が上限を下げる。
+  - 実行中のコードページ（Go の `curVA`）は MMU の `code_cur_va`。世代が上がる・
+    コードページに書き込まれると MMU が無効にする（Go の SetGenHook の代わり）。
+    書き込まれたページは MMU が記録し、CPU が次にページに入るときに捨てる。
+  - デコード済み命令は `Instr { exec, word, imm }`（16 バイト）。特化は const
+    ジェネリクスの専用関数＋デコード時に求めた即値（Go のクロージャの代わり）。
+  - MMIO の読み書きはバスでアクセス幅に切り詰める（Go は Read8/Read16 の型で
+    切り詰めていた。移植で一度漏れた）。
+  - 表示用の読み出し（`Machine::peek32`）は TLB を埋めない（Go の Peek32 は
+    Read32 経由で TLB を埋め得た）。
+  - RTC は Go の `time.Date` と同じ正規化のグレゴリオ暦を自前で計算（Go で求めた
+    値と照合するテストあり）。UART1 の出力は `take_uart1` で取り出す。
+- Go の動作で、段階1 は Rust も合わせているもの: ARM 状態の cond=1111 の命令は
+  実行ループの条件判定で「不成立」になり NOP として飛ばされる（デコード上は
+  「未実装で停止」だが到達しない。TODO(v5TE) で見直す）。
+- 状態の保存漏れの防止（CheckFields の代わり）: 保存・読み込みで構造体を `..`
+  なしで全フィールド分解する。派生情報は `_` と明示する。
+- スナップショット（Rust の新形式。`snapshot.rs` の先頭コメント）: 署名 `CRLNSNAP`・
+  形式の版数・マシン名・イメージ ID、各チャンクは名前・版数・長さを前置きし
+  CRC-32 を後置。コアは無圧縮（Today で約 134MB。圧縮は段階2 の計測の後に決める）。
+- 検証の道具: `tools/golden/verify.sh rust`（基準シナリオ）、`tools/armvec.sh`
+  （Go と Rust で同じ乱数列から作ったランダムな CPU 状態・命令語の 1 命令実行を
+  20 万件突き合わせる。Rust はデバッグビルドでオーバーフロー検査込み）。
+- CLI（`rust/target/release/cerulean`）: `run`（`--rtc`・`--max-steps`・`--script`・
+  `--trace`・`--sample`・`--watch`・`--fb-out`・`--snap-save F@T`・`--snap-load`・
+  `--result`・`--checkpoint`・`--trace-hash` など）、`info`、`snapdump`。
+  既定の RTC はホストの UTC（TODO: ローカル時刻。std にタイムゾーンがない）。
 
 ## パッケージ境界
 

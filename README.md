@@ -60,7 +60,9 @@ Rust 移行（進行中、2026-09〜）: コアを Rust に移し、最初はブ
 
 - [x] 段階0（準備）: Go 版に一致確認の道具（`-result`・`-checkpoint`・`-trace-hash`）、
       基準シナリオと期待値（`testdata/golden/`）、Rust のワークスペースの骨組み（`rust/`）
-- [ ] 段階1: コアの移植（インタプリタ。ネイティブで Go 版と完全一致）
+- [x] 段階1: コアの移植（インタプリタ。ネイティブで Go 版と完全一致）。全基準シナリオで
+      Go と一致し、Go の高速化（デコードキャッシュ・特化・アイドルスキップ等）と
+      新しいスナップショット形式も移した。速度は Go と同等（実処理の区間で約 5% 速い）
 - [ ] 段階2〜5: wasm での計測、ブラウザ版、インタプリタの高速化、JIT-to-wasm
 
 ## テスト用イメージの入手
@@ -170,6 +172,23 @@ tools/check.sh
 
 設計方針は [CLAUDE.md](CLAUDE.md) を参照。
 
+### Rust 版（移行中）
+
+```sh
+cd rust && cargo build --release && cd ..
+R=rust/target/release/cerulean
+
+# Today 画面まで起動してスナップショットを保存（Rust の形式。無圧縮で約 134MB）
+$R run --rtc 2006-01-02T15:04:05 --max-steps 3600000001 \
+  --snap-save today-rs.snap@3600000000i tmp/images/PPC_USA.bin
+# スナップショットから再開してスクリプトで操作（書式は Go 版と同じ。--fb-out で画面を PNG に）
+$R run --snap-load today-rs.snap --script calendar.txt --fb-out cal.png
+# チャンクの一覧・2 つのスナップショットの比較
+$R snapdump today-rs.snap
+```
+
+フラグは `$R`（引数なし）で表示される。Go 版とフラグ名・スナップショット形式は互換でない。
+
 ### 一致確認（Go 版と Rust 版）
 
 `testdata/golden/` に基準シナリオ（リセット起点。イメージ＋固定の RTC＋絶対命令数の
@@ -179,6 +198,9 @@ tools/check.sh
 ```sh
 # 期待値との照合（実イメージのシナリオは CERULEAN_IMAGE が必要。無ければ合成だけ）
 CERULEAN_IMAGE=tmp/images/PPC_USA.bin tools/golden/verify.sh go
+CERULEAN_IMAGE=tmp/images/PPC_USA.bin tools/golden/verify.sh rust
+# Go と Rust の CPU の 1 命令ずつの差分テスト（20 万件）
+tools/armvec.sh
 # 期待値の作り直し
 CERULEAN_IMAGE=tmp/images/PPC_USA.bin tools/golden/regen.sh [シナリオ名...]
 
@@ -193,6 +215,7 @@ CERULEAN_IMAGE=tmp/images/PPC_USA.bin tools/golden/regen.sh [シナリオ名...]
 | 道具 | 用途 |
 |---|---|
 | `tools/bench/bench.sh` | 基準のリビジョン（既定 HEAD）と作業ツリーの速度を交互に計測 |
+| `tools/bench/compare.sh` | Go 版と Rust 版の速度を交互に計測 |
 | `go run ./tools/segspeed <snap> <script>` | スクリプト再生中の仮想 0.25 秒ごとの実時間比・アイドル割合 |
 | `go run ./tools/ihist <snap>` | 実行した ARM 命令の種類の分布 |
 | `go run ./tools/genrate <image>` | MMU の変換世代・コードページの印付けの頻度 |
