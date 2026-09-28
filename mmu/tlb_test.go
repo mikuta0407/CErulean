@@ -84,7 +84,7 @@ func TestTLBFCSETag(t *testing.T) {
 
 type countDev struct{ reads int }
 
-func (d *countDev) Read(off uint32, size int) uint32 { d.reads++; return off }
+func (d *countDev) Read(off uint32, size int) uint32     { d.reads++; return off }
 func (d *countDev) Write(off uint32, size int, v uint32) {}
 
 // MMIO ページは TLB ヒットしても毎回デバイスに届く（RAM 直アクセスしない）。

@@ -13,6 +13,7 @@ import (
 	"runtime/pprof"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/mikuta0407/cerulean/bus"
 	"github.com/mikuta0407/cerulean/cpu/arm"
@@ -31,6 +32,8 @@ run flags:
   -trace           実行した命令の PC・命令語・ディスアセンブルを逐一表示する
   -trace-from n    -trace の表示を n 命令目から始める
   -sample n        n 命令ごとに PC・CPSR を 1 行表示する（停滞箇所の調査用）
+  -rtc time       RTC の初期時刻（例 2006-01-02T15:04:05。既定はホストの現在時刻。
+                   固定すると実行が完全に再現可能になる）
   -fb-out f.png    停止時（max-steps・エラー）に LCD のフレームバッファを PNG に書く
   -fb-every n      -fb-out と併用。n 命令ごとに f-<命令数>.png として連番で書く
   -cpuprofile f    Go の CPU プロファイルを f に書く（エミュレータ自体の性能調査用）
@@ -117,6 +120,7 @@ func cmdRun(args []string) {
 	maxSteps := fs.Uint64("max-steps", 0, "最大実行命令数 (0 = 無制限)")
 	trace := fs.Bool("trace", false, "実行トレースを表示")
 	traceFrom := fs.Uint64("trace-from", 0, "トレース開始命令数")
+	rtcFlag := fs.String("rtc", "", "RTC 初期時刻 (YYYY-MM-DDTHH:MM:SS、既定は現在時刻)")
 	fbOut := fs.String("fb-out", "", "停止時にフレームバッファを書く PNG パス")
 	fbEvery := fs.Uint64("fb-every", 0, "n 命令ごとにフレームバッファを連番 PNG で書く (0 = 無効)")
 	cpuprofile := fs.String("cpuprofile", "", "CPU プロファイル出力先")
@@ -160,6 +164,13 @@ func cmdRun(args []string) {
 	if err := m.LoadImage(img); err != nil {
 		fatal(err)
 	}
+	rtcTime := time.Now()
+	if *rtcFlag != "" {
+		if rtcTime, err = time.ParseInLocation("2006-01-02T15:04:05", *rtcFlag, time.Local); err != nil {
+			fatal(fmt.Errorf("-rtc: %w", err))
+		}
+	}
+	m.SetRTC(rtcTime)
 	m.Reset()
 	fmt.Fprintf(os.Stderr, "cerulean: %s: loaded %s image, entry %08X (PA %08X)\n",
 		m.Name(), img.Format, img.Entry, m.CPU().PC())

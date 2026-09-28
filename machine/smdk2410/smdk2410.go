@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"image"
 	"io"
+	"time"
 
 	"github.com/mikuta0407/cerulean/bus"
 	"github.com/mikuta0407/cerulean/cpu"
@@ -46,6 +47,7 @@ type Machine struct {
 	intc  *s3c2410.INTC
 	timer *s3c2410.PWMTimer
 	lcd   *s3c2410.LCD
+	rtc   *s3c2410.RTC
 
 	// 仮想時間: 命令数から PCLK ティックを固定比で生成する（決定論的。
 	// ユーザー確認済み 2026-09）。tickAcc は 1/8 ティック単位の端数累積。
@@ -59,6 +61,15 @@ type Machine struct {
 // → 約 0.375 PCLK/命令 = 3/8。カーネルの時間の流れの速さが変わるだけで
 // 正しさには影響しない（タイマーは同じ仮想時間軸で数えるため）。
 const pclkTicksNum = 3
+
+// pclkHz は仮想時間 1 秒あたりの PCLK ティック数（RTC の進みに使う）。
+// 根拠（2026-09 実測）: ブートコードが MPLLCON=0x000A1031（MDIV=161, PDIV=3,
+// SDIV=1）・CLKDIVN=3 を書く。データシートの式 Fout = (MDIV+8)×Fin /
+// ((PDIV+2)×2^SDIV)、Fin=12MHz（SMDK2410 の水晶）で FCLK=202.8MHz、
+// CLKDIVN=3 で PCLK=FCLK/4=50.7MHz。カーネルの Timer4（TCNTB4=25375・1/2 分周）
+// がこれで約 1ms 周期になることとも整合する。
+// TODO: PLL の式と Fin はデータシート・ボード資料と要照合。
+const pclkHz = 50_700_000
 
 var _ machine.Machine = (*Machine)(nil)
 
@@ -125,6 +136,11 @@ func New(uartOut io.Writer) (*Machine, error) {
 	if err := b.MapMMIO("lcd", 0x4D000000, 0x1000, m.lcd); err != nil {
 		return nil, err
 	}
+	// RTC: 時刻は仮想時間で進む（Step 参照）。初期時刻は SetRTC で与える。
+	m.rtc = s3c2410.NewRTC(pclkHz)
+	if err := b.MapMMIO("rtc", 0x57000000, 0x1000, m.rtc); err != nil {
+		return nil, err
+	}
 	// 当面は値保持スタブで済ませる周辺ブロック（S3C2410 データシート Figure 5-1）。
 	for _, p := range []struct {
 		name string
@@ -163,7 +179,6 @@ func New(uartOut io.Writer) (*Machine, error) {
 			// TODO: データシートと再照合（0x32410000 = S3C2410 のはず）
 			0xB0: 0x32410000,
 		}},
-		{"rtc", 0x57000000, nil},
 		{"adc", 0x58000000, nil},
 	} {
 		if err := b.MapMMIO(p.name, p.base, 0x1000, s3c2410.NewStub(p.name, p.init)); err != nil {
@@ -220,6 +235,11 @@ func (m *Machine) Framebuffer() (*image.RGBA, s3c2410.LCDConfig, error) {
 	return m.lcd.Frame(m.bus.Read32)
 }
 
+// SetRTC は RTC の現在時刻を設定する（Reset 前に呼ぶ）。t の壁時計の値
+// （年月日時分秒）がそのまま RTC に入る。ホストの時計を読むのは呼び出し側
+// （cmd）の責務で、コアは渡された時刻からの仮想時間で決定論的に進める。
+func (m *Machine) SetRTC(t time.Time) { m.rtc.SetTime(t) }
+
 // Translate は CPU から見た VA を現在の MMU 状態で PA に変換する（デバッグ用）。
 func (m *Machine) Translate(va uint32) (uint32, error) {
 	return m.mmu.Translate(va)
@@ -274,6 +294,7 @@ func (m *Machine) Step() error {
 	if t := m.tickAcc >> 3; t > 0 {
 		m.tickAcc &= 7
 		m.timer.Advance(int64(t))
+		m.rtc.Advance(int64(t))
 	}
 	return err
 }
