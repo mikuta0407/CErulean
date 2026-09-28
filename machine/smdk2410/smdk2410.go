@@ -125,6 +125,8 @@ func New(uartOut io.Writer) (*Machine, error) {
 		init map[uint32]uint32
 	}{
 		{"memc", 0x48000000, nil}, // メモリコントローラ（BWSCON など）
+		{"usbhost", 0x49000000, nil},
+		{"dma", 0x4B000000, nil},
 		{"clkpwr", 0x4C000000, map[uint32]uint32{ // クロック・電源管理
 			// リセット値（データシート Ch.7）。カーネルが PLL 設定から
 			// クロックを逆算する場合に 0 だと壊れるため入れておく。
@@ -141,6 +143,10 @@ func New(uartOut io.Writer) (*Machine, error) {
 			0x00: 0x8021, // WTCON リセット値。TODO: データシートと再照合
 		}},
 		{"iic", 0x54000000, nil},
+		{"iis", 0x55000000, nil},
+		{"usbdev", 0x52000000, nil},
+		{"spi", 0x59000000, nil},
+		{"sdi", 0x5A000000, nil},
 		{"gpio", 0x56000000, map[uint32]uint32{
 			// GSTATUS1: チップ ID。BSP が SoC 判別に読む可能性がある。
 			// TODO: データシートと再照合（0x32410000 = S3C2410 のはず）
@@ -152,6 +158,14 @@ func New(uartOut io.Writer) (*Machine, error) {
 		if err := b.MapMMIO(p.name, p.base, 0x1000, s3c2410.NewStub(p.name, p.init)); err != nil {
 			return nil, err
 		}
+	}
+	// 0x500F0000: S3C2410 のデータシートにない領域だが、ドライバが
+	// VA を張って 0x500F2080 に書く（2026-09 に実測）。Device Emulator
+	// 固有の準仮想デバイスと思われる。レジスタ帯が広い（+0x2080）ので
+	// 0x10000 マップする。
+	// TODO: 正体の特定。どのドライバがどう使うかをトレースで調べる。
+	if err := b.MapMMIO("de-unknown-500F0000", 0x500F0000, 0x10000, s3c2410.NewStub("de-unknown", nil)); err != nil {
+		return nil, err
 	}
 	// mmu.MMU は CPU から見たメモリ空間（cpu.Memory）と CP15（arm.Coprocessor）を兼ねる。
 	mm := mmu.New(b)
