@@ -145,7 +145,14 @@ func New(uartOut io.Writer) (*Machine, error) {
 		{"iic", 0x54000000, nil},
 		{"iis", 0x55000000, nil},
 		{"usbdev", 0x52000000, nil},
-		{"spi", 0x59000000, nil},
+		{"spi", 0x59000000, map[uint32]uint32{
+			// SPSTA0/1 の REDY(bit0)=1: 転送は常に即完了として見せる。
+			// ドライバが SPSTA1 の REDY をポーリングし続けてハングするため
+			// （2026-09 に実測。SPI 接続デバイスのドライバと推定）。
+			// TODO: SPI 実装時（タッチスクリーン対応など）に置き換える。
+			0x04: 0x01, // SPSTA0
+			0x24: 0x01, // SPSTA1
+		}},
 		{"sdi", 0x5A000000, nil},
 		{"gpio", 0x56000000, map[uint32]uint32{
 			// GSTATUS1: チップ ID。BSP が SoC 判別に読む可能性がある。

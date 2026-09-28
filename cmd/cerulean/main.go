@@ -179,6 +179,7 @@ func cmdRun(args []string) {
 		if *maxSteps != 0 && steps >= *maxSteps {
 			fmt.Fprintf(os.Stderr, "cerulean: stopped after %d steps at PC=%08X (max-steps)\n", steps, c.PC())
 			dumpRegs(c)
+			dumpHistory(steps) // どこでループしているかの調査用
 			return
 		}
 	}
