@@ -172,6 +172,21 @@ func cmdRun(args []string) {
 	if err != nil {
 		fatal(err)
 	}
+	// トレースで CPSR（Thumb 状態）を見るため具象型で持つ（cmd は arm に依存してよい）。
+	c := m.CPU().(*arm.Core)
+	// 監視はスナップショットの復元より前に登録する。復元時の TLB は、監視中は
+	// RAM ページを直接持たない（bus を経由させる）ようにして復元されるため。
+	for _, w := range watches {
+		// PC は実行中の命令の次（ARM: +4 / Thumb: +2）を指している。
+		m.Bus().AddWatch(w.lo, w.hi, func(region string, addr uint32, size int, v uint32, write bool) {
+			kind := "R"
+			if write {
+				kind = "W"
+			}
+			fmt.Fprintf(os.Stderr, "%12d  watch %s%d %-10s PA=%08X v=%08X  (next PC=%08X)\n",
+				m.Steps(), kind, size*8, region, addr, v, c.PC())
+		})
+	}
 
 	// imageID は元イメージの SHA-256。スナップショットに記録し、再開時に
 	// 別イメージと取り違えていないかの照合に使う。
@@ -219,8 +234,6 @@ func cmdRun(args []string) {
 		fatal(err)
 	}
 
-	// トレースで CPSR（Thumb 状態）を見るため具象型で持つ（cmd は arm に依存してよい）。
-	c := m.CPU().(*arm.Core)
 	if *fbEvery != 0 && *fbOut == "" {
 		fatal(errors.New("-fb-every requires -fb-out"))
 	}
@@ -232,17 +245,6 @@ func cmdRun(args []string) {
 			fmt.Fprintln(os.Stderr, "cerulean:", err)
 		}
 	}
-	for _, w := range watches {
-		// PC は実行中の命令の次（ARM: +4 / Thumb: +2）を指している。
-		m.Bus().AddWatch(w.lo, w.hi, func(region string, addr uint32, size int, v uint32, write bool) {
-			kind := "R"
-			if write {
-				kind = "W"
-			}
-			fmt.Fprintf(os.Stderr, "%12d  watch %s%d %-10s PA=%08X v=%08X  (next PC=%08X)\n",
-				m.Steps(), kind, size*8, region, addr, v, c.PC())
-		})
-	}
 	// 直前 N 命令のリングバッファ（停止原因の調査用）。
 	type histEntry struct {
 		pc, word, next uint32 // next は Thumb の BL 表示用の直後ハーフワード
@@ -251,18 +253,16 @@ func cmdRun(args []string) {
 	var (
 		hist    []histEntry
 		histPos int
+		histN   int // 記録した件数（len(hist) で頭打ち。再開直後は通算命令数より少ない）
 	)
 	if *history > 0 {
 		hist = make([]histEntry, *history)
 	}
-	dumpHistory := func(steps uint64) {
+	dumpHistory := func() {
 		if hist == nil {
 			return
 		}
-		n := len(hist)
-		if steps < uint64(n) {
-			n = int(steps)
-		}
+		n := histN
 		fmt.Fprintf(os.Stderr, "last %d instructions:\n", n)
 		for i := 0; i < n; i++ {
 			e := hist[(histPos+len(hist)-n+i)%len(hist)]
@@ -274,7 +274,7 @@ func cmdRun(args []string) {
 	stop := func() {
 		reportPA(m, c.PC())
 		dumpRegs(c)
-		dumpHistory(m.Steps()) // どこでループしているかの調査用
+		dumpHistory() // どこでループしているかの調査用
 		dumpFB(*fbOut)
 		stopProfile()
 	}
@@ -321,6 +321,9 @@ func cmdRun(args []string) {
 			if hist != nil {
 				hist[histPos] = histEntry{pc: c.PC(), word: word, next: next, thumb: thumb}
 				histPos = (histPos + 1) % len(hist)
+				if histN < len(hist) {
+					histN++
+				}
 			}
 		}
 		if err := m.Step(); err != nil {
