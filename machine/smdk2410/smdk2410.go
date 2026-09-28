@@ -42,8 +42,21 @@ type Machine struct {
 	bus *bus.Bus
 	mmu *mmu.MMU
 
+	intc  *s3c2410.INTC
+	timer *s3c2410.PWMTimer
+
+	// 仮想時間: 命令数から PCLK ティックを固定比で生成する（決定論的。
+	// ユーザー確認済み 2026-09）。tickAcc は 1/8 ティック単位の端数累積。
+	tickAcc uint32
+
 	entryPA uint32 // リセット時に飛ぶ物理アドレス
 }
+
+// 1 命令あたりの PCLK ティック数 = pclkTicksNum/8。
+// 根拠(概算): CPU ~200MHz・平均 CPI ~1.5 → ~133M 命令/秒、PCLK ~50MHz
+// → 約 0.375 PCLK/命令 = 3/8。カーネルの時間の流れの速さが変わるだけで
+// 正しさには影響しない（タイマーは同じ仮想時間軸で数えるため）。
+const pclkTicksNum = 3
 
 var _ machine.Machine = (*Machine)(nil)
 
@@ -89,18 +102,29 @@ func New(uartOut io.Writer) (*Machine, error) {
 			return nil, err
 		}
 	}
+	// 割り込みコントローラとタイマーは実動作（machine が CPU へ配線する）。
+	// m の cpu は後で組み立てるため、コールバックはクロージャで遅延参照する。
+	m := &Machine{}
+	m.intc = s3c2410.NewINTC(func(irq, fiq bool) {
+		m.cpu.SetIRQ(irq)
+		m.cpu.SetFIQ(fiq)
+	})
+	m.timer = s3c2410.NewPWMTimer(func(n int) {
+		m.intc.Raise(uint(s3c2410.IntTimer0 + n))
+	})
+	if err := b.MapMMIO("intc", 0x4A000000, 0x1000, m.intc); err != nil {
+		return nil, err
+	}
+	if err := b.MapMMIO("timer", 0x51000000, 0x1000, m.timer); err != nil {
+		return nil, err
+	}
 	// 当面は値保持スタブで済ませる周辺ブロック（S3C2410 データシート Figure 5-1）。
-	// 割り込みコントローラとタイマーは、カーネルの時限処理を動かす段階で
-	// 実動作する専用実装に置き換える予定。
 	for _, p := range []struct {
 		name string
 		base uint32
 		init map[uint32]uint32
 	}{
 		{"memc", 0x48000000, nil}, // メモリコントローラ（BWSCON など）
-		{"intc", 0x4A000000, map[uint32]uint32{ // 割り込みコントローラ
-			0x08: 0xFFFFFFFF, // INTMSK: リセット値は全マスク
-		}},
 		{"clkpwr", 0x4C000000, map[uint32]uint32{ // クロック・電源管理
 			// リセット値（データシート Ch.7）。カーネルが PLL 設定から
 			// クロックを逆算する場合に 0 だと壊れるため入れておく。
@@ -111,9 +135,8 @@ func New(uartOut io.Writer) (*Machine, error) {
 			0x0C: 0x0007FFF0, // CLKCON
 			0x10: 0x00000004, // CLKSLOW
 		}},
-		{"lcd", 0x4D000000, nil},   // LCD コントローラ
-		{"nand", 0x4E000000, nil},  // NAND フラッシュコントローラ
-		{"timer", 0x51000000, nil}, // PWM タイマー
+		{"lcd", 0x4D000000, nil},  // LCD コントローラ
+		{"nand", 0x4E000000, nil}, // NAND フラッシュコントローラ
 		{"wdt", 0x53000000, map[uint32]uint32{
 			0x00: 0x8021, // WTCON リセット値。TODO: データシートと再照合
 		}},
@@ -131,12 +154,11 @@ func New(uartOut io.Writer) (*Machine, error) {
 		}
 	}
 	// mmu.MMU は CPU から見たメモリ空間（cpu.Memory）と CP15（arm.Coprocessor）を兼ねる。
-	m := mmu.New(b)
-	return &Machine{
-		cpu: arm.New(m, m),
-		bus: b,
-		mmu: m,
-	}, nil
+	mm := mmu.New(b)
+	m.cpu = arm.New(mm, mm)
+	m.bus = b
+	m.mmu = mm
+	return m, nil
 }
 
 func (m *Machine) Name() string { return "smdk2410" }
@@ -196,5 +218,12 @@ func (m *Machine) Reset() {
 }
 
 func (m *Machine) Step() error {
-	return m.cpu.Step()
+	err := m.cpu.Step()
+	// 仮想時間を進める: 1 命令 = pclkTicksNum/8 PCLK ティック。
+	m.tickAcc += pclkTicksNum
+	if t := m.tickAcc >> 3; t > 0 {
+		m.tickAcc &= 7
+		m.timer.Advance(int64(t))
+	}
+	return err
 }
