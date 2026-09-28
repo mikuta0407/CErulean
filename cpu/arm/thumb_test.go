@@ -34,11 +34,11 @@ func TestThumbShiftImm(t *testing.T) {
 		wantFlags string
 	}{
 		// LSL Rd, Rs, #imm: 000 00 imm5 rs rd
-		{"LSL #4", 0x0111, 0x0F0F, 0xF0F0, ""},          // lsl r1, r2, #4
+		{"LSL #4", 0x0111, 0x0F0F, 0xF0F0, ""},                 // lsl r1, r2, #4
 		{"LSL #0 (MOV)", 0x0011, 0x8000_0001, 0x80000001, "N"}, // lsl r1, r2, #0
-		{"LSR #1 C", 0x0851, 0x3, 0x1, "C"},             // lsr r1, r2, #1
-		{"LSR #0 = #32", 0x0811, 0x80000000, 0, "ZC"},   // lsr r1, r2, #32
-		{"ASR #1", 0x1051, 0x80000002, 0xC0000001, "N"}, // asr r1, r2, #1
+		{"LSR #1 C", 0x0851, 0x3, 0x1, "C"},                    // lsr r1, r2, #1
+		{"LSR #0 = #32", 0x0811, 0x80000000, 0, "ZC"},          // lsr r1, r2, #32
+		{"ASR #1", 0x1051, 0x80000002, 0xC0000001, "N"},        // asr r1, r2, #1
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -179,7 +179,7 @@ func TestThumbHiRegOps(t *testing.T) {
 func TestThumbBX(t *testing.T) {
 	// Thumb → ARM
 	c, mem := newThumbCore()
-	c.SetReg(3, 0x2000) // bit0=0 → ARM へ
+	c.SetReg(3, 0x2000)              // bit0=0 → ARM へ
 	mustThumbStep(t, c, mem, 0x4718) // bx r3
 	if c.CPSR().T() {
 		t.Error("T should be cleared")

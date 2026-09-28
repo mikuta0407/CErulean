@@ -11,6 +11,11 @@ import "github.com/mikuta0407/cerulean/bus"
 type Stub struct {
 	name string
 	regs map[uint32]uint32 // ワードアラインしたオフセット → 値
+
+	// forced は読み出し時に常に OR されるビット（オフセット → マスク）。
+	// 「ハードウェアが立てる ready 系フラグ」を書き込み値と独立に
+	// 見せるために使う（例: IISCON の TX FIFO ready）。
+	forced map[uint32]uint32
 }
 
 var _ bus.Device = (*Stub)(nil)
@@ -25,10 +30,19 @@ func NewStub(name string, init map[uint32]uint32) *Stub {
 	return &Stub{name: name, regs: regs}
 }
 
+// ForceReadBits は off の読み出しで常に mask を立てる（ready 系フラグ用）。
+func (s *Stub) ForceReadBits(off, mask uint32) *Stub {
+	if s.forced == nil {
+		s.forced = make(map[uint32]uint32)
+	}
+	s.forced[off&^3] |= mask
+	return s
+}
+
 // Read はワード単位で保持した値から、アクセスサイズ分を切り出して返す。
 // 未書き込みのレジスタは 0。
 func (s *Stub) Read(off uint32, size int) uint32 {
-	w := s.regs[off&^3]
+	w := s.regs[off&^3] | s.forced[off&^3]
 	switch size {
 	case 1:
 		return (w >> ((off & 3) * 8)) & 0xFF

@@ -33,6 +33,10 @@ const (
 	IntTimer4 = 14
 	IntUART2  = 15
 	IntLCD    = 16
+	IntDMA0   = 17
+	IntDMA1   = 18
+	IntDMA2   = 19
+	IntDMA3   = 20
 	IntUART1  = 23
 	IntUART0  = 28
 	IntRTC    = 30

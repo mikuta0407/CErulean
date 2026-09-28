@@ -126,7 +126,6 @@ func New(uartOut io.Writer) (*Machine, error) {
 	}{
 		{"memc", 0x48000000, nil}, // メモリコントローラ（BWSCON など）
 		{"usbhost", 0x49000000, nil},
-		{"dma", 0x4B000000, nil},
 		{"clkpwr", 0x4C000000, map[uint32]uint32{ // クロック・電源管理
 			// リセット値（データシート Ch.7）。カーネルが PLL 設定から
 			// クロックを逆算する場合に 0 だと壊れるため入れておく。
@@ -143,7 +142,6 @@ func New(uartOut io.Writer) (*Machine, error) {
 			0x00: 0x8021, // WTCON リセット値。TODO: データシートと再照合
 		}},
 		{"iic", 0x54000000, nil},
-		{"iis", 0x55000000, nil},
 		{"usbdev", 0x52000000, nil},
 		{"spi", 0x59000000, map[uint32]uint32{
 			// SPSTA0/1 の REDY(bit0)=1: 転送は常に即完了として見せる。
@@ -165,6 +163,20 @@ func New(uartOut io.Writer) (*Machine, error) {
 		if err := b.MapMMIO(p.name, p.base, 0x1000, s3c2410.NewStub(p.name, p.init)); err != nil {
 			return nil, err
 		}
+	}
+	// DMA コントローラ: 転送は即完了に見せる最小スタブ（dma.go 参照）。
+	if err := b.MapMMIO("dma", 0x4B000000, 0x1000, s3c2410.NewDMAStub(func(ch int) {
+		m.intc.Raise(uint(s3c2410.IntDMA0 + ch))
+	})); err != nil {
+		return nil, err
+	}
+	// IIS（オーディオ）: 値保持スタブだが、IISCON(0x00) の bit7
+	// （TX FIFO ready）は常に立てる。FIFO は無限シンク扱いで、オーディオ
+	// ドライバの送信 ready 待ちポーリングを通すため（2026-09 に実測）。
+	// TODO: 音を出すときは FIFO・DMA 込みの実装に置き換える。
+	if err := b.MapMMIO("iis", 0x55000000, 0x1000,
+		s3c2410.NewStub("iis", nil).ForceReadBits(0x00, 1<<7)); err != nil {
+		return nil, err
 	}
 	// 0x500F0000: S3C2410 のデータシートにない領域だが、ドライバが
 	// VA を張って 0x500F2080 に書く（2026-09 に実測）。Device Emulator
