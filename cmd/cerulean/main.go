@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/pprof"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -58,6 +59,14 @@ run flags:
   -touch-raw       スクリプトのタッチ座標を ADC の生値（0〜1023）として渡す（調査用）
   -snap-load f     スナップショット f から再開する（命令数・仮想時刻は保存時点から
                    継続）。image を指定すると保存時のイメージと同一かを照合する
+  -result f        一致確認用の結果（CPU 状態のダンプ・RAM・UART1・画面のハッシュ・
+                   停止の種類）を JSON Lines で f に書く（停止時と -checkpoint の時点。
+                   項目は testdata/golden/README.md）
+  -checkpoint n    -result に n 命令目の時点の結果も書く（複数指定可）
+  -trace-hash n    n 命令ごとに命令数と CPU 状態のダンプの SHA-256 を 1 行書く
+                   （Go 版と Rust 版の食い違いの区間を二分探索で絞る用）
+  -trace-hash-ram n  n 命令ごとに RAM の SHA-256 も加える（重いので別の間隔）
+  -trace-hash-out f  -trace-hash の出力先 (default 標準エラー)
 
 serve flags:
   -addr host:port  待ち受けアドレス (default 127.0.0.1:8080。認証が無いので既定はローカルのみ)
@@ -165,6 +174,12 @@ func cmdRun(args []string) {
 	noIdleSkip := fs.Bool("no-idle-skip", false, "アイドルループのスキップを無効にする")
 	stats := fs.Bool("stats", false, "停止時に実行速度（命令/秒・実時間比）を表示する")
 	fs.BoolVar(&touchRaw, "touch-raw", false, "スクリプトのタッチ座標を ADC 生値として渡す（調査用）")
+	resultPath := fs.String("result", "", "一致確認用の結果を JSON Lines で書く")
+	var checkpoints stepList
+	fs.Var(&checkpoints, "checkpoint", "-result に書く途中の命令数（複数可）")
+	traceHash := fs.Uint64("trace-hash", 0, "n 命令ごとに CPU 状態のハッシュを書く (0 = 無効)")
+	traceHashRAM := fs.Uint64("trace-hash-ram", 0, "n 命令ごとに RAM のハッシュも書く (0 = 無効)")
+	traceHashOut := fs.String("trace-hash-out", "", "-trace-hash の出力先 (既定は標準エラー)")
 	_ = fs.Parse(args)
 	if fs.NArg() > 1 || (fs.NArg() == 0 && *snapLoad == "") {
 		usage()
@@ -191,9 +206,34 @@ func cmdRun(args []string) {
 	if *machineName != "smdk2410" {
 		fatal(fmt.Errorf("unknown machine %q (available: smdk2410)", *machineName))
 	}
-	m, err := smdk2410.New(os.Stdout)
+	// UART1 の送信バイト列はハッシュを取りながら標準出力に流す（-result 用）。
+	uart := newUARTTap(os.Stdout)
+	m, err := smdk2410.New(uart)
 	if err != nil {
 		fatal(err)
+	}
+	var results *resultWriter
+	if *resultPath != "" {
+		f, err := os.Create(*resultPath)
+		if err != nil {
+			fatal(err)
+		}
+		defer f.Close()
+		results = &resultWriter{f: f, uart: uart}
+	} else if len(checkpoints) > 0 {
+		fatal(errors.New("-checkpoint requires -result"))
+	}
+	var hasher *traceHasher
+	if *traceHash != 0 || *traceHashRAM != 0 {
+		hasher = &traceHasher{w: os.Stderr, every: *traceHash, ramEvery: *traceHashRAM}
+		if *traceHashOut != "" {
+			f, err := os.Create(*traceHashOut)
+			if err != nil {
+				fatal(err)
+			}
+			defer f.Close()
+			hasher.w = f
+		}
 	}
 	// トレースで CPSR（Thumb 状態）を見るため具象型で持つ（cmd は arm に依存してよい）。
 	c := m.CPU().(*arm.Core)
@@ -254,6 +294,12 @@ func cmdRun(args []string) {
 
 	// stop は停止時の共通処理（レジスタ・履歴・画面の出力）。
 	started, startSteps := time.Now(), m.Steps()
+	// stop の前に -result の最後の行を書く。
+	writeStop := func(si *stopInfo) {
+		if err := results.write(m, "stop", si); err != nil {
+			fmt.Fprintln(os.Stderr, "cerulean: -result:", err)
+		}
+	}
 	stop := func() {
 		reportPA(m, c.PC())
 		dumpRegs(c)
@@ -295,6 +341,9 @@ func cmdRun(args []string) {
 		if *maxSteps != 0 {
 			target = min(target, *maxSteps)
 		}
+		// 結果・ハッシュを取る命令数ちょうどで止まる（RunUntil はアイドル
+		// スキップ・ブロック実行でも limit を飛び越さない）。
+		target = min(target, hasher.next(steps), checkpoints.next(steps))
 		if *trace {
 			if steps >= *traceFrom {
 				target = steps + 1
@@ -311,18 +360,31 @@ func cmdRun(args []string) {
 		switch {
 		case errors.As(err, &evErr):
 			fmt.Fprintln(os.Stderr, "cerulean:", err)
+			writeStop(stopFromError(err))
 			stop()
 			os.Exit(1)
 		case err != nil:
 			reportStop(c.PC(), m.Steps(), err)
+			writeStop(stopFromError(err))
 			stop()
 			os.Exit(1)
 		case quit:
 			fmt.Fprintf(os.Stderr, "cerulean: stopped after %d steps at PC=%08X (script quit)\n", m.Steps(), c.PC())
+			writeStop(&stopInfo{Kind: "quit"})
 			stop()
 			return
 		}
 		steps = m.Steps()
+		// その命令数に予定された入力イベントを適用する前の状態を書く
+		// （イベントは次の周の先頭で適用される）。
+		if err := hasher.emit(m); err != nil {
+			fatal(err)
+		}
+		if checkpoints.has(steps) {
+			if err := results.write(m, "checkpoint", nil); err != nil {
+				fatal(err)
+			}
+		}
 		if *sample != 0 && steps%*sample == 0 {
 			fmt.Fprintf(os.Stderr, "%12d  sample PC=%08X CPSR=%08X\n", steps, c.PC(), uint32(c.CPSR()))
 		}
@@ -331,6 +393,7 @@ func cmdRun(args []string) {
 		}
 		if *maxSteps != 0 && steps >= *maxSteps {
 			fmt.Fprintf(os.Stderr, "cerulean: stopped after %d steps at PC=%08X (max-steps)\n", steps, c.PC())
+			writeStop(&stopInfo{Kind: "max-steps"})
 			stop()
 			return
 		}
@@ -466,4 +529,31 @@ func (r *rangeList) Set(s string) error {
 	}
 	*r = append(*r, struct{ lo, hi uint32 }{uint32(l), uint32(h)})
 	return nil
+}
+
+// stepList は -checkpoint の繰り返し指定（命令数）。
+type stepList []uint64
+
+func (l *stepList) String() string { return fmt.Sprint(*l) }
+
+func (l *stepList) Set(s string) error {
+	v, err := strconv.ParseUint(s, 0, 64)
+	if err != nil {
+		return err
+	}
+	*l = append(*l, v)
+	return nil
+}
+
+func (l stepList) has(steps uint64) bool { return slices.Contains(l, steps) }
+
+// next は steps より後の最初の指定（なければ最大値）。
+func (l stepList) next(steps uint64) uint64 {
+	n := uint64(math.MaxUint64)
+	for _, v := range l {
+		if v > steps {
+			n = min(n, v)
+		}
+	}
+	return n
 }
