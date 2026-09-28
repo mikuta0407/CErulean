@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CErulean wasm 計測</title>
+<style>
+  :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+  body { margin: 16px; max-width: 48rem; }
+  pre { white-space: pre-wrap; background: color-mix(in srgb, currentColor 8%, transparent); padding: 8px; border-radius: 6px; }
+  .ok { color: #2a7; } .ng { color: #d33; }
+</style>
+</head>
+<body>
+<h1>CErulean wasm 計測（段階2）</h1>
+<p>リポジトリの直下を HTTP で配信して開く（例: <code>python3 -m http.server -d . 8000</code> の後
+<code>http://localhost:8000/rust/web/www/bench/</code>）。先に <code>tools/web-build.sh</code> で wasm をビルドしておく。</p>
+<p>WM5 のイメージ（PPC_USA.bin）を選ぶと、リセットから 12 億命令を走らせて速度と基準との一致を測り、
+スナップショットの保存・圧縮・OPFS の時間も測る（数十秒〜数分。イメージはこのページの外に送らない）。</p>
+<input type="file" id="image">
+<pre id="out"></pre>
+<script type="module">
+const out = document.getElementById("out");
+const print = (s) => { out.textContent += s + "\n"; };
+document.getElementById("image").onchange = async (ev) => {
+  const file = ev.target.files[0];
+  if (!file) return;
+  out.textContent = "";
+  const lines = (await (await fetch("/testdata/golden/expected/boot-1200M.jsonl")).text()).trim().split("\n");
+  const expected = JSON.parse(lines.at(-1));
+  const imageBytes = new Uint8Array(await file.arrayBuffer());
+  print(`${navigator.userAgent}\nimage ${file.name} ${imageBytes.length} bytes`);
+  const worker = new Worker("worker.js", { type: "module" });
+  worker.onmessage = ({ data }) => {
+    if (data.log) print(data.log);
+    if (data.error) print(`ERROR ${data.error}`);
+    if (data.result) {
+      print("\n結果（この JSON を報告に貼る）:\n" + JSON.stringify(data.result, null, 1));
+      out.className = data.result.match && data.result.snapRoundTrip ? "ok" : "ng";
+    }
+  };
+  worker.onerror = (e) => print(`worker error: ${e.message}`);
+  worker.postMessage({ imageBytes, expected }, [imageBytes.buffer]);
+};
+</script>
+</body>
+</html>

@@ -5,6 +5,7 @@
 # リセットから走らせ、結果の JSON Lines（testdata/golden/README.md）を書く。
 # 追加の引数は CLI にそのまま渡す（例: --trace-hash 1000000）。
 # CLI は $CERULEAN_BIN（既定: rust/target/release/cerulean。無ければビルド）。
+# GOLDEN_RUNNER=wasm なら web クレートの wasm を Node で走らせる（run-wasm.mjs）。
 #
 # 実イメージのシナリオは環境変数 CERULEAN_IMAGE（PPC_USA.bin のパス）が必要。
 # UART1 の出力は <出力>.uart に、CLI の標準エラーは <出力>.err に書く。
@@ -50,6 +51,15 @@ if [ -n "$image_sha256" ]; then
   fi
 fi
 
+if [ "${GOLDEN_RUNNER:-native}" = wasm ]; then
+  # wasm（Node）で走らせる（tools/web-build.sh の出力を使う）。
+  [ -f "$root/rust/web/pkg-node/cerulean_web.js" ] || "$root/tools/web-build.sh" >/dev/null
+  node "$root/tools/golden/run-wasm.mjs" "$name" "$out" > "$out.uart" 2> "$out.err" || {
+    echo "run.sh: $name: wasm runner exited with $? (see $out.err)" >&2
+    exit 1
+  }
+  exit 0
+fi
 bin=${CERULEAN_BIN:-$root/rust/target/release/cerulean}
 if [ ! -x "$bin" ]; then
   (cd "$root/rust" && cargo build --release -q -p cerulean-cli)

@@ -3,3 +3,5 @@
 
 # Rust のビルド成果物
 /rust/target/
+/rust/web/pkg-node/
+/rust/web/www/pkg/
