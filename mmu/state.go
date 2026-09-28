@@ -66,4 +66,5 @@ func (m *MMU) LoadState(d *snapshot.Decoder) {
 		}
 	}
 	m.updatePermMask()
+	m.resetCode() // デコードキャッシュは保存しない（CPU 側も空で復元する）
 }

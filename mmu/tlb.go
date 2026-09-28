@@ -44,6 +44,9 @@ type tlbEntry struct {
 	pa   uint32 // 物理ページ先頭
 	perm uint8
 	ram  []byte // 物理ページが RAM ならその実体（4KB）。MMIO なら nil
+	// wram は書き込みの fast path 用の実体。ram と同じだが、コードページ
+	// （code.go）では nil にして書き込みを遅い経路に回す。
+	wram []byte
 }
 
 // RAMPager は物理空間が RAM ページの実体を渡せる場合に実装する任意 interface
@@ -56,7 +59,9 @@ func (m *MMU) flushTLB() {
 	for i := range m.tlb {
 		m.tlb[i].tag = 0
 		m.tlb[i].ram = nil
+		m.tlb[i].wram = nil
 	}
+	m.gen++
 }
 
 // updatePermMask は現在の特権状態に対応する読み/書き権限ビットを選ぶ。
@@ -104,6 +109,11 @@ func (m *MMU) fill(va uint32) {
 	if p, ok := m.phys.(RAMPager); ok {
 		e.ram = p.RAMPage(pa)
 	}
+	e.wram = e.ram
+	if m.isCode(pa) {
+		e.wram = nil
+	}
+	m.gen++ // 詰め替えたスロットにコードページがあったかもしれない（code.go）
 }
 
 // pageInfo は MVA を含む 4KB ページの物理先頭と、4 通りの権限を求める。
@@ -220,26 +230,29 @@ func (m *MMU) Read32(a uint32) (uint32, error) {
 
 func (m *MMU) Write8(a uint32, v uint8) error {
 	if e := m.lookup(a, m.permW); e != nil {
-		if e.ram != nil {
-			e.ram[a&0xFFF] = v
+		if e.wram != nil {
+			e.wram[a&0xFFF] = v
 			return nil
 		}
+		m.checkCodeWrite(e.pa)
 		return m.phys.Write8(e.pa|a&0xFFF, v)
 	}
 	pa, err := m.translateFill(a, true)
 	if err != nil {
 		return err
 	}
+	m.checkCodeWrite(pa)
 	return m.phys.Write8(pa, v)
 }
 
 func (m *MMU) Write16(a uint32, v uint16) error {
 	if a&1 == 0 {
 		if e := m.lookup(a, m.permW); e != nil {
-			if e.ram != nil {
-				binary.LittleEndian.PutUint16(e.ram[a&0xFFF:], v)
+			if e.wram != nil {
+				binary.LittleEndian.PutUint16(e.wram[a&0xFFF:], v)
 				return nil
 			}
+			m.checkCodeWrite(e.pa)
 			return m.phys.Write16(e.pa|a&0xFFF, v)
 		}
 	}
@@ -247,16 +260,18 @@ func (m *MMU) Write16(a uint32, v uint16) error {
 	if err != nil {
 		return err
 	}
+	m.checkCodeWrite(pa)
 	return m.phys.Write16(pa, v)
 }
 
 func (m *MMU) Write32(a uint32, v uint32) error {
 	if a&3 == 0 {
 		if e := m.lookup(a, m.permW); e != nil {
-			if e.ram != nil {
-				binary.LittleEndian.PutUint32(e.ram[a&0xFFF:], v)
+			if e.wram != nil {
+				binary.LittleEndian.PutUint32(e.wram[a&0xFFF:], v)
 				return nil
 			}
+			m.checkCodeWrite(e.pa)
 			return m.phys.Write32(e.pa|a&0xFFF, v)
 		}
 	}
@@ -264,6 +279,7 @@ func (m *MMU) Write32(a uint32, v uint32) error {
 	if err != nil {
 		return err
 	}
+	m.checkCodeWrite(pa)
 	return m.phys.Write32(pa, v)
 }
 

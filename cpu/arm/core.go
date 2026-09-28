@@ -71,6 +71,18 @@ type Core struct {
 	// なければ検出しない）。
 	prober cpu.Prober
 
+	// デコードキャッシュ（codecache.go）。いずれも派生情報で保存しない。
+	code    CodeMemory           // nil ならキャッシュしない
+	codeGen *uint64              // code の変換世代（code が nil ならダミー）
+	pages   map[uint32]*codePage // 物理ページ番号 → デコード済み命令
+	cur     *codePage            // 実行中のページ
+	curVA   uint32               // cur の仮想ページ先頭（無効なら非 4KB 境界の値）
+	curGen  uint64               // cur を引いたときの世代
+
+	// Run（ブロック実行）の作業領域。runN は今の Run で実行を終えた命令数、
+	// runBudget はそこまでで止まる上限（実行中に LimitRun で下げられる）。
+	runN, runBudget uint64
+
 	// regs は現在のモードから見えるレジスタ。regs[15] = PC。
 	// モード切替時に bankR13/bankR14（FIQ は bankR8Fiq も）と入れ替える。
 	regs [16]uint32
@@ -109,6 +121,7 @@ func New(mem cpu.Memory, cp15 Coprocessor) *Core {
 		c.fetch32 = mem.Read32
 	}
 	c.prober, _ = mem.(cpu.Prober)
+	c.initCodeCache()
 	return c
 }
 
@@ -117,8 +130,10 @@ func New(mem cpu.Memory, cp15 Coprocessor) *Core {
 // ローダーが決めたエントリポイントから直接開始する。実イメージで問題が出たら見直す。
 func (c *Core) Reset(pc uint32) {
 	histLen := c.histN
-	*c = Core{mem: c.mem, cp15: c.cp15, fetch32: c.fetch32, prober: c.prober}
+	*c = Core{mem: c.mem, cp15: c.cp15, fetch32: c.fetch32, prober: c.prober,
+		code: c.code, codeGen: c.codeGen}
 	c.SetHistory(histLen) // 履歴の設定は保つ（中身は空にする）
+	c.resetCodeCache()
 	c.cpsr = PSR(ModeSvc) | FlagI | FlagF
 	c.regs[15] = pc
 	if c.cp15 != nil {
@@ -166,58 +181,35 @@ func (e *UndefinedError) Error() string {
 // 例外として配送して nil を返す。それ以外のエラー（未実装命令・未マップ
 // 物理アドレス等）は PC を命令の位置に戻してエラーを返す
 // （レジスタ・メモリの部分的な副作用までは巻き戻さない）。
+// 本体は Run（codecache.go）にある（1 命令ずつの呼び出しを避けるため）。
 func (c *Core) Step() error {
-	if c.hist != nil {
-		c.recordHistory()
-	}
-	// 割り込みは命令境界で受け付ける。FIQ が IRQ より優先（ARM ARM A2.6）。
-	// 復帰先は「実行されなかった命令」なので LR = その PC+4
-	// （ハンドラは SUBS pc, lr, #4 で戻る）。
-	if c.fiq && c.cpsr&FlagF == 0 {
-		c.enterException(VecFIQ, ModeFiq, c.regs[15]+4)
-		return nil
-	}
-	if c.irq && c.cpsr&FlagI == 0 {
-		c.enterException(VecIRQ, ModeIrq, c.regs[15]+4)
-		return nil
-	}
+	_, err := c.Run(1)
+	return err
+}
 
-	if c.cpsr.T() {
-		return c.stepThumb()
+// fetchSlow はデコードキャッシュを使えないときの ARM 命令のフェッチ
+// （TLB ミス・MMIO・フェッチ猶予中・MMU なし）。TLB ミスならここで TLB が
+// 埋まり、次の命令からキャッシュが効く。プリフェッチアボートなら例外に入って
+// taken=true を返す。
+func (c *Core) fetchSlow(pc uint32) (in Instr, taken bool, err error) {
+	if p := c.enterCodePage(pc); p != nil {
+		in = p.arm[(pc>>2)&0x3FF]
+		if in.exec == nil {
+			in = c.decodeCached(pc)
+		}
+		return in, false, nil
 	}
-
-	pc := c.regs[15]
 	word, err := c.fetch32(pc)
 	if err != nil {
 		if isAbort(err) {
 			// プリフェッチアボート。FSR/FAR はデータアボート専用なので更新しない
 			//（ARM ARM: FAR is only updated for data aborts）。LR = PC+4。
 			c.enterException(VecPabt, ModeAbt, pc+4)
-			return nil
+			return Instr{}, true, nil
 		}
-		return fmt.Errorf("instruction fetch at PC=%08X: %w", pc, err)
+		return Instr{}, false, fmt.Errorf("instruction fetch at PC=%08X: %w", pc, err)
 	}
-
-	in := Decode(word)
-
-	// 実行中は regs[15] = PC+4 にしておく。オペランドとして r15 を読むときは
-	// readReg が さらに +4 して「PC+8」（パイプラインの見え方）を返す。
-	c.regs[15] = pc + 4
-
-	if !condPassed(c.cpsr, word>>28) {
-		return nil // 条件不成立: 何もせず次の命令へ
-	}
-	if err := in.exec(c, word); err != nil {
-		if derr := c.deliverExecError(err, pc, 4); derr != nil {
-			if ue, ok := derr.(*UndefinedError); ok {
-				ue.PC = pc
-				ue.Word = word
-			}
-			c.regs[15] = pc
-			return derr
-		}
-	}
-	return nil
+	return Decode(word), false, nil
 }
 
 // deliverExecError は命令実行中のエラーのうち ARM 例外として配送できる

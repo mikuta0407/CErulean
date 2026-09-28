@@ -68,6 +68,16 @@ func (p PSR) String() string {
 }
 
 // condPassed は命令の条件フィールド（bits 31:28）が成立するか。
+// condTable[cond<<4 | NZCV] は condPassed の表（実行ループの高速化用）。
+var condTable = func() (t [256]bool) {
+	for cond := uint32(0); cond < 16; cond++ {
+		for f := uint32(0); f < 16; f++ {
+			t[cond<<4|f] = condPassed(PSR(f<<28), cond)
+		}
+	}
+	return
+}()
+
 func condPassed(p PSR, cond uint32) bool {
 	switch cond {
 	case 0x0: // EQ

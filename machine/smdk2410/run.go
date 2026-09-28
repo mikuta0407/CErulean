@@ -25,19 +25,24 @@ import (
 // RunUntil は命令数 Steps() が limit に達するか、エラーが起きるまで実行する。
 // 入力イベントの適用・画面の取得などは、戻ってから（命令境界で）行う。
 // エラーの扱いは Step と同じ（エラーを起こした命令も 1 命令と数える）。
+//
+// 3. ブロック実行: CPU に「次のデバイスイベントの期限を生む命令まで」または
+//    limit までの命令数を渡し、CPU の内側のループでまとめて実行させる
+//    （cpu/arm の Run）。ブロックの途中で時間を持つデバイスに触れたときは、
+//    CPU の実行済み命令数から仮想時間を追いつかせて（catchUp）同期し、
+//    期限が早まったら CPU に上限を下げさせる（updateDeadline）。
 func (m *Machine) RunUntil(limit uint64) error {
 	for m.steps < limit {
-		err := m.cpu.Step()
-		m.steps++
-		// 仮想時間を進める: 1 命令 = pclkTicksNum/8 PCLK ティック。
-		// pclkTicksNum < 8 なので 1 命令で増えるのは高々 1 ティック。
-		m.tickAcc += pclkTicksNum
-		if m.tickAcc >= 8 {
-			m.tickAcc -= 8
-			m.pending++
-			if m.pending >= m.deadline {
-				m.syncTime()
-			}
+		budget := limit - m.steps
+		if m.deadline != s3c2410.NoEvent {
+			budget = min(budget, m.stepsToDeadline())
+		}
+		m.inRun, m.accounted = true, 0
+		_, err := m.cpu.Run(budget)
+		m.catchUp()
+		m.inRun = false
+		if m.pending >= m.deadline {
+			m.syncTime()
 		}
 		if err != nil {
 			return err
@@ -47,6 +52,28 @@ func (m *Machine) RunUntil(limit uint64) error {
 		}
 	}
 	return nil
+}
+
+// stepsToDeadline は、今から何命令目で次のデバイスイベントの期限のティックが
+// 生まれるか（1 以上）。(tickAcc + pclkTicksNum*k)/8 >= deadline-pending の最小の k。
+func (m *Machine) stepsToDeadline() uint64 {
+	need := uint64(m.deadline - m.pending) // >= 1（期限に達したら即 syncTime するため）
+	return (need*8 - uint64(m.tickAcc) + pclkTicksNum - 1) / pclkTicksNum
+}
+
+// catchUp はブロック実行中（または直後）に、CPU が実行を終えた命令の分だけ
+// 命令数と仮想時間を進める。
+func (m *Machine) catchUp() {
+	if !m.inRun {
+		return
+	}
+	done := m.cpu.Executed()
+	n := done - m.accounted
+	m.accounted = done
+	m.steps += n
+	total := uint64(m.tickAcc) + pclkTicksNum*n
+	m.pending += int64(total >> 3)
+	m.tickAcc = uint32(total & 7)
 }
 
 // Step は 1 命令ぶん進める（machine.Machine）。
@@ -112,6 +139,7 @@ func (m *Machine) trySkipIdle(limit uint64) {
 
 // syncTime は溜めたティックをデバイスに渡し、次の期限を求め直す。
 func (m *Machine) syncTime() {
+	m.catchUp()
 	if m.pending > 0 {
 		t := m.pending
 		m.pending = 0
@@ -124,8 +152,13 @@ func (m *Machine) syncTime() {
 
 // updateDeadline は次のデバイスイベントまでのティック数を求める。
 // 時間を持つデバイスの状態が変わったら（レジスタ書き込み・入力）呼ぶ。
+// ブロック実行中なら、新しい期限を生む命令で止まるよう CPU の上限を下げる
+// （実行中の命令も 1 命令目に数える: その命令のティックも期限に向けて進むため）。
 func (m *Machine) updateDeadline() {
 	m.deadline = min(m.timer.NextEvent(), m.adc.NextEvent())
+	if m.inRun && m.deadline != s3c2410.NoEvent {
+		m.cpu.LimitRun(m.accounted + m.stepsToDeadline())
+	}
 }
 
 // timedDev は時間を持つデバイス（タイマー・RTC・ADC）の MMIO ラッパ。

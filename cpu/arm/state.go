@@ -39,4 +39,5 @@ func (c *Core) LoadState(d *snapshot.Decoder) {
 	d.U32sInto(c.bankR14[:])
 	c.irq = d.Bool()
 	c.fiq = d.Bool()
+	c.resetCodeCache() // デコードキャッシュは保存しない（MMU 側も印を外す）
 }

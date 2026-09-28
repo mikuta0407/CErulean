@@ -10,12 +10,13 @@ import (
 func TestMMUStateFields(t *testing.T) {
 	snapshottest.CheckFields(t, MMU{},
 		[]string{"ctrl", "ttb", "dacr", "fsr", "far", "pid", "priv", "fetchGrace", "graceNext", "prevCtrl", "regs", "tlb"},
-		[]string{"phys", "permR", "permW"})
+		// gen 以下は命令フェッチ高速化の派生情報（code.go）。
+		[]string{"phys", "permR", "permW", "gen", "codePages", "onCodeWrite", "codeMarks", "codeWrites"})
 }
 
 func TestTLBEntryFields(t *testing.T) {
 	// ram は pa から復元時に引き直す。
-	snapshottest.CheckFields(t, tlbEntry{}, []string{"tag", "pa", "perm"}, []string{"ram"})
+	snapshottest.CheckFields(t, tlbEntry{}, []string{"tag", "pa", "perm"}, []string{"ram", "wram"})
 }
 
 // 復元後の TLB が RAM の実体を指し直していること（fast path で読める）と、

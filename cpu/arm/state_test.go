@@ -10,7 +10,9 @@ func TestCoreStateFields(t *testing.T) {
 	snapshottest.CheckFields(t, Core{},
 		[]string{"regs", "cpsr", "spsr", "bankR8Usr", "bankR8Fiq", "bankR13", "bankR14", "irq", "fiq"},
 		// spinHint は実行ループが毎命令消費する一時値、hist* はデバッグ用の記録。
-		[]string{"mem", "cp15", "fetch32", "prober", "spinHint", "hist", "histPos", "histN"})
+		[]string{"mem", "cp15", "fetch32", "prober", "spinHint", "hist", "histPos", "histN",
+			// デコードキャッシュとブロック実行の派生情報（codecache.go）。
+			"code", "codeGen", "pages", "cur", "curVA", "curGen", "runN", "runBudget"})
 }
 
 func TestCoreStateRoundTrip(t *testing.T) {

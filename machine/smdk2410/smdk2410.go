@@ -66,6 +66,8 @@ type Machine struct {
 	idleSkip          bool          // アイドルスキップを行うか（既定 true）
 	poll              pollCandidate // ポーリングループの 1 周前の観測
 	skipped           uint64        // スキップした命令数の累計（計測用）
+	inRun             bool          // CPU のブロック実行中（run.go の catchUp）
+	accounted         uint64        // ブロック実行中、steps に反映済みの命令数
 
 	entryPA uint32 // リセット時に飛ぶ物理アドレス
 }
@@ -340,4 +342,11 @@ func (m *Machine) Reset() {
 
 // Steps はリセット（またはスナップショットの保存時点から継続して）
 // からの実行命令数。
-func (m *Machine) Steps() uint64 { return m.steps }
+// ブロック実行の途中（デバイスのコールバック内）でも、実行を終えた命令まで
+// 数えた値を返す。
+func (m *Machine) Steps() uint64 {
+	if m.inRun {
+		return m.steps + m.cpu.Executed() - m.accounted
+	}
+	return m.steps
+}
