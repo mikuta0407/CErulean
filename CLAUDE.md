@@ -19,7 +19,7 @@ Windows Mobile 5.0（WinCE 5.0）LLE エミュレータ。Go 製。最終的に 
 ## パッケージ境界
 
 ```
-cmd/cerulean → machine/smdk2410 → { cpu/arm, mmu, bus, device/s3c2410, loader }
+cmd/cerulean → emu → machine (interface) ← machine/smdk2410 → { cpu/arm, mmu, bus, device/s3c2410, loader }
                                      cpu/arm → cpu (interface), mmu → bus
 ```
 
@@ -38,6 +38,17 @@ cmd/cerulean → machine/smdk2410 → { cpu/arm, mmu, bus, device/s3c2410, loade
   ヒット時は bus を経由せず直接読み書きする。MMIO は常に bus 経由。
   bus.AddWatch（-watch）が有効な間は fast path を使わない。
   デコードキャッシュは未着手（decode.go/exec の分離は維持すること）。
+- 実行ループは machine の RunUntil（2026-09 ユーザー確認済み）。以下はどれも
+  「1 命令ずつ Step した場合と全状態が完全一致する」ことが条件:
+  - デバイス時間のまとめ進め: PCLK ティックを溜め、次のデバイスイベント
+    （NextEvent）の期限か、時間を持つデバイスの MMIO アクセス（timedDev）・
+    入力 API・スナップショット保存の直前にだけ Advance する。時間を持つデバイスを
+    足したら NextEvent を実装し、timedDev で包み、syncTime に加えること。
+  - アイドルスキップ: cpu/arm の PollLoop が副作用のない 3 命令ループを検出し、
+    machine が 2 周の状態一致を確かめて、次のイベント直前まで命令数と仮想時間
+    だけ進める（-trace・-watch 中は無効。命令履歴はループの PC 列で補う）。
+  - 検証は変更前バイナリとの出力比較（UART・レジスタ・履歴・PNG・スナップ
+    ショット）。tmp/m5ref に比較スクリプトがある（非コミット）。
 
 ## スナップショット・入力の設計（2026-09 ユーザー確認済み）
 
@@ -51,8 +62,11 @@ cmd/cerulean → machine/smdk2410 → { cpu/arm, mmu, bus, device/s3c2410, loade
 - 入力 API（TouchDown/Move/Up・KeyDown/Up）は machine に置き、スクリプトの解釈は
   純 Go の `script` パッケージ、ファイル読み込みと時刻照合は cmd。時刻は命令数
   （machine.Steps、InstructionsPerSecond=135.2M/仮想秒）で、決定論的。
-- 対話フロントエンドは当面作らない。作るならブラウザ型（cmd がローカル HTTP で
-  画面配信・入力受付。cgo・GUI ライブラリ不要）を想定しておく。
+- 対話フロントエンドはブラウザ型の `cerulean serve`（2026-09 ユーザー確認済み）。
+  画面は /frame のロングポーリング（RGBA）、入力は POST /input（JSON）。
+  エミュレーション goroutine がマシンを専有し、壁時計との同期は serve 側
+  （コアは決定論的なまま）。記録は emu.Session.Inject の命令数つき入力を
+  script.Format で絶対命令数（@<n>i）として書き出す。
 
 ## 例外・エラーの扱い
 
@@ -137,6 +151,14 @@ cmd/cerulean → machine/smdk2410 → { cpu/arm, mmu, bus, device/s3c2410, loade
   **ソフトキー（VK_F1/F2）は表に無い**。初期化時に 0xFF×10 と 3 バイトコマンド
   （1B A0 7B / 1B A1 7A）を送るが応答は読まない。
 - 電源ボタン pwrbtn2410.dll は GPF0（EINT0）を設定する（未実装）。
+- **OAL のアイドルは割り込み待ちのスピン**: 0x800AFDE4〜 の
+  `LDR r3,[r4]`（r4=0x814C8708）/ `CMP r3,#0` / `BEQ` の 3 命令で、割り込み
+  ハンドラが RAM の変数を書くまで回る（直前に 0x800AFDDC で変数を 0 にし、
+  0x800779D8 の関数で IRQ を許可する）。Today から Calendar を操作する間でも
+  実行命令の約 85% がこのループ（2026-09 の -sample 観察）、ブート中は約 9%。
+- **性能（2026-09、マイルストーン5）**: アイドルスキップ等の導入後、操作中は
+  実時間の約 1.0 倍、実処理の区間は約 30M 命令/秒（実時間の約 0.23 倍）。
+  Today 完成まで 36 億命令が約 114 秒。
 - **マイルストーン4 の到達点**: Today（36 億命令）のスナップショットから、タップで
   Start メニュー → Calendar / Settings が起動し、方向キー・Enter・文字入力も効く。
 
@@ -148,7 +170,8 @@ cmd/cerulean → machine/smdk2410 → { cpu/arm, mmu, bus, device/s3c2410, loade
   デバイスへのアクセスを -watch とトレースで確認）。
 - **電源ボタン**（pwrbtn2410.dll、GPF0/EINT0）: 押すとサスペンド（OEMPowerOff・
   スリープ・起床要因）の実装が必要になり範囲が大きい。UI 操作には不要なので後回し。
-- 対話フロントエンド（ブラウザ型）、性能改善（デコードキャッシュ等）。
+- 性能改善の続き（デコードキャッシュ等）。アプリ起動のような実処理の区間は
+  まだ実時間の約 1/4。
 
 ## 未確定事項・次の課題（随時更新）
 
@@ -179,9 +202,9 @@ cmd/cerulean → machine/smdk2410 → { cpu/arm, mmu, bus, device/s3c2410, loade
   マニュアルには無い。ARM920T TRM で要照合）。
 - MMU: アライメントフォルト（A ビット）未実装（CPU がアドレスをマスクしてから
   発行するため現状は到達しない）。
-- 性能: さらに速くするならデコードキャッシュ（現状デコードは約 8%）、
-  タイマー Advance のバッチ化（約 5%）、アイドル時の仮想時間早送り
-  （OAL のアイドルはスピンなので要設計）。
+- 性能: さらに速くするならデコードキャッシュ（デコード約 7%＋フェッチ約 15%）。
+  アイドルスキップは ARM の 3 命令ループのみ対応（Thumb や別形のループが
+  現れたら PollLoop に追加）。
 - INTC の PRIORITY（回転アービトレーション）は固定優先度に簡略化中。
 - BLX 等 ARMv5TE 拡張は未実装（PXA27x 対応時）。
 - LDC/STC・CDP は未実装または未定義例外扱い。
