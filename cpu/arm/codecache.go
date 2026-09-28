@@ -145,6 +145,9 @@ func (c *Core) invalidateCode(pa uint32) {
 	}
 }
 
+// stopRun は実行中の Run を今の命令で終わらせる（spinHint を立てた分岐命令が呼ぶ）。
+func (c *Core) stopRun() { c.runBudget = 0 }
+
 // Run は最大 budget 命令を実行し、実行した命令数を返す（ブロック実行）。
 // 次の場合は途中で戻る:
 //   - エラー（エラーを起こした命令も 1 命令と数える。Step と同じ）
@@ -228,10 +231,9 @@ func (c *Core) Run(budget uint64) (uint64, error) {
 				return c.runN, derr
 			}
 		}
+		// ポーリングループ先頭への後方分岐（spinHint）は、分岐命令が
+		// runBudget を 0 にしてループを抜けさせる（毎命令の判定を省くため）。
 		c.runN++
-		if c.spinHint {
-			break
-		}
 	}
 	return c.runN, nil
 }

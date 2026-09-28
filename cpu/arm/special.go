@@ -268,6 +268,7 @@ func specBranch(word uint32) execFn {
 		return func(c *Core, _ uint32) error {
 			c.regs[15] += off
 			c.spinHint = true
+			c.stopRun()
 			return nil
 		}
 	default:

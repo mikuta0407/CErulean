@@ -13,6 +13,7 @@ func execBranch(c *Core, word uint32) error {
 		// L=0 で 2 命令前へ戻る分岐: 3 命令のポーリングループの可能性
 		// （idle.go）。ここでは印を付けるだけで、判定は実行ループに任せる。
 		c.spinHint = true
+		c.stopRun()
 	}
 	return nil
 }
