@@ -14,8 +14,8 @@ mod tests;
 
 use std::fmt;
 
-use crate::arm::{Cpu, RunCtl, StopError, System};
-use crate::bus::{Bus, BusPhys};
+use crate::arm::{CodeCache, CodeMemory, Cpu, Instr, RunCtl, StopError, System, decode_instr};
+use crate::bus::{Bus, BusPhys, RamOff};
 use crate::cpu::{Abort, MemError};
 use crate::loader::Image;
 use crate::mmu::Mmu;
@@ -104,11 +104,52 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// CPU から見たシステム（MMU・バス・ボード）。[`System`] を実装する。
+/// CPU から見たシステム（MMU・バス・ボード・デコードキャッシュ）。[`System`] を実装する。
 pub struct Sys {
     pub mmu: Mmu,
     pub bus: Bus<Dev>,
     pub board: Board,
+    /// デコードキャッシュ（派生情報。arm の code.rs）
+    pub code: CodeCache<Sys>,
+}
+
+/// デコードキャッシュから見た MMU とメモリ（arm::CodeMemory）。
+struct CodeMem<'a> {
+    mmu: &'a mut Mmu,
+    arena: &'a [u8],
+}
+
+impl CodeMemory for CodeMem<'_> {
+    #[inline(always)]
+    fn code_page(&mut self, va: u32) -> Option<(u32, RamOff)> {
+        self.mmu.code_page(va)
+    }
+    #[inline(always)]
+    fn code_gen(&self) -> u64 {
+        self.mmu.code_gen()
+    }
+    #[inline(always)]
+    fn mark_code(&mut self, pa: u32) {
+        self.mmu.mark_code(pa)
+    }
+    #[inline(always)]
+    fn take_code_invalidated(&mut self) -> Option<u32> {
+        self.mmu.take_code_invalidated()
+    }
+    #[inline(always)]
+    fn set_code_cur_va(&mut self, va: u32) {
+        self.mmu.code_cur_va = va;
+    }
+    #[inline(always)]
+    fn ram_word(&self, off: RamOff) -> u32 {
+        let a = off as usize;
+        u32::from_le_bytes([
+            self.arena[a],
+            self.arena[a + 1],
+            self.arena[a + 2],
+            self.arena[a + 3],
+        ])
+    }
 }
 
 impl System for Sys {
@@ -163,6 +204,26 @@ impl System for Sys {
     fn run_ctl(&mut self) -> &mut RunCtl {
         &mut self.board.run
     }
+    /// デコードキャッシュ付きのフェッチ。同じページを実行中で変換も変わって
+    /// いなければ（PC の仮想ページが MMU の code_cur_va と一致）、TLB を引かずに
+    /// デコード済みの命令を取る。ページが変わったら enter で引き当て、キャッシュ
+    /// できなければ（TLB ミス・MMIO・フェッチ猶予中）通常のフェッチをする
+    /// （TLB ミスならここで TLB が埋まり、次の命令からキャッシュが効く）。
+    #[inline(always)]
+    fn fetch_arm(&mut self, pc: u32) -> Result<Instr<Self>, MemError> {
+        let Sys { mmu, bus, code, .. } = self;
+        let mut cm = CodeMem {
+            mmu,
+            arena: bus.arena(),
+        };
+        if pc & !0xFFF == cm.mmu.code_cur_va {
+            return Ok(code.cur_instr(pc, &mut cm, decode_instr::<Sys>));
+        }
+        if let Some(i) = code.enter(pc, &mut cm, decode_instr::<Sys>) {
+            return Ok(i);
+        }
+        Ok(decode_instr::<Sys>(self.fetch32(pc)?))
+    }
 }
 
 /// SMDK2410 相当のマシン。
@@ -184,6 +245,7 @@ impl Machine {
                 mmu: Mmu::new(),
                 bus: b,
                 board: Board::new(),
+                code: CodeCache::new(),
             },
             entry_pa: 0,
         }
@@ -237,6 +299,8 @@ impl Machine {
     /// CPU をリセットし、エントリポイント（物理アドレス）から開始する。
     /// MMU は無効の状態で始まる。
     pub fn reset(&mut self) {
+        self.sys.code.reset();
+        self.sys.mmu.reset_code();
         self.cpu.reset(self.entry_pa, &mut self.sys);
         self.sys.board.steps = 0;
         self.sys.board.update_deadline();
@@ -280,7 +344,7 @@ impl Machine {
 
     /// CPU から見た VA を現在の MMU 状態で PA に変換する（デバッグ用。状態は変えない）。
     pub fn translate(&mut self, va: u32) -> Result<u32, MemError> {
-        let Sys { mmu, bus, board } = &mut self.sys;
+        let Sys { mmu, bus, board, .. } = &mut self.sys;
         mmu.translate_debug(va, &mut BusPhys { bus, devs: board })
     }
 

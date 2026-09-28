@@ -36,8 +36,7 @@
 //!     （4KB 内で権限が一様でないため）
 //!   - MMU 有効化直後のフェッチ猶予中の命令フェッチ（[`Mmu::fetch32`] 参照）
 //!
-//! TODO(段階1 の高速化): Go の code.go（デコードキャッシュ用のコードページの印・
-//! 変換の世代・RAMRun）は、CPU のデコードキャッシュを移すときに足す。
+//! 命令フェッチの高速化の支援（下の「デコードキャッシュの支援」。Go の code.go）。
 
 use crate::bus::{PhysMem, RamOff};
 use crate::cpu::{Abort, MemError};
@@ -107,6 +106,9 @@ pub struct TlbEntry {
     /// 書き込みの fast path 用の実体の位置。ram と同じだが、コードページでは
     /// NO_RAM にして書き込みを遅い経路に回す（派生情報。デコードキャッシュ用）。
     pub wram: RamOff,
+    /// CPU がこのエントリの変換を覚えている（code_page で渡した）印。
+    /// 詰め替えるときに世代を上げる（派生情報）。
+    pub watched: bool,
 }
 
 const EMPTY_ENTRY: TlbEntry = TlbEntry {
@@ -115,6 +117,7 @@ const EMPTY_ENTRY: TlbEntry = TlbEntry {
     perm: 0,
     ram: NO_RAM,
     wram: NO_RAM,
+    watched: false,
 };
 
 /// CPU とバスの間に入る仮想→物理変換層と CP15。
@@ -158,6 +161,21 @@ pub struct Mmu {
     /// 現在の特権状態で見る権限ビット（派生情報: privileged から決まる）。
     perm_r: u8,
     perm_w: u8,
+
+    // 命令フェッチ高速化の派生情報（保存しない。「デコードキャッシュの支援」参照）。
+    /// 変換の世代番号
+    generation: u64,
+    /// デコード済み物理ページの印（1 ビット / 4KB）
+    code_pages: Vec<u64>,
+    /// CPU が実行中のページの仮想ページ先頭（無効なら 4KB 境界でない値）。
+    /// 世代が上がる・コードページに書き込まれると無効にする（Go の SetGenHook の代わり）。
+    pub(crate) code_cur_va: u32,
+    /// 印の付いたページへの書き込みで、デコード結果を捨てるべき物理ページ
+    /// （Go の onCodeWrite の代わり。CPU が次のページ入りで取り出す）。
+    code_invalidated: Vec<u32>,
+    /// 計測用
+    code_marks: u64,
+    code_writes: u64,
 }
 
 impl Default for Mmu {
@@ -183,6 +201,12 @@ impl Mmu {
             tlb: Box::new([EMPTY_ENTRY; TLB_SIZE]),
             perm_r: 0,
             perm_w: 0,
+            generation: 0,
+            code_pages: vec![0; (1 << 20) / 64],
+            code_cur_va: 1,
+            code_invalidated: vec![],
+            code_marks: 0,
+            code_writes: 0,
         };
         m.update_perm_mask();
         m
@@ -318,7 +342,9 @@ impl Mmu {
             e.tag = 0;
             e.ram = NO_RAM;
             e.wram = NO_RAM;
+            e.watched = false;
         }
+        self.bump_gen();
     }
 
     /// 現在の特権状態に対応する読み/書き権限ビットを選ぶ。
@@ -355,14 +381,21 @@ impl Mmu {
             return;
         };
         let ram = phys.ram_page(pa).unwrap_or(NO_RAM);
+        let wram = if self.is_code(pa) { NO_RAM } else { ram };
         let e = &mut self.tlb[((mva >> 12) as usize) & (TLB_SIZE - 1)];
+        let watched = e.watched;
         *e = TlbEntry {
             tag: mva >> 12 | TLB_VALID,
             pa,
             perm,
             ram,
-            wram: ram,
+            wram,
+            watched: false,
         };
+        if watched {
+            // CPU が覚えているページのエントリを追い出した（「デコードキャッシュの支援」）。
+            self.bump_gen();
+        }
     }
 
     /// MVA を含む 4KB ページの物理先頭と、4 通りの権限を求める。
@@ -483,7 +516,7 @@ impl Mmu {
                     .copy_from_slice(&v.to_le_bytes()[..size as usize]);
                 return Ok(());
             }
-            // TODO(段階1 の高速化): コードページへの書き込みの検出（Go の checkCodeWrite）。
+            self.check_code_write(e.pa);
             return Ok(phys.write(e.pa | va & 0xFFF, size, v)?);
         }
         self.write_slow(va, size, v, phys)
@@ -498,6 +531,7 @@ impl Mmu {
         phys: &mut impl PhysMem,
     ) -> Result<(), MemError> {
         let pa = self.translate_fill(va, true, phys)?;
+        self.check_code_write(pa);
         Ok(phys.write(pa, size, v)?)
     }
 
@@ -603,7 +637,10 @@ impl Mmu {
             7 => {}
             // TLB 操作: 単一エントリ指定も含めて全無効化する（安全側）。
             8 => self.flush_tlb(),
-            13 => self.pid = v & 0xFE000000,
+            13 => {
+                self.pid = v & 0xFE000000;
+                self.bump_gen(); // VA<32MB の MVA が変わる
+            }
             _ => self.regs[(crn & 15) as usize] = v,
         }
     }
@@ -619,6 +656,9 @@ impl Mmu {
 
     /// CPU の特権状態の変化を受ける（usr だけが非特権）。
     pub fn set_privileged(&mut self, privileged: bool) {
+        if self.privileged != privileged {
+            self.bump_gen(); // フェッチの権限判定が変わる
+        }
         self.privileged = privileged;
         self.update_perm_mask();
     }
@@ -627,6 +667,146 @@ impl Mmu {
     pub fn record_data_abort(&mut self, a: &Abort) {
         self.fsr = (a.domain as u32) << 4 | a.status as u32;
         self.far = a.va;
+    }
+}
+
+// ---- デコードキャッシュの支援（性能対策。ユーザー確認済み 2026-09。Go の code.go）----
+//
+// CPU（arm）は物理 RAM ページ単位でデコード済みの命令を持ち、同じページを
+// 実行している間は TLB を引かずにそこから命令を取る。MMU は次を提供する:
+//
+//   - code_page: 実行を始めるページの変換（TLB ヒットのときだけ。ミスなら CPU は
+//     通常のフェッチでこの命令を取り、TLB が埋まる。TLB の状態の変化は
+//     1 命令ずつ fetch32 していた場合と同一になる）。
+//   - 世代（gen）: 「CPU が覚えたページの変換がまだ有効か」の番号。変換・権限・
+//     TLB の中身が変わり得る操作（TLB の全無効化、特権状態・FCSE PID の変化、
+//     CPU が覚えているエントリの詰め替え）で増やし、code_cur_va を無効にする
+//     （CPU は実行中のページの記憶を捨てるので、毎命令の比較が要らない）。
+//     詰め替えで世代を上げるのは、コードページの TLB エントリがデータアクセスで
+//     追い出された場合に、CPU が次のフェッチで元どおり TLB を埋め直すため
+//     （TLB の状態を通常のフェッチと一致させる）。code_page で渡したエントリに
+//     watched の印を付け、そのエントリの詰め替えだけで世代を上げる。
+//   - コードページの書き込み検出（書き込み保護方式）: CPU がデコードした
+//     物理ページは code_pages に印を付け、そのページを指す TLB エントリの
+//     wram（直接書き込み用の実体）を外す。そのページへのストアだけ遅い経路に
+//     回り、そこで CPU に無効化を知らせてから書く（code_invalidated に積み、
+//     code_cur_va を無効にするので、CPU は次の命令でページに入り直すときに
+//     デコード結果を捨てる）。普通のストアには追加の判定が入らない。同じ物理
+//     ページを別の仮想アドレスが指していても物理ページ単位で管理するので漏れない。
+//
+// code_pages・wram・世代・watched は、デコードキャッシュと同じく実行を速くする
+// ための派生情報で、スナップショットには保存しない（復元時は空から作り直す）。
+// どれも TLB の tag/pa/perm（ゲストから見える状態）を変えない。
+
+impl Mmu {
+    /// 命令フェッチ用に va を含むページの変換を TLB から引く。TLB ヒットかつ RAM で、
+    /// フェッチ猶予中でないときだけ (物理ページ先頭, RAM の位置) を返す。
+    /// TLB の tag/pa/perm は変えない（watched の印だけ付ける）。
+    pub fn code_page(&mut self, va: u32) -> Option<(u32, RamOff)> {
+        if self.fetch_grace != 0 {
+            return None;
+        }
+        let i = self.lookup(va, self.perm_r)?;
+        let e = &mut self.tlb[i];
+        if e.ram == NO_RAM {
+            return None;
+        }
+        e.watched = true;
+        Some((e.pa, e.ram))
+    }
+
+    /// va から nbytes バイト（同じ 4KB ページ内）を、CPU が直接読み書きできる
+    /// RAM の範囲の先頭位置として返す（LDM/STM の高速化用）。TLB ヒットで権限が
+    /// あり、読み出しなら RAM、書き込みなら直接書き込み可（コードページでない RAM）の
+    /// ときだけ Some。状態は変えない（同じページへの連続アクセスがすべて TLB
+    /// ヒットになる場合と同じ）。
+    pub fn ram_run(&self, va: u32, nbytes: u32, write: bool) -> Option<RamOff> {
+        let off = va & 0xFFF;
+        if va & 3 != 0 || nbytes == 0 || off + nbytes > 0x1000 {
+            return None;
+        }
+        let e = &self.tlb[self.lookup(va, if write { self.perm_w } else { self.perm_r })?];
+        let ram = if write { e.wram } else { e.ram };
+        (ram != NO_RAM).then_some(ram + off)
+    }
+
+    /// 変換の世代番号。
+    pub fn code_gen(&self) -> u64 {
+        self.generation
+    }
+
+    /// 世代を上げ、CPU の実行中ページの記憶を無効にする。
+    fn bump_gen(&mut self) {
+        self.generation += 1;
+        self.code_cur_va = 1;
+    }
+
+    /// 物理ページ pa（4KB 境界）をデコード済み（コード）として印を付け、以後
+    /// そのページへの書き込みを検出できるようにする。
+    pub fn mark_code(&mut self, pa: u32) {
+        let pn = (pa >> 12) as usize;
+        if self.code_pages[pn >> 6] & (1 << (pn & 63)) != 0 {
+            return;
+        }
+        self.code_pages[pn >> 6] |= 1 << (pn & 63);
+        self.code_marks += 1;
+        for e in self.tlb.iter_mut() {
+            if e.tag & TLB_VALID != 0 && e.pa == pa {
+                e.wram = NO_RAM;
+            }
+        }
+    }
+
+    /// 物理アドレスを含むページに印があるか。
+    fn is_code(&self, pa: u32) -> bool {
+        let pn = (pa >> 12) as usize;
+        self.code_pages[pn >> 6] & (1 << (pn & 63)) != 0
+    }
+
+    /// 印の付いたページへの書き込みの直前に呼ぶ。印を外して直接書き込みを戻し、
+    /// CPU にデコード結果を捨てさせる。
+    fn code_write(&mut self, pa: u32) {
+        let page = pa & !0xFFF;
+        let pn = (page >> 12) as usize;
+        self.code_pages[pn >> 6] &= !(1 << (pn & 63));
+        self.code_writes += 1;
+        for e in self.tlb.iter_mut() {
+            if e.tag & TLB_VALID != 0 && e.pa == page {
+                e.wram = e.ram;
+            }
+        }
+        self.code_invalidated.push(page);
+        self.code_cur_va = 1;
+    }
+
+    /// 遅い経路の書き込み（TLB ミス・MMIO・監視中）で、書き込み先がコードページなら
+    /// 知らせる。
+    #[inline(always)]
+    fn check_code_write(&mut self, pa: u32) {
+        if self.is_code(pa) {
+            self.code_write(pa);
+        }
+    }
+
+    /// デコード結果を捨てるべき物理ページを取り出す（CPU がページに入るときに呼ぶ）。
+    pub fn take_code_invalidated(&mut self) -> Option<u32> {
+        self.code_invalidated.pop()
+    }
+
+    /// コードページの印を全部外す（リセット・スナップショット復元時など。
+    /// CPU 側もデコードキャッシュを捨てる前提）。
+    pub fn reset_code(&mut self) {
+        self.code_pages.iter_mut().for_each(|w| *w = 0);
+        self.code_invalidated.clear();
+        for e in self.tlb.iter_mut() {
+            e.wram = e.ram;
+        }
+        self.bump_gen();
+    }
+
+    /// コードページの印付け・書き込み検出の回数（性能調査用）。
+    pub fn code_stats(&self) -> (u64, u64) {
+        (self.code_marks, self.code_writes)
     }
 }
 

@@ -15,6 +15,7 @@
 //! 特化（special.go）・アイドルループ検出（idle.go）・LDM/STM の RAMRun は、
 //! 素直な実装で Go との一致を確かめてから 1 つずつ移す。
 
+mod code;
 mod exec_arm;
 mod exec_thumb;
 #[cfg(test)]
@@ -25,7 +26,8 @@ use std::fmt;
 use crate::bus::BusError;
 use crate::cpu::{Abort, MemError};
 
-pub(crate) use exec_arm::decode;
+pub use code::{CodeCache, CodeMemory, Instr};
+pub use exec_arm::{ExecFn, decode_instr};
 
 // ---- PSR（CPSR/SPSR）----
 //
@@ -206,6 +208,17 @@ pub trait System {
     fn fiq(&self) -> bool;
     /// 実行の上限（run の間、CPU が n を進め、machine が budget を下げる）。
     fn run_ctl(&mut self) -> &mut RunCtl;
+
+    /// ARM 命令をフェッチしてデコードする。既定はキャッシュなし（fetch32 と
+    /// デコード）。デコードキャッシュを持つシステムは上書きする（code.rs）。
+    /// フェッチのアボート・バスエラーは fetch32 と同じく Err で返す。
+    #[inline(always)]
+    fn fetch_arm(&mut self, pc: u32) -> Result<Instr<Self>, MemError>
+    where
+        Self: Sized,
+    {
+        Ok(decode_instr::<Self>(self.fetch32(pc)?))
+    }
 }
 
 /// 未実装またはアーキテクチャ上未定義の命令。
@@ -252,7 +265,7 @@ impl std::error::Error for StopError {}
 
 /// 命令の実行中のエラー（exec 関数が返す）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Exec {
+pub enum Exec {
     Mem(MemError),
     Undef { reason: &'static str, arch: bool },
 }
@@ -264,7 +277,7 @@ impl From<MemError> for Exec {
     }
 }
 
-pub(crate) type ExecResult = Result<(), Exec>;
+pub type ExecResult = Result<(), Exec>;
 
 pub(crate) fn unimpl(reason: &'static str) -> Exec {
     Exec::Undef {
@@ -532,8 +545,8 @@ impl Cpu {
         }
 
         let pc = self.regs[15];
-        let word = match sys.fetch32(pc) {
-            Ok(w) => w,
+        let ins = match sys.fetch_arm(pc) {
+            Ok(i) => i,
             Err(MemError::Abort(_)) => {
                 // プリフェッチアボート。FSR/FAR はデータアボート専用なので更新しない
                 // （ARM ARM: FAR is only updated for data aborts）。LR = PC+4。
@@ -542,6 +555,7 @@ impl Cpu {
             }
             Err(MemError::Bus(b)) => return Err(StopError::Bus(b)),
         };
+        let word = ins.word;
         // 実行中は regs[15] = PC+4 にしておく。オペランドとして r15 を読むときは
         // read_reg がさらに +4 して「PC+8」（パイプラインの見え方）を返す。
         self.regs[15] = pc.wrapping_add(4);
@@ -550,7 +564,7 @@ impl Cpu {
         if cond != 0xE && !COND_TABLE[(cond << 4 | self.cpsr >> 28) as usize] {
             return Ok(()); // 条件不成立: 何もせず次の命令へ
         }
-        if let Err(e) = decode::<S>(word)(self, sys, word)
+        if let Err(e) = (ins.exec)(self, sys, word, ins.imm)
             && let Err(stop) = self.deliver_exec_error(e, pc, word, 4, sys)
         {
             self.regs[15] = pc;
