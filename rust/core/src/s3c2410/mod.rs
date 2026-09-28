@@ -26,7 +26,7 @@ mod tests;
 pub use adc::Adc;
 pub use dma::DmaStub;
 pub use intc::*;
-pub use lcd::{Frame, Lcd, LcdConfig};
+pub use lcd::{Frame, FrameError, Lcd, LcdConfig};
 pub use rtc::Rtc;
 pub use spi::{Spi, SpiSlaves};
 pub use stub::Stub;
