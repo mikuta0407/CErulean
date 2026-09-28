@@ -7,7 +7,7 @@
 #
 # impl:
 #   go    Go 版。$CERULEAN_GO（既定: リポジトリ直下の ./cerulean。無ければビルド）
-#   rust  Rust 版（段階1 で CLI ができたら対応する）
+#   rust  Rust 版。$CERULEAN_RUST（既定: rust/target/release/cerulean。無ければビルド）
 #
 # 実イメージのシナリオは環境変数 CERULEAN_IMAGE（PPC_USA.bin のパス）が必要。
 # UART1 の出力は <出力>.uart に、CLI の標準エラーは <出力>.err に書く。
@@ -68,9 +68,17 @@ case $impl in
     }
     ;;
   rust)
-    # TODO(段階1): Rust の CLI ができたら、同じ定義から引数を組み立てる。
-    echo "run.sh: rust implementation is not available yet" >&2
-    exit 2
+    bin=${CERULEAN_RUST:-$root/rust/target/release/cerulean}
+    if [ ! -x "$bin" ]; then
+      (cd "$root/rust" && cargo build --release -p cerulean-cli)
+    fi
+    args=(run --history 0 --rtc "$rtc" --max-steps "$max_steps" --result "$out")
+    [ -n "$script" ] && args+=(--script "$gdir/scenarios/$script")
+    for c in $checkpoints; do args+=(--checkpoint "$c"); done
+    "$bin" "${args[@]}" "$@" "$image" > "$out.uart" 2> "$out.err" || {
+      echo "run.sh: $name: rust exited with $? (see $out.err)" >&2
+      exit 1
+    }
     ;;
   *)
     echo "run.sh: unknown implementation $impl" >&2

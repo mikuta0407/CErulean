@@ -1,11 +1,470 @@
-//! CErulean のネイティブの開発用 CLI（段階1 で run・info・トレース・一致確認の
-//! 出力などを実装する。docs/rust-migration-plan.md §9）。
+//! CErulean のネイティブの開発用 CLI（Go 版の cmd/cerulean の run・info に当たる）。
+//! フラグ名と出力の書式は Rust 版で決めている（Go 版との互換は要件ではない）。
+//! 一致確認の出力（--result・--trace-hash）の中身は testdata/golden/README.md が正。
+//!
+//! TODO(段階1): トレースの逆アセンブル、画面の PNG 保存（--fb-out・shot）、
+//! スナップショット（--snap-save・--snap-load・snap）、サンプリング（--sample）。
 
-fn main() {
+mod result;
+
+use std::io::Write;
+use std::process::ExitCode;
+use std::time::Instant;
+
+use cerulean_core::emu::{self, RunError, Session};
+use cerulean_core::loader;
+use cerulean_core::script::{self, Event, Kind};
+use cerulean_core::smdk2410::{INSTRUCTIONS_PER_SECOND, Machine};
+
+use result::{ResultWriter, Stop, TraceHasher, UartTap};
+
+const USAGE: &str = "\
+Usage:
+  cerulean info <image>            イメージの情報を表示する
+  cerulean run [options] <image>   イメージをリセットから実行する
+
+run options:
+  --rtc YYYY-MM-DDTHH:MM:SS  RTC の初期時刻（年月日時分秒をそのまま使う。
+                             既定はホストの現在時刻の UTC。TODO: ローカル時刻）
+  --max-steps N         N 命令で止める（0 = 無制限）
+  --script F            入力スクリプト（書式は script モジュールのコメント）
+  --history N           停止時に直前 N 命令の PC を表示する（既定 16、0 = 無効）
+  --trace               実行した命令の PC と命令語を逐一表示する
+  --trace-from N        --trace の表示を N 命令目から始める
+  --watch LO[-HI]       物理アドレス範囲へのアクセスを表示する（複数可。1 命令ずつ進む）
+  --stats               停止時に実行速度を表示する
+  --result F            一致確認用の結果を JSON Lines で F に書く（停止時と --checkpoint）
+  --checkpoint N        --result に N 命令目の時点の結果も書く（複数可）
+  --trace-hash N        N 命令ごとに命令数と CPU 状態のダンプの SHA-256 を書く
+  --trace-hash-ram N    N 命令ごとに RAM の SHA-256 も加える
+  --trace-hash-out F    --trace-hash の出力先（既定は標準エラー）
+  --quiet-uart          UART1 の出力を標準出力に流さない
+";
+
+fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let r = match args.first().map(String::as_str) {
+        Some("info") => cmd_info(&args[1..]),
+        Some("run") => cmd_run(&args[1..]),
+        _ => {
+            eprint!("{USAGE}");
+            return ExitCode::from(2);
+        }
+    };
+    match r {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("cerulean: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn read_image(path: &str) -> Result<loader::Image, String> {
+    let data = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+    // .nb0 のロード先: SMDK2410 の SDRAM 先頭。
+    // TODO: 実イメージで .nb0 のベースを確認する（Go 版と同じ仮定）。
+    loader::load(&data, path, 0x30000000).map_err(|e| e.to_string())
+}
+
+fn cmd_info(args: &[String]) -> Result<ExitCode, String> {
+    let [path] = args else {
+        return Err("usage: cerulean info <image>".into());
+    };
+    let img = read_image(path)?;
+    println!("format:  {}", img.format);
+    println!("start:   {:08X}", img.start);
+    println!("length:  {:08X} ({} bytes)", img.length, img.length);
+    println!("entry:   {:08X}", img.entry);
+    if !img.records.is_empty() {
+        println!("records: {}", img.records.len());
+        for (i, r) in img.records.iter().enumerate() {
+            println!(
+                "  [{i:3}] addr={:08X} len={:8} checksum={:08X}",
+                r.addr, r.len, r.checksum
+            );
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// run のオプション。
+#[derive(Default)]
+struct RunOpts {
+    image: String,
+    rtc: Option<[i64; 6]>,
+    max_steps: u64,
+    script: Option<String>,
+    history: usize,
+    trace: bool,
+    trace_from: u64,
+    watches: Vec<(u32, u32)>,
+    stats: bool,
+    result: Option<String>,
+    checkpoints: Vec<u64>,
+    trace_hash: u64,
+    trace_hash_ram: u64,
+    trace_hash_out: Option<String>,
+    quiet_uart: bool,
+}
+
+fn parse_u64(s: &str) -> Result<u64, String> {
+    let r = match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        Some(h) => u64::from_str_radix(h, 16),
+        None => s.parse(),
+    };
+    r.map_err(|_| format!("bad number {s:?}"))
+}
+
+/// "YYYY-MM-DDTHH:MM:SS" を年月日時分秒に（範囲は Go の time.Parse と同じく検査する）。
+fn parse_rtc(s: &str) -> Result<[i64; 6], String> {
+    let bad = || format!("--rtc: want YYYY-MM-DDTHH:MM:SS, got {s:?}");
+    let b = s.as_bytes();
+    if b.len() != 19
+        || b[4] != b'-'
+        || b[7] != b'-'
+        || b[10] != b'T'
+        || b[13] != b':'
+        || b[16] != b':'
+    {
+        return Err(bad());
+    }
+    let num = |r: std::ops::Range<usize>| s[r].parse::<i64>().map_err(|_| bad());
+    let v = [
+        num(0..4)?,
+        num(5..7)?,
+        num(8..10)?,
+        num(11..13)?,
+        num(14..16)?,
+        num(17..19)?,
+    ];
+    let leap = (v[0] % 4 == 0 && v[0] % 100 != 0) || v[0] % 400 == 0;
+    let mdays = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    if !(1..=12).contains(&v[1])
+        || v[2] < 1
+        || v[2] > mdays[(v[1] - 1) as usize]
+        || v[3] > 23
+        || v[4] > 59
+        || v[5] > 59
+    {
+        return Err(bad());
+    }
+    Ok(v)
+}
+
+/// "lo" または "lo-hi"。
+fn parse_range(s: &str) -> Result<(u32, u32), String> {
+    let (lo, hi) = s.split_once('-').unwrap_or((s, s));
+    let (lo, hi) = (parse_u64(lo)?, parse_u64(hi)?);
+    if lo > hi || hi > u32::MAX as u64 {
+        return Err(format!("--watch: bad range {s:?}"));
+    }
+    Ok((lo as u32, hi as u32))
+}
+
+fn parse_run_opts(args: &[String]) -> Result<RunOpts, String> {
+    let mut o = RunOpts {
+        history: 16,
+        ..Default::default()
+    };
+    let mut it = args.iter();
+    let mut image = None;
+    while let Some(a) = it.next() {
+        let mut val = || {
+            it.next()
+                .cloned()
+                .ok_or_else(|| format!("{a} needs a value"))
+        };
+        match a.as_str() {
+            "--rtc" => o.rtc = Some(parse_rtc(&val()?)?),
+            "--max-steps" => o.max_steps = parse_u64(&val()?)?,
+            "--script" => o.script = Some(val()?),
+            "--history" => o.history = parse_u64(&val()?)? as usize,
+            "--trace" => o.trace = true,
+            "--trace-from" => o.trace_from = parse_u64(&val()?)?,
+            "--watch" => o.watches.push(parse_range(&val()?)?),
+            "--stats" => o.stats = true,
+            "--result" => o.result = Some(val()?),
+            "--checkpoint" => o.checkpoints.push(parse_u64(&val()?)?),
+            "--trace-hash" => o.trace_hash = parse_u64(&val()?)?,
+            "--trace-hash-ram" => o.trace_hash_ram = parse_u64(&val()?)?,
+            "--trace-hash-out" => o.trace_hash_out = Some(val()?),
+            "--quiet-uart" => o.quiet_uart = true,
+            s if s.starts_with("--") => return Err(format!("unknown option {s}\n{USAGE}")),
+            s => {
+                if image.replace(s.to_string()).is_some() {
+                    return Err(format!("more than one image\n{USAGE}"));
+                }
+            }
+        }
+    }
+    o.image = image.ok_or_else(|| format!("no image\n{USAGE}"))?;
+    if !o.checkpoints.is_empty() && o.result.is_none() {
+        return Err("--checkpoint requires --result".into());
+    }
+    Ok(o)
+}
+
+/// ホストの現在時刻（UTC）の年月日時分秒。
+/// TODO: Go 版はローカル時刻を使った。std にはタイムゾーンがないので、ローカル
+/// 時刻にするには依存（または OS の API）が要る。一致確認では --rtc を固定するので
+/// 影響しない。
+fn host_now_utc() -> [i64; 6] {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    let days = secs.div_euclid(86400);
+    let rem = secs.rem_euclid(86400);
+    // 暦の変換はコアの RTC と同じ式（Howard Hinnant の civil_from_days）。
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
+    [y, m, d, rem / 3600, rem / 60 % 60, rem % 60]
+}
+
+fn cmd_run(args: &[String]) -> Result<ExitCode, String> {
+    let o = parse_run_opts(args)?;
+    let img = read_image(&o.image)?;
+    let mut m = Machine::new();
+    for &(lo, hi) in &o.watches {
+        m.add_watch(lo, hi);
+    }
+    m.load_image(&img).map_err(|e| e.to_string())?;
+    let t = o.rtc.unwrap_or_else(host_now_utc);
+    m.set_rtc(t[0], t[1], t[2], t[3], t[4], t[5]);
+    m.reset();
+    m.cpu.set_history(o.history);
     eprintln!(
-        "cerulean (rust) {}: not implemented yet ({} instructions per virtual second)",
-        env!("CARGO_PKG_VERSION"),
-        cerulean_core::INSTRUCTIONS_PER_SECOND
+        "cerulean: {}: loaded {} image, entry {:08X} (PA {:08X})",
+        m.name(),
+        img.format,
+        img.entry,
+        m.cpu.pc()
     );
-    std::process::exit(2);
+
+    let mut events = vec![];
+    if let Some(path) = &o.script {
+        let src = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+        events =
+            script::parse(&src, INSTRUCTIONS_PER_SECOND).map_err(|e| format!("{path}: {e}"))?;
+        for ev in &events {
+            emu::validate(&m, ev).map_err(|e| format!("script line {}: {e}", ev.line))?;
+        }
+    }
+    let mut sess = Session::new();
+    sess.schedule(events);
+
+    let mut results = match &o.result {
+        Some(p) => Some(ResultWriter {
+            out: std::fs::File::create(p).map_err(|e| format!("{p}: {e}"))?,
+        }),
+        None => None,
+    };
+    let mut hasher = if o.trace_hash != 0 || o.trace_hash_ram != 0 {
+        let out: Box<dyn Write> = match &o.trace_hash_out {
+            Some(p) => Box::new(std::io::BufWriter::new(
+                std::fs::File::create(p).map_err(|e| format!("{p}: {e}"))?,
+            )),
+            None => Box::new(std::io::stderr()),
+        };
+        Some(TraceHasher {
+            out,
+            every: o.trace_hash,
+            ram_every: o.trace_hash_ram,
+        })
+    } else {
+        None
+    };
+
+    let mut uart = UartTap::new();
+    let mut stdout = std::io::stdout();
+    let io = |e: std::io::Error| e.to_string();
+    // UART1 の出力を取り出し、ハッシュを取りながら標準出力に流す。
+    let mut drain_uart = |m: &mut Machine, uart: &mut UartTap| {
+        let b = m.take_uart1();
+        if !b.is_empty() {
+            uart.feed(&b);
+            if !o.quiet_uart {
+                let _ = stdout.write_all(&b);
+                let _ = stdout.flush();
+            }
+        }
+    };
+    let mut apply = |m: &mut Machine, ev: &Event| -> Result<bool, String> {
+        match ev.kind {
+            Kind::Quit => Ok(true),
+            // TODO(段階1): 画面の保存（PNG）とスナップショット。
+            Kind::Shot | Kind::Snap => Err(format!(
+                "{} is not implemented yet in the Rust CLI",
+                ev.kind
+            )),
+            _ => emu::apply_input(m, ev),
+        }
+    };
+
+    let started = Instant::now();
+    let stop = loop {
+        // 今の命令数に予定されたイベントを先に適用する（トレース表示を適用後の
+        // 状態で出すため）。
+        let steps = m.steps();
+        let mut r = sess.run(&mut m, steps, &mut apply);
+        if matches!(r, Ok(false)) && o.trace && steps >= o.trace_from {
+            let pc = m.cpu.pc();
+            let w = m
+                .peek32(pc)
+                .map_or("????????".into(), |w| format!("{w:08X}"));
+            eprintln!(
+                "{steps:12}  PC={pc:08X}  {w}{}",
+                if m.cpu.thumb() { " (T)" } else { "" }
+            );
+        }
+        let mut target = u64::MAX;
+        if o.max_steps != 0 {
+            target = target.min(o.max_steps);
+        }
+        // 結果・ハッシュを取る命令数ちょうどで止まる。
+        if let Some(h) = &hasher {
+            target = target.min(h.next(steps));
+        }
+        if let Some(c) = o.checkpoints.iter().filter(|&&c| c > steps).min() {
+            target = target.min(*c);
+        }
+        if o.trace {
+            target = if steps >= o.trace_from {
+                steps + 1
+            } else {
+                target.min(o.trace_from)
+            };
+        }
+        if !o.watches.is_empty() {
+            target = steps + 1; // 監視の表示に命令数と PC を付けるため 1 命令ずつ
+        }
+        // 少なくとも 1 命令は進める（--max-steps が今の命令数以下の場合など）。
+        target = target.max(steps + 1);
+        if matches!(r, Ok(false)) {
+            r = sess.run(&mut m, target, &mut apply);
+        }
+        drain_uart(&mut m, &mut uart);
+        for ev in m.take_watch_log() {
+            eprintln!(
+                "{:12}  watch {}{} {:<10} PA={:08X} v={:08X}  (PC after={:08X})",
+                m.steps(),
+                if ev.write { "W" } else { "R" },
+                ev.size * 8,
+                ev.region,
+                ev.addr,
+                ev.value,
+                m.cpu.pc()
+            );
+        }
+        match r {
+            Err(RunError::Event { event, err }) => {
+                eprintln!("cerulean: script line {}: {err}", event.line);
+                break Stop::EventError;
+            }
+            Err(RunError::Stop(e)) => {
+                eprintln!("cerulean: stopped after {} steps: {e}", m.steps());
+                break Stop::Emu(e);
+            }
+            Ok(true) => {
+                eprintln!(
+                    "cerulean: stopped after {} steps at PC={:08X} (script quit)",
+                    m.steps(),
+                    m.cpu.pc()
+                );
+                break Stop::Quit;
+            }
+            Ok(false) => {}
+        }
+        // その命令数に予定された入力イベントを適用する前の状態を書く
+        // （イベントは次の周の先頭で適用される）。
+        let steps = m.steps();
+        if let Some(h) = &mut hasher {
+            h.emit(&m).map_err(io)?;
+        }
+        if o.checkpoints.contains(&steps)
+            && let Some(w) = &mut results
+        {
+            w.write(&mut m, &uart, "checkpoint", None).map_err(io)?;
+        }
+        if o.max_steps != 0 && steps >= o.max_steps {
+            eprintln!(
+                "cerulean: stopped after {steps} steps at PC={:08X} (max-steps)",
+                m.cpu.pc()
+            );
+            break Stop::MaxSteps;
+        }
+    };
+    if let Some(h) = &mut hasher {
+        h.out.flush().map_err(io)?;
+    }
+    if let Some(w) = &mut results {
+        w.write(&mut m, &uart, "stop", Some(&stop)).map_err(io)?;
+    }
+    report(&mut m, &o, started, &stop);
+    Ok(match stop {
+        Stop::MaxSteps | Stop::Quit => ExitCode::SUCCESS,
+        _ => ExitCode::from(1),
+    })
+}
+
+/// 停止時の共通の表示（PC の変換・レジスタ・命令履歴・速度）。
+fn report(m: &mut Machine, o: &RunOpts, started: Instant, _stop: &Stop) {
+    let pc = m.cpu.pc();
+    match m.translate(pc) {
+        Ok(pa) => eprintln!("  PC VA {pc:08X} -> PA {pa:08X}"),
+        Err(e) => eprintln!("  PC VA {pc:08X} -> {e}"),
+    }
+    for i in 0..16 {
+        eprint!("  r{i:<2}={:08X}", m.cpu.reg(i));
+        if i % 4 == 3 {
+            eprintln!();
+        }
+    }
+    if o.history > 0 {
+        let h = m.cpu.history();
+        eprintln!("last {} instructions:", h.len());
+        for (pc, thumb) in h {
+            let w = m.peek32(pc).map(|w| {
+                if thumb {
+                    (w >> ((pc & 2) * 8)) & 0xFFFF
+                } else {
+                    w
+                }
+            });
+            match (w, thumb) {
+                (Some(w), true) => eprintln!("  PC={pc:08X}      {w:04X}"),
+                (Some(w), false) => eprintln!("  PC={pc:08X}  {w:08X}"),
+                (None, _) => eprintln!("  PC={pc:08X}  ????????"),
+            }
+        }
+    }
+    if o.stats {
+        let el = started.elapsed().as_secs_f64();
+        let n = m.steps();
+        eprintln!(
+            "cerulean: {n} steps in {el:.2}s ({:.1}M steps/s, {:.2}x real time)",
+            n as f64 / el / 1e6,
+            n as f64 / INSTRUCTIONS_PER_SECOND as f64 / el
+        );
+    }
 }

@@ -17,6 +17,8 @@ publish = false
 cerulean-core = { path = "core" }
 # wasm-bindgen-cli と版を一致させる必要があるので = で固定する。
 wasm-bindgen = "=0.2.129"
+# 一致確認のハッシュ（CLI のみ。段階0 で「段階1 の CLI で入れる」と合意）。
+sha2 = "0.11"
 
 # 計測は必ず release で行う（計画書 §6.1）。
 [profile.release]

@@ -20,6 +20,9 @@ if [ "$impl" = go ]; then
   mkdir -p "$(dirname "$CERULEAN_GO")"
   (cd "$root" && go build -o "$CERULEAN_GO" ./cmd/cerulean) || exit 1
 fi
+if [ "$impl" = rust ]; then
+  (cd "$root/rust" && cargo build --release -p cerulean-cli) || exit 1
+fi
 cmp=$root/tmp/golden-bin/goldencmp
 (cd "$root" && go build -o "$cmp" ./tools/goldencmp) || exit 1
 names=("$@")
