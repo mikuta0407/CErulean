@@ -41,3 +41,42 @@ func TestDisasm(t *testing.T) {
 		}
 	}
 }
+
+func TestDisasmThumb(t *testing.T) {
+	// 期待値のエンコードは ARM ARM Chapter A7 の各形式から手で組んだもの。
+	tests := []struct {
+		hw, next, pc uint32
+		want         string
+	}{
+		{0x2005, 0, 0, "movs r0, #0x5"},                         // Format 3
+		{0x1888, 0, 0, "adds r0, r1, r2"},                       // Format 2 レジスタ
+		{0x1E48, 0, 0, "subs r0, r1, #1"},                       // Format 2 即値
+		{0x0048, 0, 0, "lsls r0, r1, #1"},                       // Format 1
+		{0x4288, 0, 0, "cmp r0, r1"},                            // Format 4（フラグのみ）
+		{0x4008, 0, 0, "ands r0, r1"},                           // Format 4
+		{0x4770, 0, 0, "bx lr"},                                 // Format 5
+		{0x46C0, 0, 0, "mov r8, r8"},                            // Format 5 (NOP 慣用)
+		{0x4801, 0, 0x1002, "ldr r0, [pc, #0x4] ; =0x00001008"}, // Format 6（PC はワードアライン）
+		{0x5888, 0, 0, "ldr r0, [r1, r2]"},                      // Format 7
+		{0x6848, 0, 0, "ldr r0, [r1, #0x4]"},                    // Format 9（imm5*4）
+		{0x7848, 0, 0, "ldrb r0, [r1, #0x1]"},                   // Format 9 バイト
+		{0x8848, 0, 0, "ldrh r0, [r1, #0x2]"},                   // Format 10
+		{0x9801, 0, 0, "ldr r0, [sp, #0x4]"},                    // Format 11
+		{0xA801, 0, 0, "add r0, sp, #0x4"},                      // Format 12
+		{0xB082, 0, 0, "sub sp, #0x8"},                          // Format 13
+		{0xB510, 0, 0, "push {r4,lr}"},                          // Format 14
+		{0xBD10, 0, 0, "pop {r4,pc}"},                           // Format 14
+		{0xC103, 0, 0, "stmia r1!, {r0,r1}"},                    // Format 15
+		{0xD0FE, 0, 0x1000, "beq 0x00001000"},                   // Format 16（自分自身へ）
+		{0xDF01, 0, 0, "swi 0x01"},                              // Format 17
+		{0xDE00, 0, 0, ".hword 0xDE00"},                         // 未定義
+		{0xE7FE, 0, 0x1000, "b 0x00001000"},                     // Format 18
+		{0xF000, 0xF802, 0x1000, "bl 0x00001008"},               // Format 19（2 ハーフワード）
+		{0xF802, 0, 0x1002, "bl.suffix lr+0x4"},                 // サフィックス単体
+	}
+	for _, tt := range tests {
+		if got := DisasmThumb(tt.hw, tt.next, tt.pc); got != tt.want {
+			t.Errorf("DisasmThumb(%04X) = %q, want %q", tt.hw, got, tt.want)
+		}
+	}
+}
