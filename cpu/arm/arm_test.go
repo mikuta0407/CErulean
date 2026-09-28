@@ -378,17 +378,21 @@ func TestBX(t *testing.T) {
 		t.Errorf("BX (ARM): PC=%08X T=%v", c.PC(), c.cpsr.T())
 	}
 
-	// Thumb へ切り替え → 次の Step は未実装エラーで停止
+	// Thumb へ切り替え → 次の Step は Thumb 命令として実行される
 	c.Reset(testPC)
 	c.regs[3] = 0x3001
 	mustStep(t, c, mem, 0xE12FFF10|3)
 	if c.PC() != 0x3000 || !c.cpsr.T() {
 		t.Errorf("BX (Thumb): PC=%08X T=%v", c.PC(), c.cpsr.T())
 	}
-	err := c.Step()
-	var ue *UndefinedError
-	if !errors.As(err, &ue) {
-		t.Fatalf("Step in Thumb state: err = %v, want UndefinedError", err)
+	if err := mem.Write16(0x3000, 0x2107); err != nil { // mov r1, #7
+		t.Fatal(err)
+	}
+	if err := c.Step(); err != nil {
+		t.Fatalf("Step in Thumb state: %v", err)
+	}
+	if c.Reg(1) != 7 || c.PC() != 0x3002 {
+		t.Errorf("Thumb exec: r1=%d PC=%08X, want 7/3002", c.Reg(1), c.PC())
 	}
 }
 

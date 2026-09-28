@@ -164,9 +164,7 @@ func (c *Core) Step() error {
 	}
 
 	if c.cpsr.T() {
-		// TODO(マイルストーン2): Thumb デコーダ。BX で Thumb に入るコードが
-		// 来たらここで止まる。
-		return &UndefinedError{PC: c.regs[15], Reason: "Thumb state not implemented yet"}
+		return c.stepThumb()
 	}
 
 	pc := c.regs[15]
@@ -191,31 +189,40 @@ func (c *Core) Step() error {
 		return nil // 条件不成立: 何もせず次の命令へ
 	}
 	if err := in.exec(c, word); err != nil {
-		var ae *cpu.AbortError
-		if errors.As(err, &ae) {
-			// データアボート。FSR（ドメイン|ステータス）と FAR を更新して配送。
-			// LR = PC+8（ハンドラは SUBS pc, lr, #8 で再実行できる）。
-			if c.cp15 != nil {
-				_ = c.cp15.Write(0, 5, 0, 0, uint32(ae.Domain)<<4|uint32(ae.Status))
-				_ = c.cp15.Write(0, 6, 0, 0, ae.VA)
+		if derr := c.deliverExecError(err, pc, 4); derr != nil {
+			if ue, ok := derr.(*UndefinedError); ok {
+				ue.PC = pc
+				ue.Word = word
 			}
-			c.enterException(VecDabt, ModeAbt, pc+8)
-			return nil
+			c.regs[15] = pc
+			return derr
 		}
-		if ue, ok := err.(*UndefinedError); ok {
-			if ue.Arch {
-				// 実機でも未定義例外になる命令: ゲストに配送する。
-				// LR = 未定義命令の次（ARM ARM A2.6.4）。
-				c.enterException(VecUndef, ModeUnd, pc+4)
-				return nil
-			}
-			ue.PC = pc
-			ue.Word = word
-		}
-		c.regs[15] = pc
-		return err
 	}
 	return nil
+}
+
+// deliverExecError は命令実行中のエラーのうち ARM 例外として配送できる
+// ものを処理する。配送したら nil、できないもの（エミュレータ未実装等）は
+// そのまま返す。instrLen は未定義例外の LR 計算用（ARM=4, Thumb=2）。
+func (c *Core) deliverExecError(err error, pc, instrLen uint32) error {
+	var ae *cpu.AbortError
+	if errors.As(err, &ae) {
+		// データアボート。FSR（ドメイン|ステータス）と FAR を更新して配送。
+		// LR = PC+8（ARM/Thumb 共通。ハンドラは SUBS pc, lr, #8 で再実行できる）。
+		if c.cp15 != nil {
+			_ = c.cp15.Write(0, 5, 0, 0, uint32(ae.Domain)<<4|uint32(ae.Status))
+			_ = c.cp15.Write(0, 6, 0, 0, ae.VA)
+		}
+		c.enterException(VecDabt, ModeAbt, pc+8)
+		return nil
+	}
+	if ue, ok := err.(*UndefinedError); ok && ue.Arch {
+		// 実機でも未定義例外になる命令: ゲストに配送する。
+		// LR = 未定義命令の次（ARM ARM A2.6.4）。
+		c.enterException(VecUndef, ModeUnd, pc+instrLen)
+		return nil
+	}
+	return err
 }
 
 // isAbort は err が MMU 起因のアボートか（例外配送の対象か）を判定する。
