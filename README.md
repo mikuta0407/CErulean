@@ -29,8 +29,17 @@ Samsung S3C2410（ARM920T）構成のマシンで起動することを最初の�
 - [x] デバッグ支援: 物理アドレス監視 `-watch`、`-trace-from`、`-sample`、
       Thumb 命令のディスアセンブル、停止時の PC の VA→PA 表示
 
-Today 画面の完成まで約 35 億命令（現状の速度で約 2.5 分）かかる。入力（タッチ・キー）は
-次のマイルストーン。
+Today 画面の完成まで約 35 億命令（現状の速度で約 2.5 分）かかる。
+
+マイルストーン4（進行中）: 入力を与えて UI を操作できる。スクリプトで
+「Start をタップ → Calendar / Settings を起動」を再現し PNG で確認できる。
+
+- [x] スナップショット（全状態の保存・復元）。Today 画面から数秒で再開できる
+- [x] 決定論的な入力スクリプト（仮想時刻付きのタップ・キー・画面保存）
+- [x] タッチパネル（S3C2410 ADC/タッチスクリーン I/F、touch.dll の変換式に合わせた座標変換）
+- [x] ハードウェアキー（SPI1 のキーボード用マイコン）: 方向キー・Enter・英数字・App ボタン
+- [ ] ソフトキー（VK_F1/F2）の物理キー入力（ドライバの表に無い。画面のソフトキー表示のタップで代用可）
+- [ ] 電源ボタン（pwrbtn2410.dll、EINT0）
 
 ## テスト用イメージの入手
 
@@ -79,6 +88,34 @@ go build ./cmd/cerulean
 ./cerulean run -watch 0x4D000000-0x4D000FFF -max-steps 100000000 path/to/nk.bin
 ```
 
+### 入力スクリプトとスナップショット
+
+```sh
+# 一度だけ: Today 画面まで起動してスナップショットを保存（約 2.5 分）
+./cerulean run -rtc 2006-01-02T15:04:05 -snap-save today.snap@3600000000i \
+  -max-steps 3600000001 path/to/nk.bin
+
+# 以後はスナップショットから数秒で再開し、スクリプトで操作する
+./cerulean run -snap-load today.snap -script calendar.txt path/to/nk.bin
+```
+
+`calendar.txt` の例（`@` は絶対時刻、`+` は直前のコマンドの終了からの相対時刻。
+単位は `s`・`ms`・命令数 `i`。仮想時刻は命令数から決まるので、何度実行しても
+同じ結果になる）:
+
+```
+@3600100000i tap 20 10        # Start（座標は 240x320 の画面ピクセル）
++1s          tap 50 52        # Calendar
++2s          press Right      # キー（Up/Down/Left/Right/Enter/A〜Z/0〜9/App1〜5 など）
++2s          shot cal.png     # 画面を PNG に保存
++0i          snap cal.snap    # その時点のスナップショット
++0i          quit
+```
+
+コマンドは `tap x y [押下時間]`・`down x y`・`move x y`・`up`・`key down|up 名前`・
+`press 名前 [押下時間]`・`shot ファイル`・`snap ファイル`・`quit`。書式の詳細は
+`script` パッケージのコメントを参照。
+
 `run` の全フラグは `./cerulean` を引数なしで実行すると表示される。
 
 ## 開発
@@ -100,5 +137,7 @@ go vet ./...
 | `cpu/arm` | ARMv4T インタプリタ実装 |
 | `mmu` | MMU / CP15（ARMv4 テーブルウォーク・権限チェック・FCSE） |
 | `bus` | 物理アドレス空間（RAM と MMIO ディスパッチ） |
-| `device/s3c2410` | S3C2410 周辺機器（UART・割り込み・タイマーなど） |
-| `machine` | SoC＋周辺機器の構成定義。`smdk2410` が最初のターゲット |
+| `device/s3c2410` | S3C2410 周辺機器（UART・割り込み・タイマー・LCD・RTC・ADC/タッチ・SPI など） |
+| `machine` | SoC＋周辺機器の構成定義。`smdk2410` が最初のターゲット（入力 API もここ） |
+| `snapshot` | 全状態の保存形式（SoC 非依存のコンテナとエンコーダ） |
+| `script` | 入力スクリプトの解釈（純 Go。CLI 以外からも使える） |

@@ -37,6 +37,21 @@ cmd/cerulean → machine/smdk2410 → { cpu/arm, mmu, bus, device/s3c2410, loade
   bus.AddWatch（-watch）が有効な間は fast path を使わない。
   デコードキャッシュは未着手（decode.go/exec の分離は維持すること）。
 
+## スナップショット・入力の設計（2026-09 ユーザー確認済み）
+
+- 全状態は `snapshot` パッケージの形式で保存する（`CERUSNAP`＋形式版数＋flate。
+  中身はコンポーネント単位のチャンクで、各チャンクが独立した版数を持つ。末尾の
+  バイト数トレーラで書き手と読み手の食い違いを検出）。未知・非対応は必ずエラー。
+- **状態を持つフィールドを足したら SaveState/LoadState を更新し StateVersion を上げる**。
+  各パッケージの `CheckFields` テストが、保存対象か配線かの分類漏れを検出する。
+  MMIO デバイスは machine がバスから列挙し、Stateful でないものはエラーになる
+  （状態のない openBus だけ例外）。ソフト TLB も保存する（通し実行との完全一致のため）。
+- 入力 API（TouchDown/Move/Up・KeyDown/Up）は machine に置き、スクリプトの解釈は
+  純 Go の `script` パッケージ、ファイル読み込みと時刻照合は cmd。時刻は命令数
+  （machine.Steps、InstructionsPerSecond=135.2M/仮想秒）で、決定論的。
+- 対話フロントエンドは当面作らない。作るならブラウザ型（cmd がローカル HTTP で
+  画面配信・入力受付。cgo・GUI ライブラリ不要）を想定しておく。
+
 ## 例外・エラーの扱い
 
 - 未実装命令は `arm.UndefinedError{PC, Word, ...}` を返して停止し、CLI が PC と命令語を表示する。
@@ -104,12 +119,36 @@ cmd/cerulean → machine/smdk2410 → { cpu/arm, mmu, bus, device/s3c2410, loade
   ループ（0x800AFxxx）。マイルストーン2 で「停滞」と見ていたのは起動完了後の
   アイドル（入力待ち）だった。
   エミュレーション速度は約 22M 命令/秒（ソフト TLB 導入後）。
+- **タッチパネルは S3C2410 標準の ADC/タッチスクリーン I/F**（touch.dll、VA 0x01530000〜）。
+  初期化で GPGCON|=0xFF000000・ADCDLY=50000・ADCCON=0x7200・ADCTSC=0xD3。
+  ペンダウンの INT_TC で、自動変換（ADCTSC=0xDC）を 4 回して平均し、Timer3 を
+  自動リロードで起動して約 10ms ごとにサンプリング。サンプリング後は
+  **ADCTSC=0x1D3（bit8=S3C2440 の UD_SEN 相当）でペンアップを INT_TC 検出**する
+  （タイマー経路は UPDOWN を読まないので、アップの割り込みが無いと押しっぱなしになる）。
+- **タッチ座標変換はドライバ内の固定式**（キャリブレーションデータなし。レジストリの
+  HARDWARE\DEVICEMAP\TOUCH は MaxCalError=7 のみ）。1/4 ピクセル単位で
+  X4=(ADCDAT1−85)×960/880、Y4=(1023−ADCDAT0−105)×1280/875（軸入れ替え・Y 反転）。
+- **キーは SPI1 のキーボード用マイコン**（kbdmouse.dll、VA 0x014D0000〜）。EINT1
+  （GPF1 立ち下がり）1 回ごとに GPB6=Low→SPTDAT1=0xFF→GPB6=High→SPRDAT1 で 1 バイト。
+  bit7=1 が離した、bit6〜0 がスキャンコード、直前と同じバイトは無視。スキャンコード→VK
+  はドライバ内の固定表（0x00〜0x6F。Enter=0x5A、↑0x6C ↓0x6A ←0x6D →0x6F、App1〜5=0x64〜0x68）。
+  **ソフトキー（VK_F1/F2）は表に無い**。初期化時に 0xFF×10 と 3 バイトコマンド
+  （1B A0 7B / 1B A1 7A）を送るが応答は読まない。
+- 電源ボタン pwrbtn2410.dll は GPF0（EINT0）を設定する（未実装）。
+- **マイルストーン4 の到達点**: Today（36 億命令）のスナップショットから、タップで
+  Start メニュー → Calendar / Settings が起動し、方向キー・Enter・文字入力も効く。
 
 ## 未確定事項・次の課題（随時更新）
 
-- **入力**: タッチパネル（ADC/TC、touch.dll）・キー（kbdmouse.dll）・UART 受信は
-  未実装。次のマイルストーン（UI 表示・操作）の中心課題。touch.dll が
-  使うのが S3C2410 の ADC/タッチスクリーン I/F か DE 固有デバイスかを要観察。
+- **入力**: ソフトキー（VK_F1/F2）を物理キーとして押す経路が未発見（kbdmouse の表に
+  無い。DE 本体のボタンが別経路か要調査）。電源ボタン（EINT0）・UART 受信は未実装。
+  キーボード用マイコンの 3 バイトコマンドの意味・データ無し時の応答値（0 としている）・
+  チップセレクト（GPB6）の扱いは未確認。
+- ADC: ADCTSC bit8（UD_SEN）を S3C2440 と同じ意味で実装しているが、S3C2410 の
+  データシートでは予約のはず（DE の独自実装と判断）。割り込み待ちに入った時点で
+  既に検出対象の状態なら INT_TC を出す（レベル扱い）のは判断。変換時間
+  （(PRSCVL+1)×5 PCLK）・ADCDLY の意味・リセット値は要照合。
+- SPI: レジスタ配置・INT_SPI0/1 のビット番号（22/29）は記憶ベースで要照合。
 - 0x500F0000 の DE 準仮想デバイスのレジスタの意味（ホスト連携が必要になったら）。
 - LCD: LINECNT/VSTATUS は常に 0 を返す（走査は未エミュレート）。垂直同期待ちの
   ポーリングが現れたら仮想時間から生成する。STN モード・パレット形式は未検証。
