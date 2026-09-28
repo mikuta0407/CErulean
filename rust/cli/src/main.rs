@@ -1,9 +1,6 @@
 //! CErulean のネイティブの開発用 CLI（Go 版の cmd/cerulean の run・info に当たる）。
 //! フラグ名と出力の書式は Rust 版で決めている（Go 版との互換は要件ではない）。
 //! 一致確認の出力（--result・--trace-hash）の中身は testdata/golden/README.md が正。
-//!
-//! TODO(段階1): トレースの逆アセンブル、画面の PNG 保存（--fb-out・shot）、
-//! スナップショット（--snap-save・--snap-load・snap）、サンプリング（--sample）。
 
 mod result;
 
@@ -11,16 +8,19 @@ use std::io::Write;
 use std::process::ExitCode;
 use std::time::Instant;
 
+use cerulean_core::arm;
 use cerulean_core::emu::{self, RunError, Session};
 use cerulean_core::loader;
 use cerulean_core::script::{self, Event, Kind};
 use cerulean_core::smdk2410::{INSTRUCTIONS_PER_SECOND, Machine};
+use cerulean_core::snapshot;
 
 use result::{ResultWriter, Stop, TraceHasher, UartTap};
 
 const USAGE: &str = "\
 Usage:
   cerulean info <image>            イメージの情報を表示する
+  cerulean snapdump <snap> [snap2] スナップショットのチャンクの一覧（2 つなら比較）
   cerulean run [options] <image>   イメージをリセットから実行する
   cerulean run --snap-load F [options] [image]
                                    スナップショットから再開する（image を渡すと照合する）
@@ -33,6 +33,9 @@ run options:
   --history N           停止時に直前 N 命令の PC を表示する（既定 16、0 = 無効）
   --trace               実行した命令の PC と命令語を逐一表示する
   --trace-from N        --trace の表示を N 命令目から始める
+  --sample N            N 命令ごとに PC・CPSR を 1 行表示する（停滞箇所の調査用）
+  --fb-out F.png        停止時に画面を PNG に書く
+  --fb-every N          --fb-out と併用。N 命令ごとに F-<命令数>.png として連番で書く
   --watch LO[-HI]       物理アドレス範囲へのアクセスを表示する（複数可。1 命令ずつ進む）
   --stats               停止時に実行速度を表示する
   --no-idle-skip        アイドルループのスキップを無効にする（結果は同じ。--trace 中は自動で無効）
@@ -51,6 +54,7 @@ fn main() -> ExitCode {
     let r = match args.first().map(String::as_str) {
         Some("info") => cmd_info(&args[1..]),
         Some("run") => cmd_run(&args[1..]),
+        Some("snapdump") => cmd_snapdump(&args[1..]),
         _ => {
             eprint!("{USAGE}");
             return ExitCode::from(2);
@@ -114,6 +118,9 @@ struct RunOpts {
     no_idle_skip: bool,
     snap_save: Option<(String, u64)>,
     snap_load: Option<String>,
+    sample: u64,
+    fb_out: Option<String>,
+    fb_every: u64,
 }
 
 fn parse_u64(s: &str) -> Result<u64, String> {
@@ -220,6 +227,9 @@ fn parse_run_opts(args: &[String]) -> Result<RunOpts, String> {
                 o.snap_save = Some((f.to_string(), t));
             }
             "--snap-load" => o.snap_load = Some(val()?),
+            "--sample" => o.sample = parse_u64(&val()?)?,
+            "--fb-out" => o.fb_out = Some(val()?),
+            "--fb-every" => o.fb_every = parse_u64(&val()?)?,
             s if s.starts_with("--") => return Err(format!("unknown option {s}\n{USAGE}")),
             s => {
                 if image.replace(s.to_string()).is_some() {
@@ -236,6 +246,9 @@ fn parse_run_opts(args: &[String]) -> Result<RunOpts, String> {
         return Err(
             "--rtc cannot be used with --snap-load (the RTC state comes from the snapshot)".into(),
         );
+    }
+    if o.fb_every != 0 && o.fb_out.is_none() {
+        return Err("--fb-every requires --fb-out".into());
     }
     if !o.checkpoints.is_empty() && o.result.is_none() {
         return Err("--checkpoint requires --result".into());
@@ -264,6 +277,46 @@ fn host_now_utc() -> [i64; 6] {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
     [y, m, d, rem / 3600, rem / 60 % 60, rem % 60]
+}
+
+/// pc の命令語（Thumb ならハーフワード）と逆アセンブルの表示。状態は変えない。
+fn instr_text(m: &mut Machine, pc: u32, thumb: bool) -> String {
+    let Some(w0) = m.peek32(pc) else {
+        return "????????".into();
+    };
+    if !thumb {
+        return format!("{w0:08X}  {}", arm::disasm(w0, pc));
+    }
+    // BL の対を表示するため直後のハーフワードも読む。
+    let (hw, next) = if pc & 2 == 0 {
+        (w0 & 0xFFFF, w0 >> 16)
+    } else {
+        (w0 >> 16, m.peek32(pc.wrapping_add(4)).unwrap_or(0) & 0xFFFF)
+    };
+    format!("    {hw:04X}  {}", arm::disasm_thumb(hw, next, pc))
+}
+
+/// 画面を PNG に書く（PNG 化・ファイル出力は CLI の責務。コアは RGBA を返すだけ）。
+fn write_png(m: &mut Machine, path: &str) -> Result<(), String> {
+    let (f, cfg) = m.frame().map_err(|e| e.to_string())?;
+    let file = std::fs::File::create(path).map_err(|e| format!("{path}: {e}"))?;
+    let mut enc = png::Encoder::new(std::io::BufWriter::new(file), f.width, f.height);
+    enc.set_color(png::ColorType::Rgba);
+    enc.set_depth(png::BitDepth::Eight);
+    let mut w = enc.write_header().map_err(|e| format!("{path}: {e}"))?;
+    w.write_image_data(&f.rgba)
+        .map_err(|e| format!("{path}: {e}"))?;
+    w.finish().map_err(|e| format!("{path}: {e}"))?;
+    eprintln!("cerulean: wrote {path} ({cfg})");
+    Ok(())
+}
+
+/// "shot.png" → "shot-000123456789.png"（命令数を 12 桁で埋め、ファイル名順 = 時系列にする）。
+fn numbered_path(path: &str, steps: u64) -> String {
+    match path.rsplit_once('.') {
+        Some((stem, ext)) if !ext.contains('/') => format!("{stem}-{steps:012}.{ext}"),
+        _ => format!("{path}-{steps:012}"),
+    }
 }
 
 /// ファイル全体の SHA-256（スナップショットのイメージ ID）。
@@ -417,11 +470,7 @@ fn cmd_run(args: &[String]) -> Result<ExitCode, String> {
             Kind::Quit => Ok(true),
             // TODO(段階1): 画面の保存（PNG）とスナップショット。
             Kind::Snap => save_snapshot(m, &ev.path, &image_id).map(|_| false),
-            // TODO(段階1): 画面の保存（PNG。png クレートを CLI に入れる）。
-            Kind::Shot => Err(format!(
-                "{} is not implemented yet in the Rust CLI",
-                ev.kind
-            )),
+            Kind::Shot => write_png(m, &ev.path).map(|_| false),
             _ => emu::apply_input(m, ev),
         }
     };
@@ -433,16 +482,16 @@ fn cmd_run(args: &[String]) -> Result<ExitCode, String> {
         let steps = m.steps();
         let mut r = sess.run(&mut m, steps, &mut apply);
         if matches!(r, Ok(false)) && o.trace && steps >= o.trace_from {
-            let pc = m.cpu.pc();
-            let w = m
-                .peek32(pc)
-                .map_or("????????".into(), |w| format!("{w:08X}"));
-            eprintln!(
-                "{steps:12}  PC={pc:08X}  {w}{}",
-                if m.cpu.thumb() { " (T)" } else { "" }
-            );
+            let (pc, thumb) = (m.cpu.pc(), m.cpu.thumb());
+            eprintln!("{steps:12}  PC={pc:08X}  {}", instr_text(&mut m, pc, thumb));
         }
         let mut target = u64::MAX;
+        if o.sample != 0 {
+            target = target.min(result::next_multiple(steps, o.sample));
+        }
+        if o.fb_every != 0 {
+            target = target.min(result::next_multiple(steps, o.fb_every));
+        }
         if o.max_steps != 0 {
             target = target.min(o.max_steps);
         }
@@ -503,6 +552,20 @@ fn cmd_run(args: &[String]) -> Result<ExitCode, String> {
         // その命令数に予定された入力イベントを適用する前の状態を書く
         // （イベントは次の周の先頭で適用される）。
         let steps = m.steps();
+        if o.sample != 0 && steps.is_multiple_of(o.sample) {
+            eprintln!(
+                "{steps:12}  sample PC={:08X} CPSR={:08X}",
+                m.cpu.pc(),
+                m.cpu.cpsr()
+            );
+        }
+        if o.fb_every != 0
+            && steps.is_multiple_of(o.fb_every)
+            && let Some(f) = &o.fb_out
+            && let Err(e) = write_png(&mut m, &numbered_path(f, steps))
+        {
+            eprintln!("cerulean: {e}");
+        }
         if let Some(h) = &mut hasher {
             h.emit(&m).map_err(io)?;
         }
@@ -524,6 +587,11 @@ fn cmd_run(args: &[String]) -> Result<ExitCode, String> {
     }
     if let Some(w) = &mut results {
         w.write(&mut m, &uart, "stop", Some(&stop)).map_err(io)?;
+    }
+    if let Some(f) = &o.fb_out
+        && let Err(e) = write_png(&mut m, f)
+    {
+        eprintln!("cerulean: {e}");
     }
     report(&mut m, &o, started, &stop);
     Ok(match stop {
@@ -549,18 +617,7 @@ fn report(m: &mut Machine, o: &RunOpts, started: Instant, _stop: &Stop) {
         let h = m.cpu.history();
         eprintln!("last {} instructions:", h.len());
         for (pc, thumb) in h {
-            let w = m.peek32(pc).map(|w| {
-                if thumb {
-                    (w >> ((pc & 2) * 8)) & 0xFFFF
-                } else {
-                    w
-                }
-            });
-            match (w, thumb) {
-                (Some(w), true) => eprintln!("  PC={pc:08X}      {w:04X}"),
-                (Some(w), false) => eprintln!("  PC={pc:08X}  {w:08X}"),
-                (None, _) => eprintln!("  PC={pc:08X}  ????????"),
-            }
+            eprintln!("  PC={pc:08X}  {}", instr_text(m, pc, thumb));
         }
     }
     if o.stats {
@@ -573,4 +630,61 @@ fn report(m: &mut Machine, o: &RunOpts, started: Instant, _stop: &Stop) {
             100.0 * m.idle_skipped() as f64 / n.max(1) as f64
         );
     }
+}
+
+/// snapdump: スナップショットのチャンクの一覧（名前・版数・長さ・SHA-256）。
+/// 2 つ渡すと、チャンクごとに同じかを表示する（食い違いの調査用）。
+fn cmd_snapdump(args: &[String]) -> Result<ExitCode, String> {
+    if args.is_empty() || args.len() > 2 {
+        return Err("usage: cerulean snapdump <snap> [snap2]".into());
+    }
+    type Chunks = Vec<(String, u16, usize, String)>;
+    let list = |path: &str| -> Result<(snapshot::Header, Chunks), String> {
+        let f = std::fs::File::open(path).map_err(|e| format!("{path}: {e}"))?;
+        let mut r = snapshot::Reader::new(std::io::BufReader::new(f))
+            .map_err(|e| format!("{path}: {e}"))?;
+        let mut v = vec![];
+        while let Some(c) = r.next_chunk().map_err(|e| format!("{path}: {e}"))? {
+            v.push((
+                c.name.clone(),
+                c.version,
+                c.body.len(),
+                result::sha256_hex(&c.body),
+            ));
+        }
+        Ok((r.header, v))
+    };
+    let (ha, a) = list(&args[0])?;
+    println!("{}: machine={} image={}", args[0], ha.machine, ha.image_id);
+    let Some(other) = args.get(1) else {
+        for (name, v, len, sum) in &a {
+            println!("  {name:<18} v{v} {len:>10} bytes  sha256 {sum}");
+        }
+        return Ok(ExitCode::SUCCESS);
+    };
+    let (hb, b) = list(other)?;
+    println!("{other}: machine={} image={}", hb.machine, hb.image_id);
+    let mut same = true;
+    for (name, v, len, sum) in &a {
+        match b.iter().find(|c| &c.0 == name) {
+            Some(c) if c.1 == *v && c.3 == *sum => println!("  same  {name}"),
+            Some(c) => {
+                same = false;
+                println!("  DIFF  {name} (v{v} {len} bytes / v{} {} bytes)", c.1, c.2);
+            }
+            None => {
+                same = false;
+                println!("  ONLY  {name} (in {})", args[0]);
+            }
+        }
+    }
+    for c in b.iter().filter(|c| !a.iter().any(|x| x.0 == c.0)) {
+        same = false;
+        println!("  ONLY  {} (in {other})", c.0);
+    }
+    Ok(if same {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    })
 }

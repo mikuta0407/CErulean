@@ -16,6 +16,7 @@
 //! 素直な実装で Go との一致を確かめてから 1 つずつ移す。
 
 mod code;
+mod disasm;
 mod exec_arm;
 mod exec_thumb;
 mod idle;
@@ -29,6 +30,7 @@ use crate::bus::{BusError, RamOff};
 use crate::cpu::{Abort, MemError};
 
 pub use code::{CodeCache, CodeMemory, Instr};
+pub use disasm::{disasm, disasm_thumb};
 pub use exec_arm::{ExecFn, decode_instr};
 pub use idle::{POLL_LOOP_LEN, PollState};
 
