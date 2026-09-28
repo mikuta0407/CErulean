@@ -3,3 +3,6 @@
 
 # テスト用イメージ等の作業ディレクトリ（入手方法は README.md 参照）
 /tmp/
+
+# Rust のビルド成果物
+/rust/target/

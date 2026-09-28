@@ -1,0 +1,10 @@
+[package]
+name = "cerulean-core"
+description = "CErulean のエミュレータのコア（プラットフォーム非依存）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# コアは依存なし（std のみ）で始める。足すときはユーザーの承認を取る（計画書 §8）。
+[dependencies]

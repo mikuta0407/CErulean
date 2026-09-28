@@ -1,0 +1,25 @@
+# CErulean の Rust ワークスペース（docs/rust-migration-plan.md §3.1）。
+# core: エミュレータのコア（プラットフォーム非依存、std のみ）
+# cli:  ネイティブの開発用 CLI
+# web:  ブラウザ（wasm）のエントリ
+[workspace]
+resolver = "3"
+members = ["core", "cli", "web"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+publish = false
+
+# 依存はユーザーの承認を得たものだけ（計画書 §8）。
+[workspace.dependencies]
+cerulean-core = { path = "core" }
+# wasm-bindgen-cli と版を一致させる必要があるので = で固定する。
+wasm-bindgen = "=0.2.129"
+
+# 計測は必ず release で行う（計画書 §6.1）。
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

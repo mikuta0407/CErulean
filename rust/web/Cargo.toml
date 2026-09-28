@@ -1,0 +1,14 @@
+[package]
+name = "cerulean-web"
+description = "CErulean のブラウザ版（wasm）のエントリ"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+cerulean-core.workspace = true
+wasm-bindgen.workspace = true
