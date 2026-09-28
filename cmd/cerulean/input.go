@@ -125,11 +125,28 @@ func insertEvent(events []script.Event, ev script.Event) []script.Event {
 // （長い実行の途中でスクリプトの誤りに気づくのを避けるため）。
 func validateEvent(ev script.Event) error {
 	switch ev.Kind {
-	case script.TouchDown, script.TouchMove, script.TouchUp, script.KeyDown, script.KeyUp:
-		return fmt.Errorf("%v: touch/key input is not implemented yet", ev.Kind)
+	case script.TouchDown, script.TouchMove:
+		if touchRaw {
+			if ev.X > 1023 || ev.Y > 1023 {
+				return fmt.Errorf("%v: raw ADC value out of range (0-1023): %d %d", ev.Kind, ev.X, ev.Y)
+			}
+		} else if ev.X >= screenW || ev.Y >= screenH {
+			return fmt.Errorf("%v: (%d,%d) outside the %dx%d screen", ev.Kind, ev.X, ev.Y, screenW, screenH)
+		}
+	case script.KeyDown, script.KeyUp:
+		return fmt.Errorf("%v: key input is not implemented yet", ev.Kind)
 	}
 	return nil
 }
+
+// screenW/screenH はタッチ座標の範囲（main で machine から設定する）。
+var screenW, screenH int
+
+// touchRaw は -touch-raw（スクリプトの座標を ADC 生値として渡す調査用モード）。
+var touchRaw bool
+
+// lastRaw は move/up で位置を引き継ぐための直前のペン位置。
+var lastRawX, lastRawY uint32
 
 // applyEvent はイベントを 1 個適用する。quit なら true。
 func applyEvent(m *smdk2410.Machine, ev script.Event, imageID string) (quit bool, err error) {
@@ -140,6 +157,20 @@ func applyEvent(m *smdk2410.Machine, ev script.Event, imageID string) (quit bool
 		return false, saveSnapshot(m, ev.Path, imageID)
 	case script.Quit:
 		return true, nil
+	case script.TouchDown, script.TouchMove:
+		if touchRaw {
+			lastRawX, lastRawY = uint32(ev.X), uint32(ev.Y)
+			m.TouchRaw(true, lastRawX, lastRawY)
+			return false, nil
+		}
+		return false, m.TouchMove(ev.X, ev.Y)
+	case script.TouchUp:
+		if touchRaw {
+			m.TouchRaw(false, lastRawX, lastRawY)
+		} else {
+			m.TouchUp()
+		}
+		return false, nil
 	}
 	return false, fmt.Errorf("%v: not implemented", ev.Kind)
 }

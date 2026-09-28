@@ -12,7 +12,7 @@ func TestMachineStateFields(t *testing.T) {
 	snapshottest.CheckFields(t, Machine{},
 		[]string{"tickAcc", "steps", "entryPA"},
 		// 各コンポーネントは自分のチャンクで保存される（snapshot.go）。
-		[]string{"cpu", "bus", "mmu", "intc", "timer", "lcd", "rtc"})
+		[]string{"cpu", "bus", "mmu", "intc", "timer", "lcd", "rtc", "adc"})
 }
 
 // loopProgram はタイマー 4 を自動リロードで回しながら（割り込みはマスク

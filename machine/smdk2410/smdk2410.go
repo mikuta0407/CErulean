@@ -48,6 +48,7 @@ type Machine struct {
 	timer *s3c2410.PWMTimer
 	lcd   *s3c2410.LCD
 	rtc   *s3c2410.RTC
+	adc   *s3c2410.ADC
 
 	// 仮想時間: 命令数から PCLK ティックを固定比で生成する（決定論的。
 	// ユーザー確認済み 2026-09）。tickAcc は 1/8 ティック単位の端数累積。
@@ -149,6 +150,13 @@ func New(uartOut io.Writer) (*Machine, error) {
 	if err := b.MapMMIO("rtc", 0x57000000, 0x1000, m.rtc); err != nil {
 		return nil, err
 	}
+	// ADC/タッチスクリーン: touch.dll がこれを使う（2026-09 に実測。
+	// GPGCON で GPG12〜15 をタッチ用に切り替え、ADCTSC=0xD3 で
+	// 割り込み待ちにする）。割り込みは INT_ADC のサブソース INT_TC/INT_ADC。
+	m.adc = s3c2410.NewADC(func(sub uint) { m.intc.RaiseSub(sub) })
+	if err := b.MapMMIO("adc", 0x58000000, 0x1000, m.adc); err != nil {
+		return nil, err
+	}
 	// 当面は値保持スタブで済ませる周辺ブロック（S3C2410 データシート Figure 5-1）。
 	for _, p := range []struct {
 		name string
@@ -187,7 +195,6 @@ func New(uartOut io.Writer) (*Machine, error) {
 			// TODO: データシートと再照合（0x32410000 = S3C2410 のはず）
 			0xB0: 0x32410000,
 		}},
-		{"adc", 0x58000000, nil},
 	} {
 		if err := b.MapMMIO(p.name, p.base, 0x1000, s3c2410.NewStub(p.name, p.init)); err != nil {
 			return nil, err
@@ -320,6 +327,7 @@ func (m *Machine) Step() error {
 		m.tickAcc &= 7
 		m.timer.Advance(int64(t))
 		m.rtc.Advance(int64(t))
+		m.adc.Advance(int64(t))
 	}
 	return err
 }

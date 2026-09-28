@@ -47,6 +47,7 @@ run flags:
   -script f        入力スクリプト（タップ・キー・画面保存を仮想時刻で並べたもの。
                    書式は script パッケージのコメント参照）
   -snap-save f@t   仮想時刻 t（例 95s, 3500000000i）に全状態を f に保存する
+  -touch-raw       スクリプトのタッチ座標を ADC の生値（0〜1023）として渡す（調査用）
   -snap-load f     スナップショット f から再開する（命令数・仮想時刻は保存時点から
                    継続）。image を指定すると保存時のイメージと同一かを照合する
 `)
@@ -140,6 +141,7 @@ func cmdRun(args []string) {
 	scriptPath := fs.String("script", "", "入力スクリプト")
 	snapSave := fs.String("snap-save", "", "f@t: 仮想時刻 t にスナップショットを f に保存")
 	snapLoad := fs.String("snap-load", "", "スナップショットから再開")
+	fs.BoolVar(&touchRaw, "touch-raw", false, "スクリプトのタッチ座標を ADC 生値として渡す（調査用）")
 	_ = fs.Parse(args)
 	if fs.NArg() > 1 || (fs.NArg() == 0 && *snapLoad == "") {
 		usage()
@@ -211,6 +213,7 @@ func cmdRun(args []string) {
 			m.Name(), img.Format, img.Entry, m.CPU().PC())
 	}
 
+	screenW, screenH = m.TouchScreenSize()
 	events, err := buildEvents(*scriptPath, *snapSave, m.Steps())
 	if err != nil {
 		fatal(err)

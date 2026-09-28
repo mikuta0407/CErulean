@@ -20,6 +20,9 @@ func TestDeviceStateFields(t *testing.T) {
 	snapshottest.CheckFields(t, RTC{}, []string{"base", "elapsed", "rtccon", "other"}, []string{"pclkHz"})
 	snapshottest.CheckFields(t, UART{}, []string{"ulcon", "ucon", "ufcon", "umcon", "ubrdiv"}, []string{"w"})
 	snapshottest.CheckFields(t, DMAStub{}, []string{"stub"}, []string{"raise"})
+	snapshottest.CheckFields(t, ADC{},
+		[]string{"adccon", "adctsc", "adcdly", "dat0", "dat1", "converting", "ecflg", "penDown", "rawX", "rawY"},
+		[]string{"raiseSub"})
 }
 
 func TestStubStateRoundTrip(t *testing.T) {
@@ -115,5 +118,22 @@ func TestLCDUARTDMAStateRoundTrip(t *testing.T) {
 	snapshottest.RoundTrip(t, d, d2)
 	if d2.Read(0x14, 4) != 0x1234 {
 		t.Error("DMA not restored")
+	}
+}
+
+func TestADCStateRoundTrip(t *testing.T) {
+	a := NewADC(nil)
+	a.Write(regADCTSC, 4, 0x0C)
+	a.SetPen(true, 100, 200)
+	a.Write(regADCCON, 4, 1<<14|49<<6|1)
+	a.Advance(10)
+	b := NewADC(nil)
+	snapshottest.RoundTrip(t, a, b)
+	a.Advance(1000)
+	b.Advance(1000)
+	for off := uint32(0); off <= regADCDAT1; off += 4 {
+		if x, y := a.Read(off, 4), b.Read(off, 4); x != y {
+			t.Errorf("reg %X: %08X vs %08X", off, x, y)
+		}
 	}
 }

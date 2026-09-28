@@ -176,3 +176,30 @@ func (dm *DMAStub) StateVersion() uint16 { return 1 }
 func (dm *DMAStub) SaveState(e *snapshot.Encoder) { dm.stub.SaveState(e) }
 
 func (dm *DMAStub) LoadState(d *snapshot.Decoder) { dm.stub.LoadState(d) }
+
+// ---- ADC ----
+
+var _ snapshot.Stateful = (*ADC)(nil)
+
+func (a *ADC) StateVersion() uint16 { return 1 }
+
+func (a *ADC) SaveState(e *snapshot.Encoder) {
+	for _, v := range []uint32{a.adccon, a.adctsc, a.adcdly, a.dat0, a.dat1, a.rawX, a.rawY} {
+		e.U32(v)
+	}
+	e.I64(a.converting)
+	e.Bool(a.ecflg)
+	e.Bool(a.penDown)
+}
+
+func (a *ADC) LoadState(d *snapshot.Decoder) {
+	if !d.CheckVersion(1) {
+		return
+	}
+	for _, p := range []*uint32{&a.adccon, &a.adctsc, &a.adcdly, &a.dat0, &a.dat1, &a.rawX, &a.rawY} {
+		*p = d.U32()
+	}
+	a.converting = d.I64()
+	a.ecflg = d.Bool()
+	a.penDown = d.Bool()
+}
