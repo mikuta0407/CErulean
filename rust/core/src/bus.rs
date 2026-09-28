@@ -340,7 +340,10 @@ impl<D: Copy> Bus<D> {
         })
     }
 
-    /// 物理アドレスの読み出し（size は 1/2/4）。
+    /// 物理アドレスの読み出し（size は 1/2/4）。値はアクセスの幅に切り詰める
+    /// （Go の Read8/Read16 が戻り値の型で切り詰めるのと同じ。MMIO デバイスは
+    /// サイズに関係なくレジスタ全体を返すことがある）。監視の記録は Go と同じく
+    /// 切り詰める前の値。
     pub fn read(
         &mut self,
         addr: u32,
@@ -352,7 +355,7 @@ impl<D: Copy> Bus<D> {
             let name = self.find(addr).map_or("", |r| r.name);
             self.notify(name, addr, size, v, false);
         }
-        Ok(v)
+        Ok(v & size_mask(size))
     }
 
     fn read1(&mut self, addr: u32, size: u32, devs: &mut impl Devices<D>) -> Result<u32, BusError> {
@@ -415,7 +418,8 @@ impl<D: Copy> Bus<D> {
                 Ok(())
             }
             Kind::Mmio(d) => {
-                devs.write(d, o, size, v);
+                // Go の Write8/Write16 は引数の型で切り詰めてから渡す。
+                devs.write(d, o, size, v & size_mask(size));
                 Ok(())
             }
         }
@@ -445,6 +449,16 @@ impl<D: Copy> Bus<D> {
             Kind::Mmio(d) => Some((r.name, r.base, d)),
             Kind::Ram { .. } => None,
         })
+    }
+}
+
+/// アクセス幅（1/2/4 バイト）のマスク。
+#[inline(always)]
+fn size_mask(size: u32) -> u32 {
+    match size {
+        1 => 0xFF,
+        2 => 0xFFFF,
+        _ => 0xFFFF_FFFF,
     }
 }
 
@@ -581,6 +595,23 @@ mod tests {
         assert_eq!(d.last, Some((2, 0x20, 2, 0)));
         b.write(0x5044, 4, 0xCAFE, &mut d).unwrap();
         assert_eq!(d.last, Some((2, 0x44, 4, 0xCAFE)));
+    }
+
+    /// MMIO の読み書きはアクセス幅に切り詰める（Go の Read8/Read16/Write8/Write16）。
+    #[test]
+    fn mmio_width() {
+        let (mut b, mut d) = (Bus::<u8>::new(), Stub::default());
+        d.read_val[1] = 0x12345678;
+        b.map_mmio("dev", 0x5000, 0x100, 1).unwrap();
+        b.add_watch(0x5000, 0x5003);
+        assert_eq!(b.read(0x5000, 1, &mut d), Ok(0x78));
+        assert_eq!(b.read(0x5000, 2, &mut d), Ok(0x5678));
+        assert_eq!(b.read(0x5000, 4, &mut d), Ok(0x12345678));
+        assert_eq!(b.watch_log[0].value, 0x12345678, "監視は切り詰める前の値");
+        b.write(0x5000, 1, 0xAABB, &mut d).unwrap();
+        assert_eq!(d.last, Some((1, 0, 1, 0xBB)));
+        b.write(0x5000, 2, 0xAABBCCDD, &mut d).unwrap();
+        assert_eq!(d.last, Some((1, 0, 2, 0xCCDD)));
     }
 
     #[test]
