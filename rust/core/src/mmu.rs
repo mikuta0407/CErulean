@@ -810,6 +810,120 @@ impl Mmu {
     }
 }
 
+// ---- スナップショット ----
+//
+// ソフト TLB も保存する（ユーザー確認済み 2026-09）。TLB は「c8 で無効化
+// されるまで古い変換が残る」という観測可能な状態を持つので、空で復元すると
+// 通し実行と結果が食い違い得るため。ram/wram（RAM の位置）は pa から引き直す。
+// perm_r/perm_w は privileged から、デコードキャッシュの支援は空から作り直す。
+
+impl Mmu {
+    pub const STATE_VERSION: u16 = 1;
+
+    pub fn save_state(&self, e: &mut crate::snapshot::Encoder) {
+        let Mmu {
+            ctrl,
+            ttb,
+            dacr,
+            fsr,
+            far,
+            pid,
+            privileged,
+            fetch_grace,
+            grace_next,
+            prev_ctrl,
+            regs,
+            tlb,
+            perm_r: _,
+            perm_w: _,
+            generation: _,
+            code_pages: _,
+            code_cur_va: _,
+            code_invalidated: _,
+            code_marks: _,
+            code_writes: _,
+        } = self;
+        e.u32s(&[*ctrl, *ttb, *dacr, *fsr, *far, *pid]);
+        e.bool(*privileged);
+        e.u32s(&[*fetch_grace, *grace_next, *prev_ctrl]);
+        e.u32s(regs);
+        e.u64(tlb.len() as u64);
+        for t in tlb.iter() {
+            let TlbEntry {
+                tag,
+                pa,
+                perm,
+                ram: _,
+                wram: _,
+                watched: _,
+            } = t;
+            e.u32(*tag);
+            e.u32(*pa);
+            e.u8(*perm);
+        }
+    }
+
+    /// 読み込む。TLB の RAM の位置は phys から引き直す（監視中は RAM を直接
+    /// 持たない）。
+    pub fn load_state(
+        &mut self,
+        d: &mut crate::snapshot::Decoder,
+        phys: &impl PhysMem,
+    ) -> Result<(), crate::snapshot::Error> {
+        let Mmu {
+            ctrl,
+            ttb,
+            dacr,
+            fsr,
+            far,
+            pid,
+            privileged,
+            fetch_grace,
+            grace_next,
+            prev_ctrl,
+            regs,
+            tlb,
+            perm_r: _,
+            perm_w: _,
+            generation: _,
+            code_pages: _,
+            code_cur_va: _,
+            code_invalidated: _,
+            code_marks: _,
+            code_writes: _,
+        } = self;
+        [*ctrl, *ttb, *dacr, *fsr, *far, *pid] = d.u32s()?;
+        *privileged = d.bool()?;
+        [*fetch_grace, *grace_next, *prev_ctrl] = d.u32s()?;
+        if *fetch_grace > 2 {
+            return d.err("bad fetch grace");
+        }
+        *regs = d.u32s()?;
+        if d.u64()? != TLB_SIZE as u64 {
+            return d.err("TLB size mismatch");
+        }
+        for t in tlb.iter_mut() {
+            let (tag, pa, perm) = (d.u32()?, d.u32()?, d.u8()?);
+            let ram = if tag & TLB_VALID != 0 {
+                phys.ram_page(pa).unwrap_or(NO_RAM)
+            } else {
+                NO_RAM
+            };
+            *t = TlbEntry {
+                tag,
+                pa,
+                perm,
+                ram,
+                wram: ram,
+                watched: false,
+            };
+        }
+        self.update_perm_mask();
+        self.reset_code(); // デコードキャッシュは保存しない（CPU 側も空で復元する）
+        Ok(())
+    }
+}
+
 /// AP ビットと S/R ビットによるアクセス可否（ARM ARM B3-16）。
 fn ap_allowed(ctrl: u32, ap: u32, write: bool, privileged: bool) -> bool {
     match ap {

@@ -16,7 +16,7 @@ pub struct Stub {
     /// 読み出し時に常に OR されるビット（オフセット → マスク）。
     /// 「ハードウェアが立てる ready 系フラグ」を書き込み値と独立に見せる
     /// ために使う（例: IISCON の TX FIFO ready）。構成で決まる（保存しない）。
-    forced: BTreeMap<u32, u32>,
+    pub(crate) forced: BTreeMap<u32, u32>,
 }
 
 impl Stub {

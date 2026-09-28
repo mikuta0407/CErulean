@@ -37,7 +37,7 @@ pub struct Rtc {
     /// 経過した PCLK ティック
     pub(crate) elapsed: i64,
     /// 仮想時間の 1 秒あたりの PCLK ティック数（構成で決まる）
-    pclk_hz: i64,
+    pub(crate) pclk_hz: i64,
     pub(crate) rtccon: u32,
     /// アラーム等の値保持
     pub(crate) other: Stub,

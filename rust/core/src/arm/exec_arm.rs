@@ -14,13 +14,13 @@ use super::*;
 pub type ExecFn<S> = fn(&mut Cpu, &mut S, u32, u32) -> ExecResult;
 
 /// ARM 命令語 1 個をデコード済み命令にする（命令語だけの純関数）。
-/// TODO(段階1 の高速化): 頻出形の特化（Go の special.go）。
+/// 頻出する形には専用の実行関数（special.rs）を、それ以外には汎用の実行関数を選ぶ。
 pub fn decode_instr<S: System>(word: u32) -> Instr<S> {
-    Instr {
+    super::special::specialize(word).unwrap_or(Instr {
         exec: decode::<S>(word),
         word,
         imm: 0,
-    }
+    })
 }
 
 /// ARM 命令語 1 個の実行関数を選ぶ。未実装・未定義の命令も「実行するとエラーを
@@ -589,7 +589,6 @@ fn exec_ldm_stm<S: System>(c: &mut Cpu, sys: &mut S, word: u32, _imm: u32) -> Ex
     } else {
         base.wrapping_sub(4 * n)
     };
-    // TODO(段階1 の高速化): 1 ページ内・TLB ヒットなら RAM を直接読み書きする（Go の RAMRun）。
 
     let mut addr = start;
     if load {
@@ -597,6 +596,22 @@ fn exec_ldm_stm<S: System>(c: &mut Cpu, sys: &mut S, word: u32, _imm: u32) -> Ex
         // （ARM ARM: その場合のライトバック値は UNPREDICTABLE。ロード値優先に倒す）。
         if writeback {
             c.write_reg(rn, new_base);
+        }
+        if let Some(off) = sys.ram_run(start & !3, 4 * n, false) {
+            // 1 ページ内・TLB ヒット: 直接読む（下の 1 ワードずつと同じ結果）。
+            let (mut list, mut k) = (list, 0);
+            while list != 0 {
+                let i = list.trailing_zeros();
+                list &= list - 1;
+                let v = sys.ram_word(off + k);
+                if i == 15 {
+                    c.load_pc(v, s_bit, sys);
+                } else {
+                    c.regs[i as usize] = v;
+                }
+                k += 4;
+            }
+            return Ok(());
         }
         for i in 0..16 {
             if list & (1 << i) == 0 {
@@ -625,6 +640,25 @@ fn exec_ldm_stm<S: System>(c: &mut Cpu, sys: &mut S, word: u32, _imm: u32) -> Ex
         // STM: 先に全ストアしてからライトバック。これにより rn がリストに
         // 含まれていても格納されるのは変更前の値になる（リスト先頭が rn の
         // 場合の ARM ARM の規定と一致。それ以外の位置は UNPREDICTABLE）。
+        if let Some(off) = sys.ram_run(start & !3, 4 * n, true) {
+            // 1 ページ内・TLB ヒット・コードページでない: 直接書く。
+            let (mut list, mut k) = (list, 0);
+            while list != 0 {
+                let i = list.trailing_zeros();
+                list &= list - 1;
+                let v = if i == 15 {
+                    c.read_reg(15)
+                } else {
+                    c.regs[i as usize]
+                };
+                sys.set_ram_word(off + k, v);
+                k += 4;
+            }
+            if writeback {
+                c.write_reg(rn, new_base);
+            }
+            return Ok(());
+        }
         for i in 0..16 {
             if list & (1 << i) == 0 {
                 continue;
@@ -800,15 +834,20 @@ fn exec_msr<S: System>(c: &mut Cpu, sys: &mut S, word: u32, _imm: u32) -> ExecRe
 // ---- 分岐命令と SWI、コプロセッサレジスタ転送 ----
 
 /// B/BL（A3.3）。24bit 符号付きオフセット×4 を PC+8 に加える。
-fn exec_branch<S: System>(c: &mut Cpu, _sys: &mut S, word: u32, _imm: u32) -> ExecResult {
+fn exec_branch<S: System>(c: &mut Cpu, sys: &mut S, word: u32, _imm: u32) -> ExecResult {
     // 符号拡張して ×4（<<8 で上位に詰め、>>6 = 算術>>8 と <<2）
     let offset = ((word << 8) as i32) >> 6;
     if word & (1 << 24) != 0 {
         c.regs[14] = c.regs[15]; // L: リンク。regs[15] は今 PC+4 = 次命令 = 復帰先
     }
     c.regs[15] = c.regs[15].wrapping_add(4).wrapping_add(offset as u32); // PC+8 基準
-    // TODO(段階1 の高速化): 2 命令前へ戻る分岐（3 命令のポーリングループの
-    // 可能性）で実行ループに知らせる（Go の spinHint。アイドルスキップ用）。
+    if word & 0x01FFFFFF == 0x00FFFFFC {
+        // L=0 で 2 命令前へ戻る分岐: 3 命令のポーリングループの可能性
+        // （idle.rs）。ここでは印を付けて run を打ち切るだけで、判定は実行ループに
+        // 任せる（毎命令の判定を省くため）。
+        c.spin_hint = true;
+        sys.run_ctl().budget = 0;
+    }
     Ok(())
 }
 

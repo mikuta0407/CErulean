@@ -16,6 +16,7 @@ pub mod mmu;
 pub mod s3c2410;
 pub mod script;
 pub mod smdk2410;
+pub mod snapshot;
 
 /// 仮想時間 1 秒あたりの命令数（Go の smdk2410.InstructionsPerSecond）。
 /// PCLK 50.7MHz、1 命令 = 3/8 PCLK から 50_700_000 × 8 / 3。

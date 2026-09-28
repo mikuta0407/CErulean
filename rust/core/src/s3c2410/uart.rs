@@ -19,9 +19,9 @@ pub struct Uart {
     pub(crate) umcon: u32,
     pub(crate) ubrdiv: u32,
     /// 送信バイトをためるか（出力先のないチャネルは捨てる）
-    capture: bool,
+    pub(crate) capture: bool,
     /// 送信済みでまだ取り出されていないバイト（派生情報: 保存しない）
-    tx: Vec<u8>,
+    pub(crate) tx: Vec<u8>,
 }
 
 const REG_ULCON: u32 = 0x00;

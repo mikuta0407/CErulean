@@ -9,6 +9,7 @@
 mod board;
 mod kbd;
 mod run;
+mod snapshot;
 #[cfg(test)]
 mod tests;
 
@@ -224,6 +225,26 @@ impl System for Sys {
         }
         Ok(decode_instr::<Sys>(self.fetch32(pc)?))
     }
+    #[inline(always)]
+    fn ram_run(&mut self, va: u32, nbytes: u32, write: bool) -> Option<RamOff> {
+        self.mmu.ram_run(va, nbytes, write)
+    }
+    #[inline(always)]
+    fn ram_word(&self, off: RamOff) -> u32 {
+        let (m, a) = (self.bus.arena(), off as usize);
+        u32::from_le_bytes([m[a], m[a + 1], m[a + 2], m[a + 3]])
+    }
+    #[inline(always)]
+    fn set_ram_word(&mut self, off: RamOff, v: u32) {
+        let a = off as usize;
+        self.bus.arena_mut()[a..a + 4].copy_from_slice(&v.to_le_bytes());
+    }
+    fn probe32(&mut self, va: u32, fetch: bool) -> Option<u32> {
+        let Sys {
+            mmu, bus, board, ..
+        } = self;
+        mmu.probe32(va, fetch, &mut BusPhys { bus, devs: board })
+    }
 }
 
 /// SMDK2410 相当のマシン。
@@ -232,6 +253,13 @@ pub struct Machine {
     pub sys: Sys,
     /// リセット時に飛ぶ物理アドレス（保存する）
     pub(crate) entry_pa: u32,
+    // アイドルスキップ（run.rs。いずれも保存しない）
+    /// アイドルスキップを行うか（既定 true）
+    pub(crate) idle_skip: bool,
+    /// ポーリングループの 1 周前の観測
+    pub(crate) poll: Option<(u64, crate::arm::PollState)>,
+    /// スキップした命令数の累計（計測用）
+    pub(crate) skipped: u64,
 }
 
 impl Machine {
@@ -248,6 +276,9 @@ impl Machine {
                 code: CodeCache::new(),
             },
             entry_pa: 0,
+            idle_skip: true,
+            poll: None,
+            skipped: 0,
         }
     }
 
@@ -303,6 +334,7 @@ impl Machine {
         self.sys.mmu.reset_code();
         self.cpu.reset(self.entry_pa, &mut self.sys);
         self.sys.board.steps = 0;
+        self.poll = None;
         self.sys.board.update_deadline();
     }
 
@@ -344,7 +376,9 @@ impl Machine {
 
     /// CPU から見た VA を現在の MMU 状態で PA に変換する（デバッグ用。状態は変えない）。
     pub fn translate(&mut self, va: u32) -> Result<u32, MemError> {
-        let Sys { mmu, bus, board, .. } = &mut self.sys;
+        let Sys {
+            mmu, bus, board, ..
+        } = &mut self.sys;
         mmu.translate_debug(va, &mut BusPhys { bus, devs: board })
     }
 

@@ -22,6 +22,8 @@ const USAGE: &str = "\
 Usage:
   cerulean info <image>            イメージの情報を表示する
   cerulean run [options] <image>   イメージをリセットから実行する
+  cerulean run --snap-load F [options] [image]
+                                   スナップショットから再開する（image を渡すと照合する）
 
 run options:
   --rtc YYYY-MM-DDTHH:MM:SS  RTC の初期時刻（年月日時分秒をそのまま使う。
@@ -33,6 +35,9 @@ run options:
   --trace-from N        --trace の表示を N 命令目から始める
   --watch LO[-HI]       物理アドレス範囲へのアクセスを表示する（複数可。1 命令ずつ進む）
   --stats               停止時に実行速度を表示する
+  --no-idle-skip        アイドルループのスキップを無効にする（結果は同じ。--trace 中は自動で無効）
+  --snap-save F@T       時刻 T（例 3600000000i・95s）に全状態を F に保存する（無圧縮）
+  --snap-load F         スナップショット F から再開する（命令数は保存時点から継続）
   --result F            一致確認用の結果を JSON Lines で F に書く（停止時と --checkpoint）
   --checkpoint N        --result に N 命令目の時点の結果も書く（複数可）
   --trace-hash N        N 命令ごとに命令数と CPU 状態のダンプの SHA-256 を書く
@@ -106,6 +111,9 @@ struct RunOpts {
     trace_hash_ram: u64,
     trace_hash_out: Option<String>,
     quiet_uart: bool,
+    no_idle_skip: bool,
+    snap_save: Option<(String, u64)>,
+    snap_load: Option<String>,
 }
 
 fn parse_u64(s: &str) -> Result<u64, String> {
@@ -203,6 +211,15 @@ fn parse_run_opts(args: &[String]) -> Result<RunOpts, String> {
             "--trace-hash-ram" => o.trace_hash_ram = parse_u64(&val()?)?,
             "--trace-hash-out" => o.trace_hash_out = Some(val()?),
             "--quiet-uart" => o.quiet_uart = true,
+            "--no-idle-skip" => o.no_idle_skip = true,
+            "--snap-save" => {
+                let v = val()?;
+                let (f, t) = v.rsplit_once('@').ok_or("--snap-save: want FILE@TIME")?;
+                let t = script::parse_duration(t, INSTRUCTIONS_PER_SECOND)
+                    .map_err(|e| format!("--snap-save: {e}"))?;
+                o.snap_save = Some((f.to_string(), t));
+            }
+            "--snap-load" => o.snap_load = Some(val()?),
             s if s.starts_with("--") => return Err(format!("unknown option {s}\n{USAGE}")),
             s => {
                 if image.replace(s.to_string()).is_some() {
@@ -211,7 +228,15 @@ fn parse_run_opts(args: &[String]) -> Result<RunOpts, String> {
             }
         }
     }
-    o.image = image.ok_or_else(|| format!("no image\n{USAGE}"))?;
+    o.image = image.unwrap_or_default();
+    if o.image.is_empty() && o.snap_load.is_none() {
+        return Err(format!("no image\n{USAGE}"));
+    }
+    if o.snap_load.is_some() && o.rtc.is_some() {
+        return Err(
+            "--rtc cannot be used with --snap-load (the RTC state comes from the snapshot)".into(),
+        );
+    }
     if !o.checkpoints.is_empty() && o.result.is_none() {
         return Err("--checkpoint requires --result".into());
     }
@@ -241,25 +266,82 @@ fn host_now_utc() -> [i64; 6] {
     [y, m, d, rem / 3600, rem / 60 % 60, rem % 60]
 }
 
+/// ファイル全体の SHA-256（スナップショットのイメージ ID）。
+fn file_sha256(path: &str) -> Result<String, String> {
+    let data = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+    Ok(result::sha256_hex(&data))
+}
+
+/// スナップショットを一時ファイルに書いてから置き換える（途中で失敗しても
+/// 壊れたスナップショットが残らないように）。
+fn save_snapshot(m: &mut Machine, path: &str, image_id: &str) -> Result<(), String> {
+    let tmp = format!("{path}.tmp{}", std::process::id());
+    let r = (|| {
+        let f = std::fs::File::create(&tmp).map_err(|e| format!("{tmp}: {e}"))?;
+        let mut w = std::io::BufWriter::new(f);
+        m.save_snapshot(&mut w, image_id)
+            .map_err(|e| e.to_string())?;
+        w.flush().map_err(|e| e.to_string())?;
+        std::fs::rename(&tmp, path).map_err(|e| format!("{path}: {e}"))
+    })();
+    if r.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    r?;
+    eprintln!("cerulean: saved snapshot {path} at step {}", m.steps());
+    Ok(())
+}
+
 fn cmd_run(args: &[String]) -> Result<ExitCode, String> {
     let o = parse_run_opts(args)?;
-    let img = read_image(&o.image)?;
     let mut m = Machine::new();
     for &(lo, hi) in &o.watches {
         m.add_watch(lo, hi);
     }
-    m.load_image(&img).map_err(|e| e.to_string())?;
-    let t = o.rtc.unwrap_or_else(host_now_utc);
-    m.set_rtc(t[0], t[1], t[2], t[3], t[4], t[5]);
-    m.reset();
+    let mut image_id = if o.image.is_empty() {
+        String::new()
+    } else {
+        file_sha256(&o.image)?
+    };
+    if let Some(path) = &o.snap_load {
+        // 監視は読み込みより前に登録する（TLB は監視中なら RAM を直接持たない形で復元される）。
+        let f = std::fs::File::open(path).map_err(|e| format!("{path}: {e}"))?;
+        let id = m
+            .load_snapshot(std::io::BufReader::new(f))
+            .map_err(|e| format!("--snap-load {path}: {e}"))?;
+        if !image_id.is_empty() && id != image_id {
+            return Err(format!(
+                "--snap-load: snapshot was taken with a different image (sha256 {id}, {} is {image_id})",
+                o.image
+            ));
+        }
+        image_id = id;
+        eprintln!(
+            "cerulean: {}: resumed from {path} at step {}, PC {:08X}",
+            m.name(),
+            m.steps(),
+            m.cpu.pc()
+        );
+    } else {
+        let img = read_image(&o.image)?;
+        m.load_image(&img).map_err(|e| e.to_string())?;
+        let t = o.rtc.unwrap_or_else(host_now_utc);
+        m.set_rtc(t[0], t[1], t[2], t[3], t[4], t[5]);
+        m.reset();
+        eprintln!(
+            "cerulean: {}: loaded {} image, entry {:08X} (PA {:08X})",
+            m.name(),
+            img.format,
+            img.entry,
+            m.cpu.pc()
+        );
+    }
     m.cpu.set_history(o.history);
-    eprintln!(
-        "cerulean: {}: loaded {} image, entry {:08X} (PA {:08X})",
-        m.name(),
-        img.format,
-        img.entry,
-        m.cpu.pc()
-    );
+    // トレースはスキップした命令を表示できないので、アイドルスキップを切る
+    // （監視中は MMU が RAM を直接持たないので元々スキップされない）。
+    if o.no_idle_skip || o.trace {
+        m.set_idle_skip(false);
+    }
 
     let mut events = vec![];
     if let Some(path) = &o.script {
@@ -270,8 +352,29 @@ fn cmd_run(args: &[String]) -> Result<ExitCode, String> {
             emu::validate(&m, ev).map_err(|e| format!("script line {}: {e}", ev.line))?;
         }
     }
+    if let Some((f, t)) = &o.snap_save {
+        // 同じ時刻のイベントの後に保存する（Go の -snap-save と同じ）。
+        let at = events
+            .iter()
+            .position(|e| e.step > *t)
+            .unwrap_or(events.len());
+        events.insert(
+            at,
+            Event {
+                path: f.clone(),
+                ..Event::new(*t, Kind::Snap)
+            },
+        );
+    }
+    // 再開点より前のイベントは、保存前の実行で適用済みとみなして読み飛ばす
+    // （同じスクリプトを再開に使い回せるように）。
+    let start = m.steps();
+    let skip = events.iter().take_while(|e| e.step < start).count();
+    if skip > 0 {
+        eprintln!("cerulean: skipped {skip} script events before the resume point (step {start})");
+    }
     let mut sess = Session::new();
-    sess.schedule(events);
+    sess.schedule(events.into_iter().skip(skip));
 
     let mut results = match &o.result {
         Some(p) => Some(ResultWriter {
@@ -313,7 +416,9 @@ fn cmd_run(args: &[String]) -> Result<ExitCode, String> {
         match ev.kind {
             Kind::Quit => Ok(true),
             // TODO(段階1): 画面の保存（PNG）とスナップショット。
-            Kind::Shot | Kind::Snap => Err(format!(
+            Kind::Snap => save_snapshot(m, &ev.path, &image_id).map(|_| false),
+            // TODO(段階1): 画面の保存（PNG。png クレートを CLI に入れる）。
+            Kind::Shot => Err(format!(
                 "{} is not implemented yet in the Rust CLI",
                 ev.kind
             )),
@@ -462,9 +567,10 @@ fn report(m: &mut Machine, o: &RunOpts, started: Instant, _stop: &Stop) {
         let el = started.elapsed().as_secs_f64();
         let n = m.steps();
         eprintln!(
-            "cerulean: {n} steps in {el:.2}s ({:.1}M steps/s, {:.2}x real time)",
+            "cerulean: {n} steps in {el:.2}s ({:.1}M steps/s, {:.2}x real time, idle-skipped {:.1}%)",
             n as f64 / el / 1e6,
-            n as f64 / INSTRUCTIONS_PER_SECOND as f64 / el
+            n as f64 / INSTRUCTIONS_PER_SECOND as f64 / el,
+            100.0 * m.idle_skipped() as f64 / n.max(1) as f64
         );
     }
 }

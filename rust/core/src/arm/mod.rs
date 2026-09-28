@@ -18,16 +18,19 @@
 mod code;
 mod exec_arm;
 mod exec_thumb;
+mod idle;
+mod special;
 #[cfg(test)]
 mod tests;
 
 use std::fmt;
 
-use crate::bus::BusError;
+use crate::bus::{BusError, RamOff};
 use crate::cpu::{Abort, MemError};
 
 pub use code::{CodeCache, CodeMemory, Instr};
 pub use exec_arm::{ExecFn, decode_instr};
+pub use idle::{POLL_LOOP_LEN, PollState};
 
 // ---- PSR（CPSR/SPSR）----
 //
@@ -219,6 +222,31 @@ pub trait System {
     {
         Ok(decode_instr::<Self>(self.fetch32(pc)?))
     }
+
+    /// 状態を変えずに読める場合だけ 32 ビットを読む（アイドルループ検出用。
+    /// Go の cpu.Prober）。Some を返すのは、同じアクセスを実際に行っても
+    /// メモリ側の状態（ソフト TLB・フェッチ猶予・監視の記録など）が一切変わらない
+    /// 場合だけ。既定は常に None（検出しない）。
+    fn probe32(&mut self, _va: u32, _fetch: bool) -> Option<u32> {
+        None
+    }
+
+    /// va から nbytes バイト（同じ 4KB ページ内）を直接読み書きしてよい RAM の範囲の
+    /// 先頭位置を返す（LDM/STM の高速化用。Go の RAMRun）。TLB ヒット等の条件を
+    /// 満たすときだけ Some で、状態を変えない。既定は常に None（1 ワードずつ）。
+    fn ram_run(&mut self, _va: u32, _nbytes: u32, _write: bool) -> Option<RamOff> {
+        None
+    }
+
+    /// ram_run が返した範囲のワードを読む。
+    fn ram_word(&self, _off: RamOff) -> u32 {
+        unreachable!("ram_word without ram_run")
+    }
+
+    /// ram_run（write=true）が返した範囲にワードを書く。
+    fn set_ram_word(&mut self, _off: RamOff, _v: u32) {
+        unreachable!("set_ram_word without ram_run")
+    }
 }
 
 /// 未実装またはアーキテクチャ上未定義の命令。
@@ -306,6 +334,9 @@ pub struct Cpu {
     pub(crate) bank_r14: [u32; NUM_BANKS],
     /// 直前に実行を始めた命令の記録（デバッグ用。派生情報で保存しない）。
     hist: History,
+    /// 「直前の命令が 3 命令ループ先頭への後方分岐だった」印（idle.rs）。
+    /// 実行ループ（machine）が run のたびに見て消費する一時的な値（保存しない）。
+    pub(crate) spin_hint: bool,
 }
 
 impl Default for Cpu {
@@ -325,6 +356,7 @@ impl Cpu {
             bank_r13: [0; NUM_BANKS],
             bank_r14: [0; NUM_BANKS],
             hist: History::default(),
+            spin_hint: false,
         }
     }
 
@@ -657,7 +689,7 @@ struct History {
     /// 次に書く位置（通算）
     pos: u64,
     /// 表示する件数
-    n: usize,
+    pub(crate) n: usize,
 }
 
 impl History {
@@ -670,12 +702,12 @@ impl History {
     }
 
     #[inline(always)]
-    fn enabled(&self) -> bool {
+    pub(crate) fn enabled(&self) -> bool {
         !self.buf.is_empty()
     }
 
     #[inline(always)]
-    fn record(&mut self, v: u32) {
+    pub(crate) fn record(&mut self, v: u32) {
         let mask = self.buf.len() as u64 - 1;
         self.buf[(self.pos & mask) as usize] = v;
         self.pos += 1;
@@ -693,5 +725,62 @@ impl History {
                 (v & !1, v & 1 != 0)
             })
             .collect()
+    }
+}
+
+// ---- スナップショット ----
+
+impl Cpu {
+    pub const STATE_VERSION: u16 = 1;
+
+    /// 保存する状態（命令履歴・spin_hint は派生情報なので保存しない）。
+    pub fn save_state(&self, e: &mut crate::snapshot::Encoder) {
+        let Cpu {
+            regs,
+            cpsr,
+            spsr,
+            bank_r8_usr,
+            bank_r8_fiq,
+            bank_r13,
+            bank_r14,
+            hist: _,
+            spin_hint: _,
+        } = self;
+        e.u32s(regs);
+        e.u32(*cpsr);
+        e.u32s(spsr);
+        e.u32s(bank_r8_usr);
+        e.u32s(bank_r8_fiq);
+        e.u32s(bank_r13);
+        e.u32s(bank_r14);
+    }
+
+    /// 読み込む（命令履歴の設定は保ち、中身は空にする）。
+    pub fn load_state(
+        &mut self,
+        d: &mut crate::snapshot::Decoder,
+    ) -> Result<(), crate::snapshot::Error> {
+        let Cpu {
+            regs,
+            cpsr,
+            spsr,
+            bank_r8_usr,
+            bank_r8_fiq,
+            bank_r13,
+            bank_r14,
+            hist,
+            spin_hint,
+        } = self;
+        *regs = d.u32s()?;
+        *cpsr = d.u32()?;
+        *spsr = d.u32s()?;
+        *bank_r8_usr = d.u32s()?;
+        *bank_r8_fiq = d.u32s()?;
+        *bank_r13 = d.u32s()?;
+        *bank_r14 = d.u32s()?;
+        let n = hist.n;
+        hist.set(n);
+        *spin_hint = false;
+        Ok(())
     }
 }

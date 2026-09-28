@@ -281,3 +281,168 @@ fn synthetic_scenarios_match_go() {
         );
     }
 }
+
+#[allow(clippy::type_complexity)]
+/// 比べられる全状態（CPU のダンプと退避領域・RAM・TLB・時間を持つデバイス・
+/// 仮想時間）。アイドルスキップの有無で一致することの確認用。
+fn full_state(
+    m: &Machine,
+) -> (
+    Vec<u8>,
+    crate::arm::Cpu,
+    Vec<u8>,
+    Vec<(u32, u32, u8)>,
+    String,
+    (u32, u64, i64),
+) {
+    let (ram, _) = m.sys.bus.ram(SDRAM_BASE).unwrap();
+    let tlb = m
+        .sys
+        .mmu
+        .tlb
+        .iter()
+        .map(|e| (e.tag, e.pa, e.perm))
+        .collect();
+    let b = &m.sys.board;
+    let devs = format!("{:?} {:?} {:?} {:?}", b.intc, b.timer, b.adc, b.rtc);
+    // 仮想時間は溜めたティックを含めて比べる（pending はデバイスに渡す前の分）
+    let mut cpu = m.cpu.clone();
+    cpu.set_history(0);
+    (
+        m.cpu_dump(),
+        cpu,
+        ram.to_vec(),
+        tlb,
+        devs,
+        (b.tick_acc, b.steps, b.pending),
+    )
+}
+
+/// アイドルスキップの有無で、同じ命令数まで進めたときの全状態が一致すること。
+/// run_until の上限を不揃いに刻み、上限・タイマー期限・割り込みの境界をまたぐ
+/// 場合を含める（Go の TestIdleSkipMatchesStepping）。
+#[test]
+fn idle_skip_matches_stepping() {
+    let mut a = synthetic("idle.words");
+    let mut b = synthetic("idle.words");
+    b.set_idle_skip(false);
+    let mut limit = 0;
+    for (i, chunk) in [1u64, 150, 5000, 7, 12345, 3, 60000, 99991, 2, 150000]
+        .into_iter()
+        .enumerate()
+    {
+        limit += chunk;
+        a.run_until(limit).unwrap();
+        b.run_until(limit).unwrap();
+        assert_eq!((a.steps(), b.steps()), (limit, limit));
+        // pending（溜めたティック）はスキップの有無で溜まり方が違ってよいので、
+        // 同期してから比べる（同期は状態の見え方を変えない）。
+        a.sys.board.sync_time();
+        b.sys.board.sync_time();
+        assert!(
+            full_state(&a) == full_state(&b),
+            "chunk {i} (step {limit}): state differs"
+        );
+    }
+    // 割り込みで実際にループを抜けていること（カウンタが進む）と、大半を飛ばしていること。
+    let (ram, off) = a.sys.bus.ram(0x30001004).unwrap();
+    let count = u32::from_le_bytes(ram[off as usize..off as usize + 4].try_into().unwrap());
+    assert!(
+        count >= 50,
+        "counter = {count} (timer interrupts did not break the loop)"
+    );
+    assert!(
+        a.idle_skipped() >= limit / 2,
+        "skipped {} of {limit}",
+        a.idle_skipped()
+    );
+    assert_eq!(b.idle_skipped(), 0);
+}
+
+/// MMIO のポーリング（ADC の stable_read）でも、スキップの有無で全状態が一致する。
+#[test]
+fn idle_skip_mmio_poll_matches_stepping() {
+    let mut a = synthetic("adc-poll.words");
+    let mut b = synthetic("adc-poll.words");
+    b.set_idle_skip(false);
+    let mut limit = 0;
+    for (i, chunk) in [7u64, 100000, 31, 250000, 4, 400001]
+        .into_iter()
+        .enumerate()
+    {
+        limit += chunk;
+        a.run_until(limit).unwrap();
+        b.run_until(limit).unwrap();
+        a.sys.board.sync_time();
+        b.sys.board.sync_time();
+        assert!(
+            full_state(&a) == full_state(&b),
+            "chunk {i} (step {limit}): state differs"
+        );
+    }
+    assert!(
+        a.cpu.reg(7) >= 4,
+        "conversions completed = {}",
+        a.cpu.reg(7)
+    );
+    assert!(
+        a.idle_skipped() >= limit / 2,
+        "skipped {} of {limit}",
+        a.idle_skipped()
+    );
+}
+
+// ---- スナップショット ----
+
+/// 保存 → 読み込み → 続きの実行が、通し実行と一致する（計画書 §5.4）。
+/// 同じ状態からは同じバイト列になることも確かめる。
+#[test]
+fn snapshot_resume_matches_uninterrupted() {
+    for name in ["idle.words", "adc-poll.words"] {
+        let mut through = synthetic(name);
+        through.run_until(700_001).unwrap();
+
+        let mut first = synthetic(name);
+        first.run_until(333_333).unwrap();
+        let mut buf = vec![];
+        first.save_snapshot(&mut buf, "image-id").unwrap();
+        let mut again = vec![];
+        first.save_snapshot(&mut again, "image-id").unwrap();
+        assert!(buf == again, "{name}: same state must give the same bytes");
+
+        let mut resumed = Machine::new();
+        assert_eq!(resumed.load_snapshot(&buf[..]).unwrap(), "image-id");
+        assert_eq!(resumed.steps(), 333_333);
+        let mut round = vec![];
+        resumed.save_snapshot(&mut round, "image-id").unwrap();
+        assert!(
+            round == buf,
+            "{name}: save after load must give the same bytes"
+        );
+
+        resumed.run_until(700_001).unwrap();
+        through.sys.board.sync_time();
+        resumed.sys.board.sync_time();
+        assert!(
+            full_state(&resumed) == full_state(&through),
+            "{name}: resumed run differs"
+        );
+    }
+}
+
+/// 壊れたスナップショットは panic せずエラーになり、別のマシン名も拒む。
+#[test]
+fn snapshot_rejects_corruption() {
+    let mut m = synthetic("idle.words");
+    m.run_until(1000).unwrap();
+    let mut buf = vec![];
+    m.save_snapshot(&mut buf, "x").unwrap();
+    // RAM の中の 1 バイトを壊す → CRC で検出
+    let mut bad = buf.clone();
+    let mid = bad.len() / 2;
+    bad[mid] ^= 0x40;
+    assert!(Machine::new().load_snapshot(&bad[..]).is_err());
+    // 切り詰め
+    assert!(Machine::new().load_snapshot(&buf[..buf.len() - 1]).is_err());
+    assert!(Machine::new().load_snapshot(&buf[..100]).is_err());
+}

@@ -1986,3 +1986,69 @@ fn vector_diff() {
     assert_eq!(fails, 0, "{fails} of {n} cases differ");
     eprintln!("vector_diff: {n} cases match");
 }
+
+// ---- 特化（Go の special_test）----
+
+/// 特化した実行関数（special.rs）が汎用の実行関数と同じ結果になることを、
+/// ランダムな命令語とランダムな状態（レジスタ・フラグ・メモリ）で確かめる。
+/// 命令語は特化の対象になる空間（データ処理・LDR/STR 即値・B/BL）から作り、
+/// 特化されなかったものは数えるだけにする。
+#[test]
+fn specialized_matches_generic() {
+    let mut rng = SplitMix(1);
+    const MEM: u32 = 16 * 1024;
+    let mut special = 0;
+    for _ in 0..100_000 {
+        let word = match rng.choose(4) {
+            0 => 0xE2000000 | rng.u32() & 0x01FFFFFF, // データ処理（即値）
+            1 => 0xE0000000 | rng.u32() & 0x01FFF00F, // データ処理（レジスタ・シフトなし）
+            2 => 0xE4000000 | rng.u32() & 0x01FFFFFF, // LDR/STR 即値
+            _ => 0xEA000000 | rng.u32() & 0x01FFFFFF, // B/BL
+        };
+        let Some(sp) = super::special::specialize::<TestSys>(word) else {
+            continue;
+        };
+        special += 1;
+        // 同じ初期状態のコアを 2 つ作る。アドレスがメモリ内に収まるよう、
+        // レジスタは小さい値にする（LDR/STR のベース）。
+        let mut regs = [0u32; 16];
+        for r in regs.iter_mut() {
+            *r = if rng.choose(4) == 0 {
+                rng.u32()
+            } else {
+                rng.u32() % MEM
+            };
+        }
+        let flags = rng.u32() & (FLAG_N | FLAG_Z | FLAG_C | FLAG_V);
+        let mem: Vec<u8> = (0..MEM).map(|_| rng.u32() as u8).collect();
+        let run = |f: ExecFn<TestSys>, imm: u32| {
+            let mut s = TestSys::new();
+            s.mem = mem.clone();
+            s.run.budget = 10;
+            let mut c = Cpu::new();
+            c.regs = regs;
+            c.regs[15] = 0x1000 + 4; // 実行中は PC+4
+            c.cpsr = MODE_SVC | flags;
+            let r = f(&mut c, &mut s, word, imm);
+            (c, s, r)
+        };
+        let (a, am, ar) = run(sp.exec, sp.imm);
+        let (b, bm, br) = run(decode::<TestSys>(word), 0);
+        assert_eq!(
+            ar.is_ok(),
+            br.is_ok(),
+            "{word:08X}: error mismatch {ar:?} {br:?}"
+        );
+        if ar.is_err() {
+            continue; // 範囲外アクセス: どちらもエラーならよい
+        }
+        assert_eq!(
+            (a.regs, a.cpsr, a.spin_hint),
+            (b.regs, b.cpsr, b.spin_hint),
+            "{word:08X}: state"
+        );
+        assert_eq!(am.run.budget, bm.run.budget, "{word:08X}: run budget");
+        assert!(am.mem == bm.mem, "{word:08X}: memory");
+    }
+    assert!(special >= 25000, "only {special} specialized words tested");
+}

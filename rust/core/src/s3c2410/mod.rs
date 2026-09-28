@@ -16,6 +16,7 @@ mod intc;
 mod lcd;
 mod rtc;
 mod spi;
+mod state;
 mod stub;
 mod timer;
 mod uart;
