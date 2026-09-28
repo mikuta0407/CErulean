@@ -3,6 +3,7 @@
 //! 一致確認の出力（--result・--trace-hash）の中身は testdata/golden/README.md が正。
 
 mod result;
+mod tools;
 
 use std::io::Write;
 use std::process::ExitCode;
@@ -21,6 +22,10 @@ const USAGE: &str = "\
 Usage:
   cerulean info <image>            イメージの情報を表示する
   cerulean snapdump <snap> [snap2] スナップショットのチャンクの一覧（2 つなら比較）
+  cerulean goldencmp <want> <got>  一致確認の結果（--result の JSON Lines）を比べる
+  cerulean segspeed [--seg S] <snap> <script>  再生中の区間ごとの実時間比・アイドル割合
+  cerulean ihist [--count N] <snap>  実行した ARM 命令の種類の分布
+  cerulean genrate [--steps N] <image>  MMU の変換世代・コードページの頻度
   cerulean run [options] <image>   イメージをリセットから実行する
   cerulean run --snap-load F [options] [image]
                                    スナップショットから再開する（image を渡すと照合する）
@@ -55,6 +60,10 @@ fn main() -> ExitCode {
         Some("info") => cmd_info(&args[1..]),
         Some("run") => cmd_run(&args[1..]),
         Some("snapdump") => cmd_snapdump(&args[1..]),
+        Some("goldencmp") => tools::cmd_goldencmp(&args[1..]),
+        Some("segspeed") => tools::cmd_segspeed(&args[1..]),
+        Some("ihist") => tools::cmd_ihist(&args[1..]),
+        Some("genrate") => tools::cmd_genrate(&args[1..]),
         _ => {
             eprint!("{USAGE}");
             return ExitCode::from(2);
