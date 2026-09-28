@@ -2,6 +2,12 @@
 
 Windows Mobile 5.0（WinCE 5.0）LLE エミュレータ。Go 製。最終的に gomobile bind で iOS/Android に載せる。
 
+**2026-09 から Rust への全面移行中**（最初の出荷先はブラウザ）。計画は
+`docs/rust-migration-plan.md`、移行中の規則は下の「Rust 移行中の規則」。
+段階1（ネイティブでの移植）の完了までは Go 版が動作の正解の基準で、
+Go・Rust とも**コアの動作を凍結**する（不具合の修正だけ両方に入れて基準を作り直す）。
+以下の Go の設計の節は、Rust 版でも同じ理由で守る。
+
 ## 絶対条件
 
 - **コアは純 Go**。cgo 禁止。UI・OS 依存コードをコア（cmd 以外の全パッケージ）に入れない。
@@ -15,6 +21,53 @@ Windows Mobile 5.0（WinCE 5.0）LLE エミュレータ。Go 製。最終的に 
   - Windows CE 5.0 のドキュメント（BIN 形式、OEMAddressTable 等）
 - **仕様が不確かな箇所は推測で埋めない**。`TODO:` コメントで疑問点を残し、ユーザーに質問する。
 - 設計判断には短い理由コメントを残す（ユーザーは Go は読めるがエミュレータ開発は初めて）。
+
+## Rust 移行中の規則（2026-09 ユーザー確認済み）
+
+- 配置: 同じリポジトリの `rust/`（Cargo ワークスペース。`core`＝パッケージ名
+  `cerulean-core`、`cli`、`web`）。コアは 1 クレートにまとめ、Go のパッケージは
+  モジュールで再現する（ホットパスがクレートをまたぐとインライン化されにくいため）。
+- コアは std のみ。ファイル・時計・スレッドに触れない（入出力は cli・web から渡す）。
+  wasm では panic でインスタンスが使えなくなるので、壊れた入力・未実装命令・
+  BusError は panic ではなく `Result` で返す。
+- **コメントの方針**: Go 版と同じ詳しさ（エミュレータとしての理由・根拠・TODO を
+  日本語で残す）。Rust の言語機能（所有権・ライフタイム等）の説明は付けない。
+  Go の理由コメントは移植先に移す（Go 版を消す前に移っていることを確かめる）。
+- **ゲストの演算**は 32 ビットの折り返しを `wrapping_*` で明示する（デバッグビルドの
+  オーバーフロー検査で落ちないように）。シフト量が 32 以上になり得る箇所は
+  必ず場合分けする（Rust の `<<`/`>>` はシフト量 ≥ 32 で panic または結果が変わる）。
+  結果は Go の shiftImm/shiftReg に合わせる。
+- **`usize` は配列の添字にだけ使う**（wasm32 では 32 ビット）。命令数・ティック・
+  時刻・ゲストの値は u32/u64/i64 の明示の幅で持つ。バイト列は
+  `to_le_bytes`/`from_le_bytes`。浮動小数はコアの状態・時刻計算に使わない。
+- 状態を持つ集合の反復順に依存しない（`BTreeMap` にするか、反復時にソートする）。
+- **`unsafe` は原則使わない**。使うなら `// SAFETY:` に理由と安全性の根拠を書き、
+  計測で効果が確かめられた場合だけにし、テストで守る。
+- **依存の追加はユーザーの承認を取る**（計画書 §8）。現在の依存: web の
+  `wasm-bindgen`（=0.2.129、wasm-bindgen-cli と同じ版に固定）だけ。コアは依存なし。
+  sha2・png は段階1 で CLI に、圧縮は計測の後に相談する。
+- **版の固定**: `rust/rust-toolchain.toml`（1.98.1）と `rust/Cargo.lock` をコミット。
+  wasm-bindgen を上げるときは wasm-bindgen-cli も同じ版を入れ直す。
+- **一致確認**（計画書 §5、定義は `testdata/golden/README.md`）:
+  - 比べるのはゲストから見える値だけ（CPU 状態のダンプ・RAM・UART1・画面の RGBA の
+    SHA-256・停止の種類）。スナップショット・スクリプト・CLI の形式は Go と合わせない。
+  - 基準シナリオはリセット起点（イメージ＋固定の RTC＋絶対命令数のスクリプト）。
+    `tools/golden/verify.sh <go|rust> [名前...]` で照合、`regen.sh` で期待値を作り直す
+    （実イメージのシナリオは `CERULEAN_IMAGE` が必要）。
+  - 食い違ったら: 両実装を `-trace-hash N`（Go の run の追加フラグ。Rust の CLI にも
+    同じものを作る）で走らせて最初に食い違った区間を二分探索 → `-trace` の PC と
+    命令語で比べる → 割り込みの時刻の違いなら `-watch` でデバイスへのアクセスを比べる。
+  - 合成プログラムは `testdata/golden/synthetic/*.words`（Go のテストも読む）。
+- **コミット前の確認**: `tools/check.sh`（Go の vet・テスト、Rust の fmt・clippy・
+  テスト〔ネイティブと wasm32-wasip1〕、web の wasm ビルドと Node での読み込み）。
+  CI は置かない。
+- 手元のツール（2026-09 導入）: rustup（~/.cargo。ターゲット wasm32-unknown-unknown・
+  wasm32-wasip1）、wasm-bindgen-cli（`cargo install --locked`）、Node.js 24 LTS
+  （~/.local/node）。いずれも ~/.local/bin にリンクしてある。/tmp は tmpfs で小さいので、
+  `cargo install` 等の大きなビルドは `CARGO_TARGET_DIR`・`TMPDIR` をプロジェクトの
+  tmp/ に向ける。
+- 計測は必ず release ビルドで、交互に 3 回以上走らせて最良値で比べる
+  （Go は `tools/bench/bench.sh`）。
 
 ## パッケージ境界
 

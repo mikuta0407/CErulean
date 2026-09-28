@@ -55,6 +55,14 @@ Today 画面の完成まで約 35 億命令（マイルストーン3 時点の�
       一時停止、スナップショット保存）
 - [x] 操作の記録と再生（記録を絶対命令数のスクリプトに書き出し、`run` で同じ画面を再現）
 
+Rust 移行（進行中、2026-09〜）: コアを Rust に移し、最初はブラウザ（wasm）で
+動かす。計画は [docs/rust-migration-plan.md](docs/rust-migration-plan.md)。
+
+- [x] 段階0（準備）: Go 版に一致確認の道具（`-result`・`-checkpoint`・`-trace-hash`）、
+      基準シナリオと期待値（`testdata/golden/`）、Rust のワークスペースの骨組み（`rust/`）
+- [ ] 段階1: コアの移植（インタプリタ。ネイティブで Go 版と完全一致）
+- [ ] 段階2〜5: wasm での計測、ブラウザ版、インタプリタの高速化、JIT-to-wasm
+
 ## テスト用イメージの入手
 
 動作確認には Microsoft Device Emulator 用の Windows Mobile 5.0 イメージが必要になる
@@ -154,9 +162,41 @@ go build ./cmd/cerulean
 ```sh
 go test ./...
 go vet ./...
+
+# コミット前の確認（Go と Rust の全テスト、wasm のビルド）。
+# 必要なツール: rustup・wasm-bindgen-cli（rust/Cargo.toml と同じ版）・Node.js
+tools/check.sh
 ```
 
 設計方針は [CLAUDE.md](CLAUDE.md) を参照。
+
+### 一致確認（Go 版と Rust 版）
+
+`testdata/golden/` に基準シナリオ（リセット起点。イメージ＋固定の RTC＋絶対命令数の
+スクリプト）と、Go 版で作った期待値（CPU 状態・RAM・UART1・画面のハッシュ）がある。
+定義は [testdata/golden/README.md](testdata/golden/README.md)。
+
+```sh
+# 期待値との照合（実イメージのシナリオは CERULEAN_IMAGE が必要。無ければ合成だけ）
+CERULEAN_IMAGE=tmp/images/PPC_USA.bin tools/golden/verify.sh go
+# 期待値の作り直し
+CERULEAN_IMAGE=tmp/images/PPC_USA.bin tools/golden/regen.sh [シナリオ名...]
+
+# run の一致確認用フラグ
+./cerulean run -rtc 2006-01-02T15:04:05 -max-steps 1200000000 \
+  -result r.jsonl -checkpoint 400000000 \
+  -trace-hash 10000000 -trace-hash-ram 100000000 -trace-hash-out th.txt tmp/images/PPC_USA.bin
+```
+
+### 調査・計測の道具（`tools/`）
+
+| 道具 | 用途 |
+|---|---|
+| `tools/bench/bench.sh` | 基準のリビジョン（既定 HEAD）と作業ツリーの速度を交互に計測 |
+| `go run ./tools/segspeed <snap> <script>` | スクリプト再生中の仮想 0.25 秒ごとの実時間比・アイドル割合 |
+| `go run ./tools/ihist <snap>` | 実行した ARM 命令の種類の分布 |
+| `go run ./tools/genrate <image>` | MMU の変換世代・コードページの印付けの頻度 |
+| `go run ./tools/goldencmp <a.jsonl> <b.jsonl>` | 一致確認の結果の比較（レジスタ単位で差を表示） |
 
 ## パッケージ構成
 
@@ -164,7 +204,7 @@ go vet ./...
 |---|---|
 | `cmd/cerulean` | CLI フロントエンド（PC 開発用）と、ブラウザ型フロントエンド `serve` |
 | `emu` | フロントエンド共通の実行制御（入力イベントを命令境界で適用・記録。純 Go） |
-| `loader` | イメージローダー（B000FF / .nb0） |
+| `loader` | イメージローダー（B000FF / .nb0 / 合成プログラムの命令語テキスト .words） |
 | `cpu` | CPU コアの境界 interface（実装非依存） |
 | `cpu/arm` | ARMv4T インタプリタ実装 |
 | `mmu` | MMU / CP15（ARMv4 テーブルウォーク・権限チェック・FCSE） |
@@ -173,3 +213,6 @@ go vet ./...
 | `machine` | SoC＋周辺機器の構成定義。`smdk2410` が最初のターゲット（入力 API もここ） |
 | `snapshot` | 全状態の保存形式（SoC 非依存のコンテナとエンコーダ） |
 | `script` | 入力スクリプトの解釈（純 Go。CLI 以外からも使える） |
+| `rust/` | Rust 版（移行中）: `core`（cerulean-core）・`cli`・`web` |
+| `tools/` | 一致確認・調査・計測の道具（上記） |
+| `testdata/golden/` | 一致確認の基準（シナリオ・期待値・合成プログラム） |

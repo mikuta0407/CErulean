@@ -460,8 +460,11 @@ Rust 側は同じ値を出す機能を CLI に持つ（フラグ名・書式は 
 - この環境の計測は ±4% 程度ばらつく。比較は交互に 3 回以上走らせて最良値で行う
   （Go の tmp/m5ref/bench.sh 相当を Rust 側にも用意する）。
 - 参考値（Go、2026-09、この開発機のネイティブ）: 実処理の区間 75〜80M 命令/秒、
-  Today 完成まで 49 秒、rec-5taps（マイルストーン5 の記録）の再生 2.0 秒。
-  taps-5 の Go での値は段階0 で測り直す。
+  Today 完成まで 46〜49 秒、rec-5taps（マイルストーン5 の記録）の再生 2.0 秒。
+- taps-5（段階0 で測定、Go、2026-09-28）: Today（36 億命令）のスナップショットから
+  最後まで（11.5 仮想秒）の再生が 2.1〜2.4 秒。仮想 0.5 秒ごとの区間で、タップ直後は
+  実時間の 0.78〜3.3 倍（実処理の割合 12〜59%、実処理の区間 52〜72M 命令/秒）、
+  それ以外は 25〜100 倍（アイドル）。リセットからの通し（51.5 億命令）は約 50 秒。
 
 ---
 
@@ -612,7 +615,11 @@ Worker → メイン:
 | ネイティブ JIT | Cranelift／dynasm-rs／自作 | 将来 | この計画の範囲外 |
 
 - ツール: rustup（`wasm32-unknown-unknown` ターゲット）、wasm-bindgen-cli、
-  Node.js（wasm のテストと計測）、任意で wasm-opt（binaryen）。導入はユーザーに依頼する。
+  Node.js（wasm のテストと計測）、任意で wasm-opt（binaryen）。
+  - 2026-09-28 導入（ユーザーの許可を得てユーザー領域に）: rustup＋Rust 1.98.1、
+    ターゲット wasm32-unknown-unknown と **wasm32-wasip1**（コアのテストを 32 ビットの
+    wasm で走らせるために追加。Node の WASI で実行する。クレートの依存は増えない）、
+    wasm-bindgen-cli 0.2.129、Node.js 24 LTS。wasm-opt は未導入（段階2 で必要なら）。
 - **版の固定**: Rust は `rust-toolchain.toml`、依存は `Cargo.lock` をコミットする。
   wasm-bindgen のクレートと wasm-bindgen-cli は版を一致させる必要がある。Go は
   go.mod の版のまま（段階1 の間に基準を作り直すときは、Go の版が変わっていないことを
@@ -646,6 +653,31 @@ Worker → メイン:
 - **判断が必要**: リポジトリ構成（§3.1）、依存の初期セット（§8）、ツールの導入。
 - 完了条件: Go の道具で基準の期待値が出る。Rust の骨組みが両ターゲットでビルドできる。
   （Go 側の snapdump は作らない。Go の形式のスナップショットは比較に使わないため。）
+- **結果（2026-09-28 完了）**:
+  - 決定（ユーザー確認）: `rust/` を同じリポジトリに置く。CI は置かず
+    `tools/check.sh` でローカルに確認する。依存は最小で始める（web の wasm-bindgen
+    だけ。sha2・png は段階1 で CLI を作るとき、圧縮は計測の後に相談。JSON は
+    serde を使わず自前で書く）。Rust のコメントは Go 版と同じ詳しさ（言語機能の
+    説明は付けない）。ツールはユーザー領域に導入（§8）。
+  - Go 側: `run` に `-result`（JSON Lines）・`-checkpoint`・`-trace-hash`・
+    `-trace-hash-ram`・`-trace-hash-out` を追加。CPU 状態のダンプは
+    `arm.Core.ArchRegs`（内部の退避の持ち方に依存しない並び）から作る。定義は
+    `testdata/golden/README.md`（ダンプは版数 1・212 バイト）。止まる点を増やしても
+    最終結果が変わらないことをテストした（合成プログラムと実イメージの 2 億命令）。
+  - 「時点」の定義を決めた: 命令数 S の値は、S 命令を実行し終え、S に予定された
+    入力イベントを適用する前の状態（quit で止まったときは quit より前のイベントを
+    適用した後）。
+  - 基準シナリオ: synthetic-idle・synthetic-adc-poll・boot-1200M・boot-today・
+    today-calendar・taps-5（Start → Settings → System タブ → About → ok。
+    rec-5taps の置き換え）。期待値は Go 1.27.1 で作成。合成プログラムは
+    `testdata/golden/synthetic/*.words`（命令語のテキスト。Go の loader も読む）。
+  - 道具: `tools/golden/{run,regen,verify}.sh`、`tools/goldencmp`（Go。両実装の
+    JSON を比べ、CPU の差はレジスタ名で表示）、`tools/{segspeed,ihist,genrate}`、
+    `tools/bench/bench.sh`（git stash ではなく git archive で基準を作る）。
+  - Rust の骨組み: core（cerulean-core）・cli（バイナリ名 cerulean）・web。
+    `rust-toolchain.toml` 1.98.1、`Cargo.lock` をコミット。ネイティブ・
+    wasm32-wasip1（Node の WASI）でテストが走り、web は wasm32-unknown-unknown で
+    ビルドして wasm-bindgen の出力を Node で読み込めることを確認した。
 
 ### 段階1: コアの移植（インタプリタ、ネイティブで Go と完全一致）
 
@@ -779,17 +811,19 @@ Worker → メイン:
 
 ## 12. ユーザーに確認すること（未決）
 
-1. リポジトリ構成（`rust/` を同じリポジトリに置く案でよいか）
-2. 依存の初期セット（圧縮〔miniz_oxide 等〕、sha2、png、wasm-bindgen 一式）とツールの導入
+（1・2・9・10 は段階0 で決定済み。§9 段階0 の「結果」を参照）
+
+1. ~~リポジトリ構成~~ → `rust/` を同じリポジトリに置く
+2. ~~依存の初期セットとツールの導入~~ → 最小で始める（web の wasm-bindgen のみ）。
+   ツールはユーザー領域に導入済み
 3. 配信先と公開範囲（公開サイトにするか、手元で使うだけか。ライセンスの扱い）
 4. 対応ブラウザの最低版数（特に iOS/iPadOS の Safari）
 5. タッチ端末の UI（ハードウェアボタンの配置、横向き対応の要否）
 6. 自動保存の頻度と世代数、差分スナップショットの要否
 7. Go 版をリポジトリから消す時期（段階1 の完了直後か、段階3 の後か）
 8. 日本語版イメージ（PPC_JPN.bin）を基準シナリオに含めるか（今の基準は USA 版）
-9. Rust のコードを読むか（コメントの詳しさの方針。今の CLAUDE.md は「Go は読めるが
-   エミュレータ開発は初めて」を前提に理由コメントを書いている）
-10. CI（GitHub Actions 等）を置くか（イメージが要らない合成テストと wasm のビルドだけでも）
+9. ~~Rust のコメントの方針~~ → Go 版と同じ詳しさ（Rust の言語機能の説明は付けない）
+10. ~~CI~~ → 置かない（`tools/check.sh` でローカルに確認）
 11. Rust の所有権に合わせた設計の置き換え（§3.3）の方針（段階1 の最初に案を出す）
 12. ブラウザで .msi から直接イメージを取り出す機能を作るか（§7.3）
 13. 再開後のゲストの時計を実際の日時に合わせる操作を入れるか（§7.4。決定論のため
