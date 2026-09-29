@@ -13,8 +13,8 @@
 </head>
 <body>
 <h1>CErulean wasm 計測（段階2）</h1>
-<p>リポジトリの直下を HTTP で配信して開く（例: <code>python3 -m http.server -d . 8000</code> の後
-<code>http://localhost:8000/rust/web/www/bench/</code>）。先に <code>tools/web-build.sh</code> で wasm をビルドしておく。</p>
+<p><code>tools/web-build.sh</code> で wasm をビルドし、<code>tools/serve-bench.py</code> で配信して
+<code>http://localhost:8000/rust/web/www/bench/</code> を開く（キャッシュを無効にして配信する）。</p>
 <p>WM5 のイメージ（PPC_USA.bin）を選ぶと、リセットから 12 億命令を走らせて速度と基準との一致を測り、
 スナップショットの保存・圧縮・OPFS の時間も測る（数十秒〜数分。イメージはこのページの外に送らない）。</p>
 <input type="file" id="image">
