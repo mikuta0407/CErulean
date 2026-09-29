@@ -27,6 +27,7 @@ header {
 .status { flex: 1; min-width: 0; font-size: 12px; opacity: .8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
 .badge { font-size: 11px; padding: 1px 6px; border-radius: 4px; background: var(--accent); color: #fff; }
 .badge.warn { background: var(--danger); }
+.badge.muted { background: var(--btn); }
 button.icon { width: 36px; height: 32px; border: 0; border-radius: 6px; background: var(--btn); color: var(--btn-fg); cursor: pointer; touch-action: manipulation; }
 button.icon:disabled { opacity: .4; }
 button.icon.on { background: var(--accent); }
@@ -51,12 +52,21 @@ canvas {
 .overlay h1 { font-size: 18px; margin: 0; }
 .overlay p { margin: 0; color: var(--muted); font-size: 13px; }
 .overlay.stop pre { white-space: pre-wrap; word-break: break-all; font-size: 12px; margin: 0; }
-.primary { display: inline-block; text-align: center; padding: 10px 14px; border: 0; border-radius: 8px; background: var(--accent); color: #fff; font-weight: 600; cursor: pointer; }
-#imageList { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
-#imageList li { display: flex; gap: 6px; align-items: center; }
-#imageList .boot { flex: 1; text-align: left; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: transparent; cursor: pointer; }
-#imageList .boot small { display: block; color: var(--muted); font-size: 11px; }
-#imageList .del { border: 0; background: transparent; color: var(--muted); cursor: pointer; padding: 8px; }
+.primary, .secondary { display: block; text-align: center; padding: 10px 14px; border-radius: 8px; font-weight: 600; cursor: pointer; }
+.primary { border: 0; background: var(--accent); color: #fff; }
+.primary small { display: block; font-weight: 400; font-size: 11px; opacity: .85; }
+.secondary { border: 1px solid var(--line); background: transparent; color: var(--fg); font-size: 13px; }
+.fine { font-size: 11px !important; }
+.list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.list:empty { display: none; }
+.list li { display: flex; gap: 4px; align-items: center; }
+.list .boot { flex: 1; min-width: 0; text-align: left; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: transparent; cursor: pointer; }
+.list .boot small { display: block; color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.list .del { border: 0; background: transparent; color: var(--muted); cursor: pointer; padding: 8px 6px; font-size: 15px; }
+.list.compact .boot { padding: 4px 8px; font-size: 13px; }
+label.button { padding: 4px 10px; border: 1px solid var(--line); border-radius: 6px; cursor: pointer; }
+#recText { font: 11px/1.4 ui-monospace, monospace; white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow: auto; margin: 8px 0 0; }
+button.on { background: var(--danger) !important; color: #fff; border-color: var(--danger) !important; }
 
 /* ハードウェアボタン（Pocket PC の配置: 方向パッドの左右にアプリケーションボタン） */
 #keys {

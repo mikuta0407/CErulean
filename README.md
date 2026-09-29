@@ -85,9 +85,11 @@ Rust 移行（2026-09〜）: コアを Rust に移し、最初はブラウザ（
         命令/秒は確認済み）
 - [ ] 段階3: ブラウザ版の最小製品
   - [x] Worker＋画面表示（実時間との同期・起動は Today まで早送り）、入力（タッチ・
-        画面外のハードウェアボタン・PC のキー）、イメージを OPFS に置いて次回から選ぶだけ。
-        スマートフォンの縦横・PC の配置。Chrome で確認
-  - [ ] スナップショットの保存・読み込み、自動保存と再開、記録と書き出し、PWA 化
+        画面外のハードウェアボタン・PC のキー）、スマートフォンの縦横・PC の配置
+  - [x] 保存（OPFS。イメージ・スナップショットの保存・読み込み・書き出し）、自動保存と
+        再開（リロード・強制終了から）、1 タブだけ動かす、記録と書き出し（CLI で再生して
+        一致）、PWA 化。Chrome で確認
+  - [ ] Firefox・Safari・iOS Safari での確認
 
 ## テスト用イメージの入手
 
@@ -118,13 +120,27 @@ tools/serve-bench.py 8000   # 配信（キャッシュ無効）
 # http://localhost:8000/rust/web/www/app/ を開き、PPC_USA.bin を選ぶ
 ```
 
-イメージを選ぶと Today まで最高速で起動し（Chrome の JIT ありで数十秒）、以後は等速で
-動く。画面のタップ（マウス・タッチ）、画面の下（横向きでは右）のボタン（方向キー・
-決定・App1〜5）、PC のキー（矢印・Enter・英数字・F1〜F5 = App1〜5 など。IME は切る）で
-操作する。選んだイメージは端末の OPFS に SHA-256 をキーに置き、次からは一覧から選べる。
-Chrome での動作確認（イメージから起動 → タップ・ボタン・キー → 画面を PNG に保存）:
-`node tools/browser/app-smoke.mjs tmp/images/PPC_USA.bin tmp/app-smoke`（`--desktop`・
-`--viewport=844x390`・`--layout-only`・`--headed`）。
+イメージを選ぶと Today まで最高速で起動し（Chrome の JIT ありで数十秒）、着いたら自動で
+保存して、以後は等速で動く。画面のタップ（マウス・タッチ）、画面の下（横向きでは右）の
+ボタン（方向キー・決定・App1〜5）、PC のキー（矢印・Enter・英数字・F1〜F5 = App1〜5 など。
+IME は切る）で操作する。
+
+- 保存: イメージとスナップショットは端末の OPFS に置く（外部に送らない）。自動保存は
+  3 世代（Today 到着時・画面を離れたとき・操作があれば 30 秒ごと・なければ 5 分ごと）。
+  次に開くと「続きから再開」が出る。メニューから手動保存・書き出し（.snap.gz）・読み込み。
+  **書き出したスナップショットにはイメージの中身が入る**ので公開の場で共有しないこと。
+- 記録: メニューの「記録開始」で起点スナップショットを取り、「記録停止」で入力の
+  スクリプト（絶対命令数）を作る。書き出した 2 つを CLI で再生すると同じ状態になる
+  （スクリプトの先頭のコメントに手順と、終わりの CPU・RAM・画面の SHA-256）:
+  `gunzip X.snap.gz && cerulean run --snap-load X.snap --script X.txt --result r.jsonl PPC_USA.bin`
+- 動かせるのは 1 タブだけ（2 つ目のタブは待つ）。ホーム画面に追加でき、オフラインでも開ける。
+
+Chrome での確認（CDP で操作する。依存なし）:
+- `node tools/browser/app-e2e.mjs tmp/images/PPC_USA.bin tmp/app-e2e` — 起動・自動保存・
+  記録と操作・書き出し・リロードと強制終了からの再開・タブの排他・CLI での再生の一致
+  （約 2 分。先に `cd rust && cargo build --release`）
+- `node tools/browser/app-smoke.mjs tmp/images/PPC_USA.bin tmp/app-smoke` — 操作と画面の PNG
+  （`--desktop`・`--viewport=844x390`・`--layout-only`・`--headed`）
 
 ## ビルドと実行
 

@@ -175,8 +175,10 @@ mmu → bus::PhysMem、bus → bus::Devices（ボードが MMIO を振り分け�
 - 入力 API（touch_down/up・key_down/up）は smdk2410 の Machine に置き、スクリプトの解釈は
   `script`、イベントの適用は `emu`。時刻は命令数（`INSTRUCTIONS_PER_SECOND` =
   135.2M/仮想秒）で、決定論的。スクリプトの書式は当面 Go 版と同じ。
-- 対話フロントエンドは段階3 のブラウザ版（Worker＋wasm）。Go 版の serve の UI は
-  `rust/web/www/legacy-serve/` に参考として置いてある（入力の対応表を移したら消す）。
+- 対話フロントエンドは段階3 のブラウザ版（`rust/web/www/app`。Worker＋wasm、保存は OPFS、
+  PWA）。Chrome での確認は `tools/browser/app-e2e.mjs`（完了条件の通し）と
+  `app-smoke.mjs`（配置・操作）。既定の判断は計画書の段階3 の「経過」。Go 版の serve の
+  UI は `rust/web/www/legacy-serve/` に参考として置いてある（入力の対応表は app に移した）。
 
 ## 実イメージについて確認済みの事実（2026-09 検証）
 

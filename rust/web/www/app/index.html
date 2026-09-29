@@ -3,14 +3,21 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#1b1f27">
+<meta name="theme-color" content="#2b303a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="CErulean">
 <title>CErulean</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-192.png">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <header>
   <span class="brand">CErulean</span>
   <span id="badge" class="badge" hidden></span>
+  <span id="recBadge" class="badge warn" hidden>● 記録中</span>
+  <span id="saveBadge" class="badge muted" hidden>保存中…</span>
   <span id="statusLine" class="status"></span>
   <button id="pause" class="icon" title="一時停止" aria-label="一時停止" disabled>❚❚</button>
   <button id="menuBtn" class="icon" title="メニュー" aria-label="メニュー">☰</button>
@@ -21,15 +28,26 @@
     <canvas id="screen" width="240" height="320" aria-label="WM5 の画面（タップで操作）"></canvas>
     <div id="start" class="overlay">
       <h1>Windows Mobile 5.0</h1>
-      <p>WM5 のエミュレータ用イメージ（<code>PPC_USA.bin</code> など B000FF 形式）を選んでください。
-        イメージはこの端末の中だけで使い、外部には送りません。</p>
-      <label class="primary file">イメージを選ぶ<input type="file" id="imageFile" hidden></label>
-      <ul id="imageList"></ul>
+      <p id="startMsg">準備中…</p>
+      <button id="resume" class="primary" hidden>続きから再開<small id="resumeInfo"></small></button>
+      <ul id="saveList" class="list"></ul>
+      <ul id="imageList" class="list"></ul>
+      <label class="secondary file">イメージを選ぶ（.bin）<input type="file" id="imageFile" hidden></label>
+      <label class="secondary file">スナップショットを読み込む<input type="file" id="snapFile" hidden></label>
+      <p class="fine">WM5 のエミュレータ用イメージ（<code>PPC_USA.bin</code> など B000FF 形式）を選ぶと、
+        Today 画面まで早送りで起動し、着いたら自動で保存します。イメージ・保存はこの端末の中だけで使い、外部には送りません。</p>
     </div>
     <div id="stopBanner" class="overlay stop" hidden>
       <h1>停止しました</h1>
       <pre id="stopText"></pre>
-      <button id="reboot" class="primary">再起動</button>
+      <button id="stopResume" class="primary">直前の自動保存から再開</button>
+      <button id="stopExport" class="secondary">この状態を書き出す</button>
+      <button id="stopBack" class="secondary">最初の画面に戻る</button>
+    </div>
+    <div id="otherTab" class="overlay" hidden>
+      <h1>別のタブで動いています</h1>
+      <p>エミュレータを動かせるのは 1 つのタブだけです（保存が衝突しないように）。
+        もう一方のタブを閉じると、ここで動かせるようになります。</p>
     </div>
   </div>
 
@@ -66,8 +84,30 @@
       <button id="skipTurbo" hidden>起動の早送りをやめる</button>
     </div>
     <div class="row">
-      <button id="changeImage">イメージを選び直す</button>
+      <button id="toStart">最初の画面へ（イメージ・保存を選ぶ）</button>
     </div>
+  </section>
+  <section>
+    <h2>保存</h2>
+    <div class="row">
+      <button id="saveNow">今の状態を保存</button>
+      <label class="button file">読み込む<input type="file" id="snapFile2" hidden></label>
+    </div>
+    <ul id="menuSaves" class="list compact"></ul>
+    <p class="note">自動保存は 3 世代（起動が Today に着いたとき・画面を離れたとき・操作があれば 30 秒ごと・なければ 5 分ごと）。
+      書き出したスナップショットにはイメージ（Microsoft の配布物）の中身が含まれます。公開の場で共有しないでください。</p>
+    <p class="note" id="storageInfo"></p>
+  </section>
+  <section>
+    <h2>操作の記録</h2>
+    <div class="row">
+      <button id="rec">記録開始</button>
+      <button id="recScript" hidden>スクリプトを書き出す</button>
+      <button id="recSnap" hidden>起点スナップショットを書き出す</button>
+    </div>
+    <p class="note">記録は起点のスナップショットと、絶対命令数の入力スクリプトの組です。
+      書き出した 2 つをネイティブの CLI で再生すると同じ画面になります（手順はスクリプトの先頭のコメント）。</p>
+    <pre id="recText" hidden></pre>
   </section>
   <section>
     <h2>状態</h2>

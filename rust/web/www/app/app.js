@@ -1,4 +1,4 @@
-// ブラウザ版の UI（メインスレッド）。エミュレーションは worker.js が行い、ここは
+// ブラウザ版の UI（メインスレッド）。エミュレーションと保存は worker.js が行い、ここは
 // 画面の描画・入力（タッチ・ハードウェアボタン・PC のキー）・操作パネルだけを持つ
 // （計画書 §3.4・§7.1）。入力の対応表と座標変換は Go 版の serve の UI
 // （www/legacy-serve/app.js）から移したもの。
@@ -6,53 +6,122 @@ const $ = (id) => document.getElementById(id);
 const canvas = $("screen");
 const ctx = canvas.getContext("2d");
 
-const worker = new Worker("worker.js", { type: "module" });
-const send = (op, args = {}, transfer = []) => worker.postMessage({ op, ...args }, transfer);
+let worker = null;
+const send = (op, args = {}, transfer = []) => worker?.postMessage({ op, ...args }, transfer);
 
 function log(msg) {
   const el = $("log");
-  el.textContent = (msg + "\n" + el.textContent).slice(0, 20000);
+  el.textContent = (`${new Date().toLocaleTimeString()} ${msg}\n` + el.textContent).slice(0, 20000);
 }
 
 let booted = false;
 let stopped = false;
+let fatal = false;
 let paused = false;
+let recording = false;
 let images = [];
+let saves = [];
+// panic から読み直したときは、そのまま直前の自動保存から再開する（一覧が届いたら）。
+let autoResume = sessionStorage.getItem("cerulean-autoresume") === "1";
+sessionStorage.removeItem("cerulean-autoresume");
+
+// ---- 起動: 1 タブだけ（§7.4）----
+// 同じサイトを 2 つのタブで開くと自動保存が衝突するので、Web Locks でエミュレータを
+// 動かすタブを 1 つにする。取れなければ待ち、前のタブが閉じたら動き出す。
+if (!("WebAssembly" in globalThis)) {
+  $("startMsg").textContent = "このブラウザでは WebAssembly が使えません（iOS のロックダウンモードでは無効になります）。";
+} else if (navigator.locks) {
+  navigator.locks.request("cerulean-emulator", { ifAvailable: true }, (lock) => {
+    if (lock) return startWorker();
+    $("start").hidden = true;
+    $("otherTab").hidden = false;
+    return navigator.locks.request("cerulean-emulator", () => {
+      $("otherTab").hidden = true;
+      $("start").hidden = false;
+      return startWorker();
+    });
+  });
+} else {
+  startWorker();
+}
+
+// Worker を動かし、ロックを持ち続ける（戻り値の Promise が解決しない限り持つ）。
+function startWorker() {
+  worker = new Worker("worker.js", { type: "module" });
+  worker.onmessage = ({ data }) => onWorker(data);
+  worker.onerror = (e) => {
+    log(`Worker の異常終了: ${e.message}`);
+    showStop(`Worker が異常終了しました: ${e.message}`, true);
+  };
+  send("init");
+  return new Promise(() => {});
+}
 
 // ---- Worker からのメッセージ ----
-worker.onmessage = ({ data: d }) => {
+function onWorker(d) {
   if (d.log) log(d.log);
+  if (d.ready) $("startMsg").textContent = "";
   if (d.images) {
     images = d.images;
-    renderImages();
+    saves = d.saves;
+    renderLists(d.estimate);
+    if (autoResume) {
+      autoResume = false;
+      send("resume", {});
+    }
   }
   if (d.booted) {
     booted = true;
     stopped = false;
+    fatal = false;
     $("start").hidden = true;
     $("stopBanner").hidden = true;
     $("pause").disabled = false;
-    log(`起動: ${d.booted.name}${d.booted.imageId ? `（${d.booted.imageId.slice(0, 12)}…）` : ""}`);
+    $("menu").hidden = true;
+    log(`起動: ${d.booted.name}（命令 ${BigInt(d.booted.steps).toLocaleString()}）`);
+    // 保存を消されにくくする（§7.3。許可されるかはブラウザが決める）
+    navigator.storage?.persist?.().catch(() => {});
   }
   if (d.frame) drawFrame(d.frame, d.w, d.h);
   if (d.status) showStatus(d.status);
-  if (d.stopped) showStop(`エミュレーションが止まりました。\n${d.stopped}`);
+  if (d.uart) {
+    const el = $("uart");
+    el.textContent = (el.textContent + d.uart).slice(-50000);
+  }
+  if ("saving" in d) $("saveBadge").hidden = !d.saving;
+  if (d.stopped) showStop(`エミュレーションが止まりました。\n${d.stopped}`, false);
+  if (d.recorded) {
+    $("recText").textContent = d.recorded.script;
+    $("recText").hidden = false;
+    $("recScript").hidden = false;
+    $("recSnap").hidden = false;
+    log(`記録を止めました: ${d.recorded.base}`);
+  }
+  if (d.download) download(d.download.bytes, d.download.name);
   if (d.error) {
     log("エラー: " + d.error);
-    if (booted) showStop(d.error);
-    else alert(d.error);
+    if (d.fatal) showStop(d.error, true);
+    else if (!d.soft || !booted) alert(d.error);
   }
-};
-worker.onerror = (e) => {
-  log(`Worker の異常終了: ${e.message}`);
-  showStop(`Worker が異常終了しました: ${e.message}`);
-};
-send("init");
+}
 
-function showStop(text) {
+function showStop(text, isFatal) {
   stopped = true;
+  fatal ||= isFatal;
   $("stopText").textContent = text;
+  $("stopExport").hidden = fatal; // panic 後の状態は壊れている可能性があるので書き出さない
   $("stopBanner").hidden = false;
+}
+
+function download(bytes, name) {
+  const url = URL.createObjectURL(new Blob([bytes]));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
 
 // ---- 画面 ----
@@ -92,6 +161,7 @@ function fmtTime(sec) {
 }
 function showStatus(s) {
   paused = s.paused;
+  recording = s.recording;
   $("pause").classList.toggle("on", paused);
   $("pause").textContent = paused ? "▶" : "❚❚";
   $("pause").title = paused ? "再開" : "一時停止";
@@ -103,23 +173,86 @@ function showStatus(s) {
   const badge = $("badge");
   badge.hidden = !(s.turbo && !paused) && !s.jitError;
   badge.classList.toggle("warn", !!s.jitError);
-  badge.textContent = s.jitError ? "JIT 停止" : "起動中（早送り）";
+  badge.textContent = s.jitError ? "JIT 停止" : "早送り";
   badge.title = s.jitError ?? "";
   $("skipTurbo").hidden = !(s.turbo && s.speed !== 0);
+  $("recBadge").hidden = !recording;
+  $("rec").textContent = recording ? "記録停止" : "記録開始";
+  $("rec").classList.toggle("on", recording);
   $("statusLine").textContent = paused
     ? "一時停止中"
     : `${fmtTime(s.virtualSec)}  ×${s.ratio.toFixed(2)}  ${s.mips.toFixed(0)}M/s`;
-  if (s.uart) {
-    const el = $("uart");
-    el.textContent = (el.textContent + s.uart).slice(-50000);
-  }
 }
 
-// ---- 起動 ----
-// ゲストの RTC はホストのローカル時刻から（起動時だけ。以後は命令数で進む）。
+// ---- 最初の画面・保存の一覧 ----
+// ゲストの RTC はホストのローカル時刻から（イメージから起動したときだけ。以後と
+// スナップショットからの再開では、ゲストの時計は命令数で進む。§7.4）。
 function rtcNow() {
   const d = new Date();
   return [d.getFullYear(), d.getMonth() + 1, d.getDate(), d.getHours(), d.getMinutes(), d.getSeconds()];
+}
+
+const fmtSteps = (s) => `${(Number(s) / 1e9).toFixed(2)}G 命令`;
+const fmtDate = (t) => new Date(t).toLocaleString();
+
+function item(label, sub, onclick, extra = []) {
+  const li = document.createElement("li");
+  const b = document.createElement("button");
+  b.className = "boot";
+  const span = document.createElement("span");
+  span.textContent = label;
+  const small = document.createElement("small");
+  small.textContent = sub;
+  b.append(span, small);
+  b.onclick = onclick;
+  li.append(b, ...extra);
+  return li;
+}
+function smallButton(text, title, onclick) {
+  const b = document.createElement("button");
+  b.className = "del";
+  b.textContent = text;
+  b.title = title;
+  b.onclick = onclick;
+  return b;
+}
+
+function renderLists(estimate) {
+  const manual = saves.filter((s) => s.kind === "manual");
+  const latest = saves[0]; // 「続きから再開」は自動・手動を問わずいちばん新しい保存
+  $("resume").hidden = !latest;
+  if (latest) $("resumeInfo").textContent = `${fmtDate(latest.savedAt)}・${fmtSteps(latest.steps)}`;
+
+  const sl = $("saveList");
+  sl.replaceChildren(
+    ...manual.map((s) =>
+      item(`保存から再開`, `${fmtDate(s.savedAt)}・${fmtSteps(s.steps)}`, () => send("resume", { name: s.name })),
+    ),
+  );
+  const il = $("imageList");
+  il.replaceChildren(
+    ...images.map((im) =>
+      item(`${im.name} から起動`, `${(im.size / 1e6).toFixed(1)}MB・${im.id.slice(0, 12)}…`, () => send("bootStored", { id: im.id, rtc: rtcNow() }), [
+        smallButton("✕", "この端末から消す", () => confirm(`${im.name} をこの端末から消しますか？`) && send("deleteImage", { id: im.id })),
+      ]),
+    ),
+  );
+  if (!images.length && !saves.length) $("startMsg").textContent = "イメージを選んでください。";
+
+  const ml = $("menuSaves");
+  ml.replaceChildren(
+    ...saves.map((s) =>
+      item(`${s.kind === "auto" ? "自動" : "手動"}・${fmtSteps(s.steps)}`, `${fmtDate(s.savedAt)}・${(s.size / 1e6).toFixed(1)}MB${s.label ? "・" + s.label : ""}`, () => {
+        if (confirm("この保存から再開しますか？（今の状態は失われます。必要なら先に保存してください）")) send("resume", { name: s.name });
+      }, [
+        smallButton("⤓", "書き出す", () => send("exportSave", { name: s.name })),
+        smallButton("✕", "消す", () => confirm("この保存を消しますか？") && send("deleteSave", { name: s.name })),
+      ]),
+    ),
+  );
+  if (estimate?.quota) {
+    $("storageInfo").textContent = `この端末の保存領域: ${(estimate.usage / 1e6).toFixed(0)}MB 使用 / 上限 ${(estimate.quota / 1e9).toFixed(1)}GB`;
+  }
 }
 
 $("imageFile").addEventListener("change", async (e) => {
@@ -127,35 +260,35 @@ $("imageFile").addEventListener("change", async (e) => {
   e.target.value = "";
   if (!f) return;
   const bytes = new Uint8Array(await f.arrayBuffer());
-  send("bootFile", { bytes, name: f.name, rtc: rtcNow(), jit: $("jit").checked }, [bytes.buffer]);
+  send("bootFile", { bytes, name: f.name, rtc: rtcNow() }, [bytes.buffer]);
 });
-
-function renderImages() {
-  const ul = $("imageList");
-  ul.replaceChildren();
-  for (const im of images) {
-    const li = document.createElement("li");
-    const b = document.createElement("button");
-    b.className = "boot";
-    b.innerHTML = `<span></span><small></small>`;
-    b.firstChild.textContent = `${im.name} で起動`;
-    b.lastChild.textContent = `${(im.size / 1e6).toFixed(1)}MB・${im.id.slice(0, 12)}…`;
-    b.onclick = () => send("bootStored", { id: im.id, rtc: rtcNow(), jit: $("jit").checked });
-    const del = document.createElement("button");
-    del.className = "del";
-    del.textContent = "✕";
-    del.title = "この端末から消す";
-    del.onclick = () => confirm(`${im.name} をこの端末から消しますか？`) && send("deleteImage", { id: im.id });
-    li.append(b, del);
-    ul.append(li);
-  }
+for (const id of ["snapFile", "snapFile2"]) {
+  $(id).addEventListener("change", async (e) => {
+    const f = e.target.files[0];
+    e.target.value = "";
+    if (!f) return;
+    const bytes = new Uint8Array(await f.arrayBuffer());
+    send("importSnapshot", { bytes }, [bytes.buffer]);
+  });
 }
+$("resume").onclick = () => send("resume", {});
 
-$("reboot").onclick = () => {
+// panic の後は wasm のインスタンスが使えないので、ページを読み直してから再開する。
+$("stopResume").onclick = () => {
+  if (fatal) {
+    sessionStorage.setItem("cerulean-autoresume", "1");
+    location.reload();
+  } else {
+    send("resume", {});
+  }
+};
+$("stopExport").onclick = () => send("exportCurrent");
+$("stopBack").onclick = () => {
+  if (fatal) return location.reload();
   $("stopBanner").hidden = true;
   $("start").hidden = false;
 };
-$("changeImage").onclick = () => {
+$("toStart").onclick = () => {
   send("pause", { on: true });
   $("menu").hidden = true;
   $("start").hidden = false;
@@ -167,8 +300,14 @@ $("pause").onclick = () => send("pause", { on: !paused });
 $("speed").onchange = () => send("speed", { v: +$("speed").value });
 $("jit").onchange = () => send("jit", { on: $("jit").checked });
 $("skipTurbo").onclick = () => send("skipTurbo");
-// 非表示中は止める（§7.4）
+$("saveNow").onclick = () => booted && send("save");
+$("rec").onclick = () => booted && send(recording ? "recordStop" : "recordStart");
+$("recScript").onclick = () => send("exportRecording", { what: "script" });
+$("recSnap").onclick = () => send("exportRecording", { what: "snapshot" });
+
+// 非表示・ページを離れるときは止めて自動保存する（§7.4）
 document.addEventListener("visibilitychange", () => send("visibility", { hidden: document.hidden }));
+window.addEventListener("pagehide", () => send("autosave", { reason: "ページを離れる" }));
 
 // ---- 入力 ----
 const input = (t, args = {}) => {
@@ -267,11 +406,11 @@ for (const d of "0123456789") {
   keyMap["Numpad" + d] = d;
 }
 
-// メニューの入力欄にフォーカスがあるときは、キーをゲストに送らない。
-const typingInUi = (e) => e.target instanceof HTMLElement && e.target.closest("#menu, .overlay:not([hidden])");
+// メニュー・最初の画面を操作しているときは、キーをゲストに送らない。
+const inUi = () => !$("menu").hidden || [...document.querySelectorAll(".overlay")].some((o) => !o.hidden);
 window.addEventListener("keydown", (e) => {
   // IME の変換中のキーは送らない（§7.1。keyCode 229 は変換中を示す古い値）
-  if (e.isComposing || e.keyCode === 229 || typingInUi(e) || !booted) return;
+  if (e.isComposing || e.keyCode === 229 || inUi() || !booted) return;
   const k = keyMap[e.code];
   if (!k || e.metaKey) return;
   e.preventDefault();
@@ -281,7 +420,7 @@ window.addEventListener("keydown", (e) => {
 window.addEventListener("keyup", (e) => {
   const k = keyMap[e.code];
   if (!k) return;
-  e.preventDefault();
+  if (held.get(k)?.has("kbd:" + e.code)) e.preventDefault();
   release(k, "kbd:" + e.code);
 });
 // フォーカスを失ったら押しっぱなしを解除する（keyup が届かなくなるため）。
@@ -291,3 +430,10 @@ window.addEventListener("blur", () => {
   }
   penUp();
 });
+
+// ---- PWA（§7.5）----
+// Service Worker はオフラインで開けるようにするだけ（ネットワーク優先で、つながれば
+// 常に新しい版を使う。版の切り替えはページを開き直したとき = 自動保存の後）。
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("sw.js").catch((e) => log(`Service Worker を登録できません: ${e.message}`));
+}
