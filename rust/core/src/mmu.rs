@@ -727,7 +727,7 @@ impl Mmu {
         }
         let e = &self.tlb[self.lookup(va, if write { self.perm_w } else { self.perm_r })?];
         let ram = if write { e.wram } else { e.ram };
-        (ram != NO_RAM).then_some(ram + off)
+        (ram != NO_RAM).then(|| ram + off)
     }
 
     /// 変換の世代番号。
