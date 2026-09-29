@@ -5,111 +5,81 @@
 //! 可変のシフト量は必ず場合分けする（Go は 32 以上のシフトで 0 になるが、
 //! Rust の `<<`/`>>` は panic または結果が変わる）。
 
-use super::code::Instr;
+use super::ir::Op;
 use super::*;
 
-/// 命令の実行関数。引数は (CPU, システム, 命令語, 取り出し済みの即値)。
-/// 汎用の関数は命令語からフィールドを取り出し（十分安価なため）、即値は使わない。
-/// 頻出形の特化関数（special.rs）は、デコード時に求めた即値を使う。
-pub type ExecFn<S> = fn(&mut Cpu, &mut S, u32, u32) -> ExecResult;
-
-/// ARM 命令語 1 個をデコード済み命令にする（命令語だけの純関数）。
-/// 頻出する形には専用の実行関数（special.rs）を、それ以外には汎用の実行関数を選ぶ。
-pub fn decode_instr<S: System>(word: u32) -> Instr<S> {
-    super::special::specialize(word).unwrap_or(Instr {
-        exec: decode::<S>(word),
-        word,
-        imm: 0,
-    })
-}
-
-/// ARM 命令語 1 個の実行関数を選ぶ。未実装・未定義の命令も「実行するとエラーを
-/// 返す関数」として返す（デコード自体は失敗しない）。命令語だけの純関数なので、
-/// 結果を物理アドレスをキーにキャッシュしても正しさが保たれる。
+/// ARM 命令語 1 個の汎用の Op を選ぶ（特化しない場合。ir.rs）。未実装・未定義の
+/// 命令も「実行するとエラーを返す Op」として返す（デコード自体は失敗しない）。
+/// 命令語だけの純関数なので、結果を物理アドレスをキーにキャッシュしても正しさが保たれる。
 ///
 /// ARM ARM Figure A3-1 の命令クラス分けに従う。分岐の順序が重要:
 /// 「データ処理レジスタ形式」の空間には bit7/bit4 や S ビットの組み合わせで
 /// 乗算・MRS/MSR・BX などが埋め込まれている。
-pub(crate) fn decode<S: System>(word: u32) -> ExecFn<S> {
+pub(crate) fn decode(word: u32) -> Op {
     if word >> 28 == 0xF {
         // ARMv4 では UNPREDICTABLE、v5 以降は BLX 等の拡張空間。
         // （実行ループの条件判定で NOP として飛ばされるのでここには来ない。cond_passed 参照）
         // TODO(v5TE): PXA27x 対応時に BLX(1) 等を実装する。
-        return |_, _, _, _| Err(unimpl!("cond=1111 extension space (ARMv5+)"));
+        return Op::UnimplV5;
     }
     match (word >> 25) & 7 {
         0 => {
             // データ処理（レジスタ形式）とその同居命令
             // BX: 0001 0010 1111 1111 1111 0001
             if word & 0x0FFFFFF0 == 0x012FFF10 {
-                return exec_bx;
+                return Op::Bx;
             }
             if word & 0x90 == 0x90 {
                 // bit7=1 かつ bit4=1: データ処理ではない
                 if (word >> 5) & 3 == 0 {
                     // bits[7:4] = 1001: 乗算（MUL/MLA/UMULL...）または SWP
-                    return exec_mul_swp;
+                    return Op::MulSwp;
                 }
                 // bits[7:4] = 1011/1101/1111: ハーフワード・符号付き転送
-                return exec_ldst_misc;
+                return Op::LdstMisc;
             }
             let op = (word >> 21) & 0xF;
             if (8..=11).contains(&op) && word & (1 << 20) == 0 {
                 // TST/TEQ/CMP/CMN の S=0 は MRS/MSR の空間
-                return if op & 1 == 0 { exec_mrs } else { exec_msr };
+                return if op & 1 == 0 { Op::Mrs } else { Op::Msr };
             }
-            exec_data_proc
+            Op::DataProc
         }
         1 => {
             // データ処理（即値形式）
             let op = (word >> 21) & 0xF;
             if (8..=11).contains(&op) && word & (1 << 20) == 0 {
                 if op & 1 == 1 {
-                    return exec_msr; // MSR 即値形式
+                    return Op::Msr; // MSR 即値形式
                 }
-                return |_, _, _, _| Err(unimpl!("undefined (MRS-like encoding with immediate)"));
+                return Op::UnimplMrsImm;
             }
-            exec_data_proc
+            Op::DataProc
         }
-        2 => exec_ldst, // LDR/STR 即値オフセット
+        2 => Op::Ldst, // LDR/STR 即値オフセット
         3 => {
             // LDR/STR レジスタオフセット
             if word & 0x10 != 0 {
                 // bits[27:25]=011 かつ bit4=1 は ARMv4 のアーキテクチャ未定義空間
                 // （実機でも未定義例外）。WinCE はこの空間の命令をトラップとして
                 // 意図的に実行するので、例外として配送する。
-                return |_, _, _, _| {
-                    Err(Exec::Undef(&Undef {
-                        reason: "architecturally undefined space (011 with bit4)",
-                        arch: true,
-                    }))
-                };
+                return Op::UndefLdstReg;
             }
-            exec_ldst
+            Op::Ldst
         }
-        4 => exec_ldm_stm,
-        5 => exec_branch,
+        4 => Op::LdmStm,
+        5 => Op::Branch,
         // コプロセッサ LDC/STC: 対応コプロセッサがないので実機同様に未定義例外
-        6 => |_, _, _, _| {
-            Err(Exec::Undef(&Undef {
-                reason: "LDC/STC (no coprocessor)",
-                arch: true,
-            }))
-        },
+        6 => Op::UndefLdcStc,
         _ => {
             // 7: コプロセッサ演算・レジスタ転送、SWI
             if word & (1 << 24) != 0 {
-                return exec_swi;
+                return Op::Swi;
             }
             if word & 0x10 != 0 {
-                return exec_mcr_mrc;
+                return Op::McrMrc;
             }
-            |_, _, _, _| {
-                Err(Exec::Undef(&Undef {
-                    reason: "CDP (no coprocessor)",
-                    arch: true,
-                }))
-            }
+            Op::UndefCdp
         }
     }
 }
@@ -279,7 +249,7 @@ pub(crate) const OP_MOV: u32 = 13;
 pub(crate) const OP_BIC: u32 = 14;
 pub(crate) const OP_MVN: u32 = 15;
 
-fn exec_data_proc<S: System>(c: &mut Cpu, sys: &mut S, word: u32, _imm: u32) -> ExecResult {
+pub(super) fn exec_data_proc<S: System>(c: &mut Cpu, sys: &mut S, word: u32) -> ExecResult {
     let op = (word >> 21) & 0xF;
     let s_bit = word & (1 << 20) != 0;
     let rn = (word >> 16) & 0xF;
@@ -361,7 +331,7 @@ fn exec_data_proc<S: System>(c: &mut Cpu, sys: &mut S, word: u32, _imm: u32) -> 
 // ---- ロード/ストア命令（ARM ARM A3.11、アドレッシングは A5.2/A5.3/A5.4）----
 
 /// LDR/STR/LDRB/STRB（ワード・バイト転送）。
-fn exec_ldst<S: System>(c: &mut Cpu, sys: &mut S, word: u32, _imm: u32) -> ExecResult {
+pub(super) fn exec_ldst<S: System>(c: &mut Cpu, sys: &mut S, word: u32) -> ExecResult {
     let pre = word & (1 << 24) != 0; // P: プリインデックス
     let up = word & (1 << 23) != 0; // U: オフセットを加算
     let byte_xfer = word & (1 << 22) != 0; // B: バイト転送
@@ -422,7 +392,7 @@ fn exec_ldst<S: System>(c: &mut Cpu, sys: &mut S, word: u32, _imm: u32) -> ExecR
 
 /// ハーフワード・符号付き転送（LDRH/STRH/LDRSB/LDRSH）。
 /// エンコードはデータ処理空間の bit7=1,bit4=1 側（A5.3）。
-fn exec_ldst_misc<S: System>(c: &mut Cpu, sys: &mut S, word: u32, _imm: u32) -> ExecResult {
+pub(super) fn exec_ldst_misc<S: System>(c: &mut Cpu, sys: &mut S, word: u32) -> ExecResult {
     let pre = word & (1 << 24) != 0;
     let up = word & (1 << 23) != 0;
     let imm_form = word & (1 << 22) != 0; // 1: 8bit 即値オフセット / 0: レジスタ
@@ -558,7 +528,7 @@ fn exec_ldm_stm_user<S: System>(c: &mut Cpu, sys: &mut S, word: u32, load: bool)
 }
 
 /// LDM/STM（A3.12、アドレッシングは A5.4）。
-fn exec_ldm_stm<S: System>(c: &mut Cpu, sys: &mut S, word: u32, _imm: u32) -> ExecResult {
+pub(super) fn exec_ldm_stm<S: System>(c: &mut Cpu, sys: &mut S, word: u32) -> ExecResult {
     let pre = word & (1 << 24) != 0;
     let up = word & (1 << 23) != 0;
     let s_bit = word & (1 << 22) != 0;
@@ -684,7 +654,7 @@ fn exec_ldm_stm<S: System>(c: &mut Cpu, sys: &mut S, word: u32, _imm: u32) -> Ex
 //   - ロング乗算の S=1: N は bit63、Z は 64bit 結果全体。C/V は同上。
 
 /// bits[7:4]=1001 空間のディスパッチ。bit24=0 が乗算、bit24=1 が SWP/SWPB。
-fn exec_mul_swp<S: System>(c: &mut Cpu, sys: &mut S, word: u32, _imm: u32) -> ExecResult {
+pub(super) fn exec_mul_swp<S: System>(c: &mut Cpu, sys: &mut S, word: u32) -> ExecResult {
     if word & (1 << 24) != 0 {
         return exec_swp(c, sys, word);
     }
@@ -767,7 +737,7 @@ fn exec_swp<S: System>(c: &mut Cpu, sys: &mut S, word: u32) -> ExecResult {
 // ---- MRS/MSR（ステータスレジスタ転送、A4.1.38/39）----
 
 /// MRS Rd, CPSR/SPSR。
-fn exec_mrs<S: System>(c: &mut Cpu, _sys: &mut S, word: u32, _imm: u32) -> ExecResult {
+pub(super) fn exec_mrs<S: System>(c: &mut Cpu, _sys: &mut S, word: u32) -> ExecResult {
     let rd = (word >> 12) & 0xF;
     if rd == 15 {
         return Err(unimpl!("MRS with Rd=PC (UNPREDICTABLE)"));
@@ -788,7 +758,7 @@ fn exec_mrs<S: System>(c: &mut Cpu, _sys: &mut S, word: u32, _imm: u32) -> ExecR
 
 /// MSR CPSR/SPSR_<fields>, Rm または #imm。
 /// フィールドマスク（bits 19:16 = f,s,x,c）で書き込むバイトを選ぶ。
-fn exec_msr<S: System>(c: &mut Cpu, sys: &mut S, word: u32, _imm: u32) -> ExecResult {
+pub(super) fn exec_msr<S: System>(c: &mut Cpu, sys: &mut S, word: u32) -> ExecResult {
     let val = if word & (1 << 25) != 0 {
         ror(word & 0xFF, ((word >> 8) & 0xF) * 2) // 即値形式
     } else {
@@ -836,7 +806,7 @@ fn exec_msr<S: System>(c: &mut Cpu, sys: &mut S, word: u32, _imm: u32) -> ExecRe
 // ---- 分岐命令と SWI、コプロセッサレジスタ転送 ----
 
 /// B/BL（A3.3）。24bit 符号付きオフセット×4 を PC+8 に加える。
-fn exec_branch<S: System>(c: &mut Cpu, sys: &mut S, word: u32, _imm: u32) -> ExecResult {
+pub(super) fn exec_branch<S: System>(c: &mut Cpu, sys: &mut S, word: u32) -> ExecResult {
     // 符号拡張して ×4（<<8 で上位に詰め、>>6 = 算術>>8 と <<2）
     let offset = ((word << 8) as i32) >> 6;
     if word & (1 << 24) != 0 {
@@ -854,7 +824,7 @@ fn exec_branch<S: System>(c: &mut Cpu, sys: &mut S, word: u32, _imm: u32) -> Exe
 }
 
 /// BX Rm（A3.3）。bit0 で ARM/Thumb を切り替える（v4T の相互運用）。
-fn exec_bx<S: System>(c: &mut Cpu, _sys: &mut S, word: u32, _imm: u32) -> ExecResult {
+pub(super) fn exec_bx<S: System>(c: &mut Cpu, _sys: &mut S, word: u32) -> ExecResult {
     let target = c.read_reg(word & 0xF);
     if target & 1 != 0 {
         c.cpsr |= FLAG_T;
@@ -867,14 +837,14 @@ fn exec_bx<S: System>(c: &mut Cpu, _sys: &mut S, word: u32, _imm: u32) -> ExecRe
 }
 
 /// ソフトウェア割り込み。SVC モードでベクタ 0x08 へ。復帰先は SWI の次の命令。
-fn exec_swi<S: System>(c: &mut Cpu, sys: &mut S, _word: u32, _imm: u32) -> ExecResult {
+pub(super) fn exec_swi<S: System>(c: &mut Cpu, sys: &mut S) -> ExecResult {
     c.enter_exception(VEC_SWI, MODE_SVC, c.regs[15], sys); // regs[15] = PC+4
     Ok(())
 }
 
 /// MCR/MRC（コプロセッサレジスタ転送、A4.1.32/40）。CP15（MMU・キャッシュ制御）
 /// だけを通し、それ以外のコプロセッサは未定義例外にする。
-fn exec_mcr_mrc<S: System>(c: &mut Cpu, sys: &mut S, word: u32, _imm: u32) -> ExecResult {
+pub(super) fn exec_mcr_mrc<S: System>(c: &mut Cpu, sys: &mut S, word: u32) -> ExecResult {
     let cp_num = (word >> 8) & 0xF;
     if cp_num != 15 {
         // ARM920T に CP15 以外のコプロセッサはなく、実機でも未定義命令例外

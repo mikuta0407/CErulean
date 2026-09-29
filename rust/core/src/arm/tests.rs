@@ -1856,17 +1856,22 @@ fn specialized_matches_generic() {
     let mut rng = SplitMix(1);
     const MEM: u32 = 16 * 1024;
     let mut special = 0;
+    let mut seen = std::collections::BTreeSet::new();
     for _ in 0..100_000 {
-        let word = match rng.choose(4) {
+        let word = match rng.choose(7) {
             0 => 0xE2000000 | rng.u32() & 0x01FFFFFF, // データ処理（即値）
             1 => 0xE0000000 | rng.u32() & 0x01FFF00F, // データ処理（レジスタ・シフトなし）
-            2 => 0xE4000000 | rng.u32() & 0x01FFFFFF, // LDR/STR 即値
+            2 => 0xE0000000 | rng.u32() & 0x01FFFFEF, // データ処理（レジスタ・即値シフト）
+            3 => 0xE0000090 | rng.u32() & 0x01FFFF6F, // LDRH/STRH/LDRSB/LDRSH（と乗算）
+            4 => 0xE12FFF10 | rng.u32() & 0xF,        // BX
+            5 => 0xE4000000 | rng.u32() & 0x01FFFFFF, // LDR/STR 即値（ライトバックを含む）
             _ => 0xEA000000 | rng.u32() & 0x01FFFFFF, // B/BL
         };
-        let Some(sp) = super::special::specialize::<TestSys>(word) else {
+        let Some(sp) = super::special::specialize(word) else {
             continue;
         };
         special += 1;
+        seen.insert(sp.op as u8);
         // 同じ初期状態のコアを 2 つ作る。アドレスがメモリ内に収まるよう、
         // レジスタは小さい値にする（LDR/STR のベース）。
         let mut regs = [0u32; 16];
@@ -1879,7 +1884,7 @@ fn specialized_matches_generic() {
         }
         let flags = rng.u32() & (FLAG_N | FLAG_Z | FLAG_C | FLAG_V);
         let mem: Vec<u8> = (0..MEM).map(|_| rng.u32() as u8).collect();
-        let run = |f: ExecFn<TestSys>, imm: u32| {
+        let run = |i: Instr| {
             let mut s = TestSys::new();
             s.mem = mem.clone();
             s.run.budget = 10;
@@ -1887,11 +1892,12 @@ fn specialized_matches_generic() {
             c.regs = regs;
             c.regs[15] = 0x1000 + 4; // 実行中は PC+4
             c.cpsr = MODE_SVC | flags;
-            let r = f(&mut c, &mut s, word, imm);
+            let r = super::ir::exec(&mut c, &mut s, i);
             (c, s, r)
         };
-        let (a, am, ar) = run(sp.exec, sp.imm);
-        let (b, bm, br) = run(decode::<TestSys>(word), 0);
+        assert_eq!(sp.cond as u32, word >> 28);
+        let (a, am, ar) = run(sp);
+        let (b, bm, br) = run(Instr::generic(decode(word), word));
         assert_eq!(
             ar.is_ok(),
             br.is_ok(),
@@ -1908,5 +1914,20 @@ fn specialized_matches_generic() {
         assert_eq!(am.run.budget, bm.run.budget, "{word:08X}: run budget");
         assert!(am.mem == bm.mem, "{word:08X}: memory");
     }
-    assert!(special >= 25000, "only {special} specialized words tested");
+    assert!(special >= 50000, "only {special} specialized words tested");
+    // 特化した Op が全部試されたこと（BSpin は命令語が 1 つだけなので除く。
+    // Op の並びは汎用・特化の順で、BSpin が最後）。
+    let want: Vec<u8> = (super::ir::Op::MovImm as u8..super::ir::Op::BSpin as u8).collect();
+    let got: Vec<u8> = seen
+        .into_iter()
+        .filter(|&o| o != super::ir::Op::BSpin as u8)
+        .collect();
+    assert_eq!(got, want, "specialized ops not covered");
+}
+
+/// デコード済み命令は 8 バイト（未デコードの None も同じ大きさ）。デコード表の
+/// 大きさ（キャッシュミス）に効くので、フィールドを足すときは計測すること。
+#[test]
+fn instr_is_8_bytes() {
+    assert_eq!(std::mem::size_of::<Option<super::ir::Instr>>(), 8);
 }

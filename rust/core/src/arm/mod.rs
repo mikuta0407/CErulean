@@ -1,25 +1,21 @@
 //! ARMv4T（将来 v5TE 拡張予定）のインタプリタ。Go の cpu/arm パッケージ。
 //! 仕様の根拠は ARM Architecture Reference Manual (DDI 0100)。
 //!
-//! 命令の「デコード」（[`decode`]）と「実行」（exec_arm.rs・exec_thumb.rs）を
-//! 分離してある。これは物理アドレス→デコード済み命令のキャッシュや、ブロック
-//! 単位実行・将来の IR/JIT を入れられるようにするため（iOS では JIT 不可なので
-//! インタプリタが前提）。
+//! 命令の「デコード」（ir.rs の IR へ）と「実行」（ir.rs・exec_arm.rs・exec_thumb.rs）を
+//! 分離してある。デコード結果は物理ページ単位でキャッシュし（code.rs）、実行中の
+//! ページ内はまとめて実行する（run_page）。将来の JIT も同じ IR から作る。
 //!
 //! 所有権の設計（計画書 §3.3 の案 A）: [`Cpu`] はレジスタ・バンク・PSR だけの
 //! データで、メモリ（MMU）・CP15・割り込み線・実行の上限は [`System`] として
 //! 呼び出し側（machine の sys）から借りる。Go の Core が持っていた mem・cp15・
 //! irq/fiq・runN/runBudget に当たるものは System の側にある。
-//!
-//! TODO(段階1 の高速化): Go のデコードキャッシュ（codecache.go）・頻出命令の
-//! 特化（special.go）・アイドルループ検出（idle.go）・LDM/STM の RAMRun は、
-//! 素直な実装で Go との一致を確かめてから 1 つずつ移す。
 
 mod code;
 mod disasm;
 mod exec_arm;
 mod exec_thumb;
 mod idle;
+mod ir;
 mod special;
 #[cfg(test)]
 mod tests;
@@ -29,10 +25,10 @@ use std::fmt;
 use crate::bus::{BusError, RamOff};
 use crate::cpu::{Abort, MemError};
 
-pub use code::{CodeCache, CodeMemory, Instr};
+pub use code::{CodeCache, CodeMemory};
 pub use disasm::{disasm, disasm_thumb};
-pub use exec_arm::{ExecFn, decode_instr};
 pub use idle::{POLL_LOOP_LEN, PollState};
+pub use ir::{Instr, Op, decode_instr};
 
 // ---- PSR（CPSR/SPSR）----
 //
@@ -218,21 +214,15 @@ pub trait System {
     /// デコード）。デコードキャッシュを持つシステムは上書きする（code.rs）。
     /// フェッチのアボート・バスエラーは fetch32 と同じく Err で返す。
     #[inline(always)]
-    fn fetch_arm(&mut self, pc: u32) -> Result<Instr<Self>, MemError>
-    where
-        Self: Sized,
-    {
-        Ok(decode_instr::<Self>(self.fetch32(pc)?))
+    fn fetch_arm(&mut self, pc: u32) -> Result<Instr, MemError> {
+        Ok(decode_instr(self.fetch32(pc)?))
     }
 
     /// 実行中のページ（デコードキャッシュ）の pc の命令。pc がそのページにあり、
     /// 変換も変わっていないときだけ Some（TLB もバスも触らないので、fetch_arm と
     /// 同じ結果になる）。ブロック実行（Cpu::run_page）が使う。既定は None。
     #[inline(always)]
-    fn cur_instr(&mut self, _pc: u32) -> Option<Instr<Self>>
-    where
-        Self: Sized,
-    {
+    fn cur_instr(&mut self, _pc: u32) -> Option<Instr> {
         None
     }
 
@@ -601,16 +591,15 @@ impl Cpu {
     /// 無効にする）・例外やエラー。
     /// 呼び出し側は、最初の命令 ins について run の先頭の判定を済ませておくこと。
     #[inline(always)]
-    fn run_page<S: System>(&mut self, sys: &mut S, mut ins: Instr<S>) -> Result<(), StopError> {
+    fn run_page<S: System>(&mut self, sys: &mut S, mut ins: Instr) -> Result<(), StopError> {
         loop {
             let pc = self.regs[15];
-            let word = ins.word;
             self.regs[15] = pc.wrapping_add(4);
-            let cond = word >> 28;
+            let cond = ins.cond as u32;
             if (cond == 0xE || COND_TABLE[(cond << 4 | self.cpsr >> 28) as usize])
-                && let Err(e) = (ins.exec)(self, sys, word, ins.imm)
+                && let Err(e) = ir::exec(self, sys, ins)
             {
-                let r = self.deliver_exec_error(e, pc, word, 4, sys);
+                let r = self.deliver_exec_error(e, pc, ins.word(), 4, sys);
                 sys.run_ctl().n += 1;
                 if r.is_err() {
                     self.regs[15] = pc;
@@ -661,17 +650,16 @@ impl Cpu {
             }
             Err(MemError::Bus(b)) => return Err(StopError::Bus(b)),
         };
-        let word = ins.word;
         // 実行中は regs[15] = PC+4 にしておく。オペランドとして r15 を読むときは
         // read_reg がさらに +4 して「PC+8」（パイプラインの見え方）を返す。
         self.regs[15] = pc.wrapping_add(4);
 
-        let cond = word >> 28;
+        let cond = ins.cond as u32;
         if cond != 0xE && !COND_TABLE[(cond << 4 | self.cpsr >> 28) as usize] {
             return Ok(()); // 条件不成立: 何もせず次の命令へ
         }
-        if let Err(e) = (ins.exec)(self, sys, word, ins.imm)
-            && let Err(stop) = self.deliver_exec_error(e, pc, word, 4, sys)
+        if let Err(e) = ir::exec(self, sys, ins)
+            && let Err(stop) = self.deliver_exec_error(e, pc, ins.word(), 4, sys)
         {
             self.regs[15] = pc;
             return Err(stop);

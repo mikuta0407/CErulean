@@ -111,7 +111,7 @@ pub struct Sys {
     pub bus: Bus<Dev>,
     pub board: Board,
     /// デコードキャッシュ（派生情報。arm の code.rs）
-    pub code: CodeCache<Sys>,
+    pub code: CodeCache,
 }
 
 /// デコードキャッシュから見た MMU とメモリ（arm::CodeMemory）。
@@ -211,22 +211,22 @@ impl System for Sys {
     /// できなければ（TLB ミス・MMIO・フェッチ猶予中）通常のフェッチをする
     /// （TLB ミスならここで TLB が埋まり、次の命令からキャッシュが効く）。
     #[inline(always)]
-    fn fetch_arm(&mut self, pc: u32) -> Result<Instr<Self>, MemError> {
+    fn fetch_arm(&mut self, pc: u32) -> Result<Instr, MemError> {
         let Sys { mmu, bus, code, .. } = self;
         let mut cm = CodeMem {
             mmu,
             arena: bus.arena(),
         };
         if pc & !0xFFF == cm.mmu.code_cur_va {
-            return Ok(code.cur_instr(pc, &mut cm, decode_instr::<Sys>));
+            return Ok(code.cur_instr(pc, &mut cm));
         }
-        if let Some(i) = code.enter(pc, &mut cm, decode_instr::<Sys>) {
+        if let Some(i) = code.enter(pc, &mut cm) {
             return Ok(i);
         }
-        Ok(decode_instr::<Sys>(self.fetch32(pc)?))
+        Ok(decode_instr(self.fetch32(pc)?))
     }
     #[inline(always)]
-    fn cur_instr(&mut self, pc: u32) -> Option<Instr<Self>> {
+    fn cur_instr(&mut self, pc: u32) -> Option<Instr> {
         let Sys { mmu, bus, code, .. } = self;
         if pc & !0xFFF != mmu.code_cur_va {
             return None;
@@ -235,7 +235,7 @@ impl System for Sys {
             mmu,
             arena: bus.arena(),
         };
-        Some(code.cur_instr(pc, &mut cm, decode_instr::<Sys>))
+        Some(code.cur_instr(pc, &mut cm))
     }
     #[inline(always)]
     fn ram_run(&mut self, va: u32, nbytes: u32, write: bool) -> Option<RamOff> {

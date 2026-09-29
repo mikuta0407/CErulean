@@ -26,26 +26,8 @@
 
 use std::collections::HashMap;
 
-use super::exec_arm::ExecFn;
+use super::ir::{Instr, decode_instr};
 use crate::bus::RamOff;
-
-/// デコード済みの ARM 命令（16 バイト）。
-pub struct Instr<S> {
-    /// 実行関数
-    pub exec: ExecFn<S>,
-    /// 命令語（条件フィールドの判定と汎用の実行関数が使う）
-    pub word: u32,
-    /// デコード時に取り出した即値（特化した実行関数が使う。汎用は 0）
-    pub imm: u32,
-}
-
-impl<S> Clone for Instr<S> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<S> Copy for Instr<S> {}
 
 /// デコードキャッシュに必要な MMU とメモリの機能（ボードが実装する）。
 pub trait CodeMemory {
@@ -65,11 +47,11 @@ pub trait CodeMemory {
 }
 
 /// 物理 4KB ページ 1 枚分のデコード済み ARM 命令。
-struct CodePage<S> {
+struct CodePage {
     pa: u32,
     ram: RamOff,
     /// None は未デコード
-    arm: Box<[Option<Instr<S>>; 1024]>,
+    arm: Box<[Option<Instr>; 1024]>,
     /// MMU に mark_code 済み（書き込みで外れる）
     marked: bool,
 }
@@ -89,22 +71,22 @@ struct VpageEnt {
 const VPAGE_BITS: u32 = 6;
 
 /// デコードキャッシュ。
-pub struct CodeCache<S> {
+pub struct CodeCache {
     /// 物理ページ番号 → pages の添字
     index: HashMap<u32, u32>,
-    pages: Vec<CodePage<S>>,
+    pages: Vec<CodePage>,
     /// 実行中のページ（pages の添字）
     cur: u32,
     vpages: [VpageEnt; 1 << VPAGE_BITS],
 }
 
-impl<S> Default for CodeCache<S> {
+impl Default for CodeCache {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<S> CodeCache<S> {
+impl CodeCache {
     pub fn new() -> Self {
         CodeCache {
             index: HashMap::new(),
@@ -127,34 +109,18 @@ impl<S> CodeCache<S> {
     /// 実行中のページ（呼び出し側が PC の仮想ページが MMU の code_cur_va と
     /// 一致することを確かめた後）から命令を取る。未デコードならデコードする。
     #[inline(always)]
-    pub fn cur_instr(
-        &mut self,
-        pc: u32,
-        mem: &mut impl CodeMemory,
-        decode: fn(u32) -> Instr<S>,
-    ) -> Instr<S> {
+    pub fn cur_instr(&mut self, pc: u32, mem: &mut impl CodeMemory) -> Instr {
         let p = &self.pages[self.cur as usize];
         match &p.arm[((pc >> 2) & 0x3FF) as usize] {
-            // フィールドごとに読む（16 バイトのまま写すとスタック経由の写しになり、
-            // 直後の 8 バイト読みがストアフォワーディングで詰まる。計測で確認）。
-            Some(i) => Instr {
-                exec: i.exec,
-                word: i.word,
-                imm: i.imm,
-            },
-            None => self.decode_cached(pc, mem, decode),
+            Some(i) => *i,
+            None => self.decode_cached(pc, mem),
         }
     }
 
     /// PC が別のページに移った（または世代が変わった）ときに、そのページの
     /// キャッシュを引き当てて命令を返す。キャッシュできなければ None（呼び出し側が
     /// 通常のフェッチをする。TLB ミスならそこで TLB が埋まる）。
-    pub fn enter(
-        &mut self,
-        pc: u32,
-        mem: &mut impl CodeMemory,
-        decode: fn(u32) -> Instr<S>,
-    ) -> Option<Instr<S>> {
+    pub fn enter(&mut self, pc: u32, mem: &mut impl CodeMemory) -> Option<Instr> {
         // コードページへの書き込みがあったページのデコード結果を捨てる。
         while let Some(pa) = mem.take_code_invalidated() {
             if let Some(&i) = self.index.get(&(pa >> 12)) {
@@ -197,23 +163,18 @@ impl<S> CodeCache<S> {
         };
         self.cur = page;
         mem.set_code_cur_va(va);
-        Some(self.cur_instr(pc, mem, decode))
+        Some(self.cur_instr(pc, mem))
     }
 
     /// 実行中のページの pc の命令をデコードして表に入れる。
-    fn decode_cached(
-        &mut self,
-        pc: u32,
-        mem: &mut impl CodeMemory,
-        decode: fn(u32) -> Instr<S>,
-    ) -> Instr<S> {
+    fn decode_cached(&mut self, pc: u32, mem: &mut impl CodeMemory) -> Instr {
         let p = &mut self.pages[self.cur as usize];
         if !p.marked {
             // 表に載せる前に書き込み検出を有効にする。
             mem.mark_code(p.pa);
             p.marked = true;
         }
-        let i = decode(mem.ram_word(p.ram + (pc & 0xFFC)));
+        let i = decode_instr(mem.ram_word(p.ram + (pc & 0xFFC)));
         p.arm[((pc >> 2) & 0x3FF) as usize] = Some(i);
         i
     }
