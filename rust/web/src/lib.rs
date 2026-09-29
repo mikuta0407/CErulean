@@ -1,7 +1,8 @@
 //! CErulean のブラウザ版のエントリ（Web Worker・Node から使う wasm の API）。
 //!
-//! 段階2（計測）の最小の API: イメージ／スナップショットの読み込み、スクリプトの予定、
+//! 段階2（計測）の API: イメージ／スナップショットの読み込み、スクリプトの予定、
 //! 命令数までの実行、一致確認に要る値（CPU 状態のダンプ・RAM・UART1・画面）の取り出し。
+//! 段階3 で対話入力（input）と記録（recordStart/recordStop）を足した。
 //! ハッシュ（SHA-256）は呼び出し側（Node の crypto・ブラウザの SubtleCrypto）で取る
 //! （wasm に依存を足さないため。計画書 §8）。段階3 で Worker 用の API（入力・自動保存
 //! など）を足す（計画書 §7.2）。
@@ -249,6 +250,49 @@ impl Emu {
                 "stop".into()
             }
         }
+    }
+
+    /// 対話入力を今の命令境界で適用する（run の合間に呼ぶ。記録中なら今の命令数で
+    /// 記録する）。t は "down"・"move"（x, y は 240×320 の画面座標）・"up"・
+    /// "keydown"・"keyup"（key はキー名。smdk2410 の KEY_SCAN_CODES）。
+    pub fn input(&mut self, t: &str, x: i32, y: i32, key: &str) -> Result<(), JsError> {
+        let kind = match t {
+            "down" => Kind::TouchDown,
+            "move" => Kind::TouchMove,
+            "up" => Kind::TouchUp,
+            "keydown" => Kind::KeyDown,
+            "keyup" => Kind::KeyUp,
+            _ => return Err(JsError::new(&format!("unknown input {t:?}"))),
+        };
+        let ev = Event {
+            x: x as i64,
+            y: y as i64,
+            key: key.into(),
+            ..Event::new(0, kind)
+        };
+        self.sess
+            .inject(&mut self.m, ev)
+            .map_err(|e| JsError::new(&e))
+    }
+
+    /// 入力の記録を始める（再生の起点のスナップショットは呼び出し側が同じ命令境界で
+    /// 保存する）。
+    #[wasm_bindgen(js_name = recordStart)]
+    pub fn record_start(&mut self) {
+        self.sess.start_recording(&self.m);
+    }
+
+    /// 記録中か。
+    pub fn recording(&self) -> bool {
+        self.sess.recording()
+    }
+
+    /// 記録を止め、再生用のスクリプト（絶対命令数）を返す。start_snap は起点の
+    /// スナップショットの名前（コメントに残す）。
+    #[wasm_bindgen(js_name = recordStop)]
+    pub fn record_stop(&mut self, start_snap: &str, image_id: &str) -> Result<String, JsError> {
+        let (start, evs) = self.sess.stop_recording();
+        emu::format_recording(start_snap, image_id, start, &evs).map_err(|e| JsError::new(&e))
     }
 
     /// 最後に止まった理由（testdata/golden/README.md の stop の JSON）。

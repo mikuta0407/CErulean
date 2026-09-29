@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1b1f27">
+<title>CErulean</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <span class="brand">CErulean</span>
+  <span id="badge" class="badge" hidden></span>
+  <span id="statusLine" class="status"></span>
+  <button id="pause" class="icon" title="一時停止" aria-label="一時停止" disabled>❚❚</button>
+  <button id="menuBtn" class="icon" title="メニュー" aria-label="メニュー">☰</button>
+</header>
+
+<main id="device">
+  <div id="screenBox">
+    <canvas id="screen" width="240" height="320" aria-label="WM5 の画面（タップで操作）"></canvas>
+    <div id="start" class="overlay">
+      <h1>Windows Mobile 5.0</h1>
+      <p>WM5 のエミュレータ用イメージ（<code>PPC_USA.bin</code> など B000FF 形式）を選んでください。
+        イメージはこの端末の中だけで使い、外部には送りません。</p>
+      <label class="primary file">イメージを選ぶ<input type="file" id="imageFile" hidden></label>
+      <ul id="imageList"></ul>
+    </div>
+    <div id="stopBanner" class="overlay stop" hidden>
+      <h1>停止しました</h1>
+      <pre id="stopText"></pre>
+      <button id="reboot" class="primary">再起動</button>
+    </div>
+  </div>
+
+  <div id="keys" aria-label="ハードウェアボタン">
+    <div class="apps left">
+      <button class="hw app" data-key="App1">1</button>
+      <button class="hw app" data-key="App2">2</button>
+    </div>
+    <div class="dpad">
+      <button class="hw up" data-key="Up" aria-label="上">▲</button>
+      <button class="hw left" data-key="Left" aria-label="左">◀</button>
+      <button class="hw center" data-key="Enter" aria-label="決定">●</button>
+      <button class="hw right" data-key="Right" aria-label="右">▶</button>
+      <button class="hw down" data-key="Down" aria-label="下">▼</button>
+    </div>
+    <div class="apps right">
+      <button class="hw app" data-key="App3">3</button>
+      <button class="hw app" data-key="App4">4</button>
+    </div>
+    <button class="hw app5" data-key="App5">5</button>
+  </div>
+</main>
+
+<aside id="menu" hidden>
+  <section>
+    <h2>実行</h2>
+    <div class="row">
+      <label>速度 <select id="speed">
+        <option value="1" selected>等速</option>
+        <option value="2">2 倍</option>
+        <option value="0">最高速</option>
+      </select></label>
+      <label><input type="checkbox" id="jit" checked> JIT</label>
+      <button id="skipTurbo" hidden>起動の早送りをやめる</button>
+    </div>
+    <div class="row">
+      <button id="changeImage">イメージを選び直す</button>
+    </div>
+  </section>
+  <section>
+    <h2>状態</h2>
+    <dl>
+      <dt>命令数</dt><dd id="steps">-</dd>
+      <dt>仮想時間</dt><dd id="vtime">-</dd>
+      <dt>実時間比</dt><dd id="ratio">-</dd>
+      <dt>速度</dt><dd id="mips">-</dd>
+      <dt>アイドル</dt><dd id="idle">-</dd>
+    </dl>
+  </section>
+  <section>
+    <h2>キー（PC のキーボード）</h2>
+    <table>
+      <tr><td><kbd>↑↓←→</kbd> <kbd>Enter</kbd></td><td>方向キー・決定</td></tr>
+      <tr><td><kbd>F1</kbd>〜<kbd>F5</kbd></td><td>App1〜App5</td></tr>
+      <tr><td><kbd>A</kbd>〜<kbd>Z</kbd> <kbd>0</kbd>〜<kbd>9</kbd></td><td>英数字</td></tr>
+      <tr><td><kbd>Space</kbd> <kbd>BS</kbd> <kbd>Tab</kbd> <kbd>Esc</kbd> <kbd>Del</kbd></td><td>編集キー</td></tr>
+      <tr><td><kbd>Shift</kbd> <kbd>Ctrl</kbd> <kbd>Alt</kbd> <kbd>CapsLock</kbd></td><td>修飾キー</td></tr>
+    </table>
+    <p class="note">日本語入力（IME）は切ってください（変換中のキーは送りません）。
+      ソフトキー（画面下の左右のメニュー）は画面をタップします。記号は WM5 の画面上のキーボードで入力します。</p>
+  </section>
+  <section>
+    <h2>ログ</h2>
+    <pre id="log"></pre>
+    <details><summary>カーネルのデバッグ出力（UART1）</summary><pre id="uart"></pre></details>
+  </section>
+</aside>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

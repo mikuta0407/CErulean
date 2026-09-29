@@ -84,6 +84,10 @@ Rust 移行（2026-09〜）: コアを Rust に移し、最初はブラウザ（
   - [ ] 5-4 後半: 各ブラウザでの計測・コード量の上限（Chrome 378M・iPad Safari 約 570M
         命令/秒は確認済み）
 - [ ] 段階3: ブラウザ版の最小製品
+  - [x] Worker＋画面表示（実時間との同期・起動は Today まで早送り）、入力（タッチ・
+        画面外のハードウェアボタン・PC のキー）、イメージを OPFS に置いて次回から選ぶだけ。
+        スマートフォンの縦横・PC の配置。Chrome で確認
+  - [ ] スナップショットの保存・読み込み、自動保存と再開、記録と書き出し、PWA 化
 
 ## テスト用イメージの入手
 
@@ -105,6 +109,22 @@ rm wm5sdk.msi  # 抽出後は不要
 # 確認（B000FF 形式、start=80070000 / entry=80076CF0 / 99 レコードのはず）
 cd ../.. && rust/target/release/cerulean info tmp/images/PPC_USA.bin
 ```
+
+## ブラウザ版（段階3・作業中）
+
+```sh
+tools/web-build.sh          # wasm をビルドして rust/web/www/pkg に置く
+tools/serve-bench.py 8000   # 配信（キャッシュ無効）
+# http://localhost:8000/rust/web/www/app/ を開き、PPC_USA.bin を選ぶ
+```
+
+イメージを選ぶと Today まで最高速で起動し（Chrome の JIT ありで数十秒）、以後は等速で
+動く。画面のタップ（マウス・タッチ）、画面の下（横向きでは右）のボタン（方向キー・
+決定・App1〜5）、PC のキー（矢印・Enter・英数字・F1〜F5 = App1〜5 など。IME は切る）で
+操作する。選んだイメージは端末の OPFS に SHA-256 をキーに置き、次からは一覧から選べる。
+Chrome での動作確認（イメージから起動 → タップ・ボタン・キー → 画面を PNG に保存）:
+`node tools/browser/app-smoke.mjs tmp/images/PPC_USA.bin tmp/app-smoke`（`--desktop`・
+`--viewport=844x390`・`--layout-only`・`--headed`）。
 
 ## ビルドと実行
 

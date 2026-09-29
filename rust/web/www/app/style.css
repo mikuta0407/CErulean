@@ -1,0 +1,115 @@
+/* ブラウザ版の画面構成（計画書 §7.1）。スマートフォンの縦向きを基本に、
+   横向きでは画面の右にボタンを並べる。 */
+:root {
+  --bg: #e9ebef; --fg: #1d2330; --muted: #667085; --panel: #fff; --line: #d0d5dd;
+  --accent: #1570ef; --danger: #d92d20;
+  --body: #2b303a; --body-hi: #3a414e; --btn: #454d5c; --btn-hi: #5a6475; --btn-fg: #e8ecf2;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #111418; --fg: #e4e7ec; --muted: #98a2b3; --panel: #1d222a; --line: #344054; --accent: #53b1fd; --danger: #f97066;
+    --body: #20252d; --body-hi: #2c323c; --btn: #3a414e; --btn-hi: #4d5666; }
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.5 system-ui, sans-serif;
+  display: flex; flex-direction: column; overflow: hidden; overscroll-behavior: none;
+  -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+}
+button, select { font: inherit; color: inherit; }
+
+header {
+  display: flex; align-items: center; gap: 8px; flex: none;
+  padding: calc(env(safe-area-inset-top) + 6px) calc(env(safe-area-inset-right) + 12px) 6px calc(env(safe-area-inset-left) + 12px);
+  background: var(--body); color: var(--btn-fg);
+}
+.brand { font-weight: 700; letter-spacing: .02em; }
+.status { flex: 1; min-width: 0; font-size: 12px; opacity: .8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+.badge { font-size: 11px; padding: 1px 6px; border-radius: 4px; background: var(--accent); color: #fff; }
+.badge.warn { background: var(--danger); }
+button.icon { width: 36px; height: 32px; border: 0; border-radius: 6px; background: var(--btn); color: var(--btn-fg); cursor: pointer; touch-action: manipulation; }
+button.icon:disabled { opacity: .4; }
+button.icon.on { background: var(--accent); }
+
+/* 本体: 画面とボタン */
+#device {
+  flex: 1; min-height: 0; display: flex; flex-direction: column; align-items: center; gap: 12px;
+  padding: 12px calc(env(safe-area-inset-right) + 12px) calc(env(safe-area-inset-bottom) + 12px) calc(env(safe-area-inset-left) + 12px);
+  background: linear-gradient(var(--body-hi), var(--body));
+}
+#screenBox { position: relative; flex: 1; min-height: 0; width: 100%; display: flex; align-items: center; justify-content: center; }
+canvas {
+  display: block; background: #000; image-rendering: pixelated; touch-action: none; cursor: crosshair;
+  box-shadow: 0 0 0 6px #0b0d10; border-radius: 2px;
+}
+.overlay {
+  position: absolute; inset: 0; margin: auto; max-width: 340px; height: fit-content; max-height: 100%; overflow: auto;
+  display: flex; flex-direction: column; gap: 10px; justify-content: center;
+  padding: 20px; background: var(--panel); color: var(--fg); border-radius: 12px; user-select: text; -webkit-user-select: text;
+}
+.overlay[hidden] { display: none; }
+.overlay h1 { font-size: 18px; margin: 0; }
+.overlay p { margin: 0; color: var(--muted); font-size: 13px; }
+.overlay.stop pre { white-space: pre-wrap; word-break: break-all; font-size: 12px; margin: 0; }
+.primary { display: inline-block; text-align: center; padding: 10px 14px; border: 0; border-radius: 8px; background: var(--accent); color: #fff; font-weight: 600; cursor: pointer; }
+#imageList { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+#imageList li { display: flex; gap: 6px; align-items: center; }
+#imageList .boot { flex: 1; text-align: left; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: transparent; cursor: pointer; }
+#imageList .boot small { display: block; color: var(--muted); font-size: 11px; }
+#imageList .del { border: 0; background: transparent; color: var(--muted); cursor: pointer; padding: 8px; }
+
+/* ハードウェアボタン（Pocket PC の配置: 方向パッドの左右にアプリケーションボタン） */
+#keys {
+  flex: none; display: grid; align-items: center; justify-items: center; gap: 4px 14px;
+  grid-template-columns: 1fr auto 1fr; grid-template-areas: "l d r" ". a5 .";
+  width: 100%; max-width: 380px;
+}
+.apps { display: flex; flex-direction: column; gap: 14px; }
+.apps.left { grid-area: l; } .apps.right { grid-area: r; }
+.hw {
+  border: 0; background: var(--btn); color: var(--btn-fg); cursor: pointer; touch-action: none;
+  -webkit-tap-highlight-color: transparent; box-shadow: 0 2px 0 #0006;
+}
+.hw.down-now, .hw:active { background: var(--btn-hi); transform: translateY(1px); box-shadow: none; }
+.hw.app { width: 52px; height: 40px; border-radius: 20px; font-weight: 600; }
+.hw.app5 { grid-area: a5; width: 64px; height: 26px; border-radius: 13px; font-size: 12px; }
+.dpad {
+  grid-area: d; display: grid; gap: 2px;
+  grid-template: "  .  up    .   " 44px "left center right" 44px "  .  down  .   " 44px / 44px 44px 44px;
+}
+.dpad .up { grid-area: up; border-radius: 10px 10px 2px 2px; }
+.dpad .down { grid-area: down; border-radius: 2px 2px 10px 10px; }
+.dpad .left { grid-area: left; border-radius: 10px 2px 2px 10px; }
+.dpad .right { grid-area: right; border-radius: 2px 10px 10px 2px; }
+.dpad .center { grid-area: center; border-radius: 50%; font-size: 12px; }
+
+/* 横向き（PC の窓・スマートフォンの横向き）: ボタンを画面の右に並べる */
+@media (orientation: landscape) {
+  /* 画面は左半分の右寄せ、ボタンは右半分の左寄せ（中央で並ぶ） */
+  #device { flex-direction: row; gap: 28px; }
+  #screenBox { width: auto; flex: 1; height: 100%; justify-content: flex-end; }
+  #keys { flex: 1; justify-content: start; width: auto; max-width: none; grid-template-columns: auto auto; grid-template-areas: "l r" "d d" "a5 a5"; gap: 10px 14px; }
+  .apps { flex-direction: row; }
+  .overlay { margin-right: 0; }
+}
+
+/* メニュー（右からのパネル） */
+#menu {
+  position: fixed; top: 0; right: 0; bottom: 0; width: min(360px, 100%); overflow: auto; z-index: 10;
+  padding: calc(env(safe-area-inset-top) + 52px) calc(env(safe-area-inset-right) + 12px) calc(env(safe-area-inset-bottom) + 12px) 12px;
+  background: var(--bg); box-shadow: -4px 0 16px #0004; display: grid; gap: 12px; align-content: start;
+  user-select: text; -webkit-user-select: text;
+}
+#menu[hidden] { display: none; }
+header { position: relative; z-index: 11; }
+section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+h2 { font-size: 13px; margin: 0 0 8px; color: var(--muted); font-weight: 600; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 6px; }
+section button, section select { padding: 4px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); cursor: pointer; }
+dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; margin: 0; font-variant-numeric: tabular-nums; }
+dt { color: var(--muted); } dd { margin: 0; }
+table { border-collapse: collapse; font-size: 12px; }
+td { padding: 1px 8px 1px 0; }
+kbd { font: 11px ui-monospace, monospace; border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+.note { font-size: 12px; color: var(--muted); margin: 8px 0 0; }
+#log, #uart { font: 11px/1.4 ui-monospace, monospace; white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow: auto; margin: 0; }

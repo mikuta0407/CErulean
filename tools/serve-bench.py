@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""serve-bench.py [port]: 段階2 の計測ページ（rust/web/www/bench）を配信する。
+"""serve-bench.py [port]: rust/web/www（計測ページ bench・ブラウザ版 app）を配信する。
 
 計測ページと期待値・合成プログラムだけを並べた tmp/bench-site を作って配信する
 （リポジトリ全体を配信すると tmp/images のイメージまで見えてしまうため）。
@@ -31,5 +31,5 @@ class NoCache(http.server.SimpleHTTPRequestHandler):
 
 port = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
 os.chdir(site)
-print(f"serving {site} on :{port} (open /rust/web/www/bench/)")
+print(f"serving {site} on :{port} (open /rust/web/www/app/ or /rust/web/www/bench/)")
 http.server.ThreadingHTTPServer(("", port), NoCache).serve_forever()
