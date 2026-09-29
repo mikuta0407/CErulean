@@ -135,13 +135,11 @@ impl Machine {
         self.cpu.load_state(&mut d)?;
         d.finish()?;
         let mmu_chunk = s.expect("mmu")?; // RAM の後で読む（TLB の RAM の位置は構成から決まる）
-        let c = s.expect("ram")?;
-        if c.version != 1 || c.body.len() != SDRAM_SIZE as usize {
-            return format_err("ram: bad version or size");
-        }
         let (ram, _) = self.sys.bus.ram_mut(SDRAM_BASE).expect("SDRAM is mapped");
-        ram.copy_from_slice(&c.body);
-        drop(c);
+        debug_assert_eq!(ram.len(), SDRAM_SIZE as usize);
+        if s.expect_raw_into("ram", ram)? != 1 {
+            return format_err("ram: bad version");
+        }
         {
             let super::Sys {
                 mmu, bus, board, ..

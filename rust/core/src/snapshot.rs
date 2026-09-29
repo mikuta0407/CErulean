@@ -391,6 +391,32 @@ impl<R: Read> Reader<R> {
         }))
     }
 
+    /// 次のチャンクが name で長さが dst と同じことを確かめ、本体を dst に直接読む
+    /// （RAM のような大きなチャンク用。本体の複製を作らないので、wasm の線形メモリが
+    /// 読み込みのたびに 128MB 伸びたままになるのを避けられる。§6.2）。戻り値は版数。
+    /// CRC が合わなくても dst は書き換わっているので、失敗したら呼び出し側は
+    /// その状態を捨てること。
+    pub fn expect_raw_into(&mut self, name: &str, dst: &mut [u8]) -> Result<u16, Error> {
+        let got = read_str(&mut self.r)?;
+        if got != name {
+            return format_err(format!("expected chunk {name}, found {got}"));
+        }
+        let version = u16::from_le_bytes(read_exact(&mut self.r)?);
+        let len = u64::from_le_bytes(read_exact(&mut self.r)?);
+        if len != dst.len() as u64 {
+            return format_err(format!("{name}: chunk length {len}, want {}", dst.len()));
+        }
+        self.r
+            .read_exact(dst)
+            .map_err(|_| Error::Format(format!("{name}: truncated")))?;
+        let crc = u32::from_le_bytes(read_exact(&mut self.r)?);
+        if crc32(0, dst) != crc {
+            return format_err(format!("{name}: CRC mismatch (corrupted)"));
+        }
+        self.chunks += 1;
+        Ok(version)
+    }
+
     /// 次のチャンクが name であることを確かめて読む。
     pub fn expect(&mut self, name: &str) -> Result<Chunk, Error> {
         match self.next_chunk()? {
@@ -456,6 +482,31 @@ mod tests {
         d.finish().unwrap();
         assert_eq!(r.expect("b").unwrap().body, [1, 2, 3]);
         r.expect_end().unwrap();
+    }
+
+    /// expect_raw_into は名前・長さ・CRC を確かめて本体を直接読み、チャンク数を数える
+    /// （終端の検査が通る）。
+    #[test]
+    fn raw_into() {
+        let buf = sample();
+        let mut r = Reader::new(&buf[..]).unwrap();
+        let mut dst = [0u8; 3];
+        assert!(r.expect_raw_into("a", &mut dst).is_err(), "長さ違い");
+        let mut r = Reader::new(&buf[..]).unwrap();
+        r.expect("a").unwrap();
+        assert!(r.expect_raw_into("b", &mut [0u8; 4]).is_err(), "長さ違い");
+        let mut r = Reader::new(&buf[..]).unwrap();
+        r.expect("a").unwrap();
+        assert_eq!(r.expect_raw_into("b", &mut dst).unwrap(), 1);
+        assert_eq!(dst, [1, 2, 3]);
+        r.expect_end().unwrap();
+        // 本体の 1 ビットの反転は CRC で分かる
+        let mut bad = buf.clone();
+        let pos = bad.windows(3).rposition(|w| w == [1, 2, 3]).unwrap();
+        bad[pos + 1] ^= 4;
+        let mut r = Reader::new(&bad[..]).unwrap();
+        r.expect("a").unwrap();
+        assert!(r.expect_raw_into("b", &mut dst).is_err());
     }
 
     /// 壊れた・切り詰めたファイルは panic せずエラーになる（簡易ファジング）。

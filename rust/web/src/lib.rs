@@ -133,6 +133,73 @@ pub fn jit_self_test(seed: u64, cases: u32, steps: u64) -> String {
     }
 }
 
+// ---- スナップショットの小分けの読み書き（段階3）----
+//
+// 128MB の RAM を含むスナップショットを wasm の中で 1 本の Vec に組み立てると、
+// 線形メモリがその分伸びたまま縮まない（§6.2）。JS の関数に 1MB ずつ渡す／受け取る。
+#[wasm_bindgen(inline_js = r#"
+export function snap_sink(f, b) { f(b.slice()); }
+export function snap_src(f, buf) { return f(buf); }
+"#)]
+extern "C" {
+    #[wasm_bindgen(catch)]
+    fn snap_sink(f: &JsValue, b: &[u8]) -> Result<(), JsValue>;
+    #[wasm_bindgen(catch)]
+    fn snap_src(f: &JsValue, buf: &mut [u8]) -> Result<u32, JsValue>;
+}
+
+const SNAP_PIECE: usize = 1 << 20;
+
+/// JS の関数 f(Uint8Array) に書く（1MB ずつ。渡した配列は f のもの）。
+struct JsSink<'a> {
+    f: &'a JsValue,
+    buf: Vec<u8>,
+}
+
+impl JsSink<'_> {
+    fn flush_buf(&mut self) -> std::io::Result<()> {
+        if !self.buf.is_empty() {
+            snap_sink(self.f, &self.buf).map_err(|e| std::io::Error::other(format!("{e:?}")))?;
+            self.buf.clear();
+        }
+        Ok(())
+    }
+}
+
+impl std::io::Write for JsSink<'_> {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        if self.buf.len() + data.len() > SNAP_PIECE {
+            self.flush_buf()?;
+        }
+        if data.len() >= SNAP_PIECE {
+            // 大きな書き込み（RAM）は溜めずに 1MB ずつ渡す
+            for c in data.chunks(SNAP_PIECE) {
+                snap_sink(self.f, c).map_err(|e| std::io::Error::other(format!("{e:?}")))?;
+            }
+        } else {
+            self.buf.extend_from_slice(data);
+        }
+        Ok(data.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.flush_buf()
+    }
+}
+
+/// JS の関数 f(Uint8Array) -> 読んだバイト数 から読む（0 で終わり）。
+struct JsSource<'a> {
+    f: &'a JsValue,
+}
+
+impl std::io::Read for JsSource<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = buf.len().min(SNAP_PIECE);
+        let got =
+            snap_src(self.f, &mut buf[..n]).map_err(|e| std::io::Error::other(format!("{e:?}")))?;
+        Ok((got as usize).min(n))
+    }
+}
+
 /// 1 台のマシンと予定したイベント列。
 #[wasm_bindgen]
 pub struct Emu {
@@ -199,6 +266,32 @@ impl Emu {
             .save_snapshot(&mut buf, image_id)
             .map_err(|e| JsError::new(&e.to_string()))?;
         Ok(buf)
+    }
+
+    /// 全状態を JS の関数 sink(Uint8Array) に 1MB ずつ書く（命令境界で呼ぶ）。
+    /// UART1 の送信バイトは保存されないので、先に takeUart で取り出しておくこと。
+    #[wasm_bindgen(js_name = saveSnapshotTo)]
+    pub fn save_snapshot_to(&mut self, image_id: &str, sink: JsValue) -> Result<(), JsError> {
+        let mut w = JsSink {
+            f: &sink,
+            buf: Vec::with_capacity(SNAP_PIECE),
+        };
+        self.m
+            .save_snapshot(&mut w, image_id)
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        std::io::Write::flush(&mut w).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// JS の関数 src(Uint8Array) -> 読んだバイト数 から読んで再開する（新しい Emu に
+    /// 対して呼ぶ。失敗したらその Emu は捨てる）。戻り値はイメージ ID。
+    #[wasm_bindgen(js_name = loadSnapshotFrom)]
+    pub fn load_snapshot_from(&mut self, src: JsValue) -> Result<String, JsError> {
+        self.m
+            .load_snapshot(std::io::BufReader::with_capacity(
+                SNAP_PIECE,
+                JsSource { f: &src },
+            ))
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// 入力スクリプトを予定に加える（今の命令数より前のイベントは読み飛ばす）。
@@ -380,6 +473,19 @@ impl Emu {
             .ram(SDRAM_BASE)
             .map(|(r, _)| r.to_vec())
             .unwrap_or_default()
+    }
+
+    /// SDRAM（128MB）の線形メモリ上の位置。JS は wasm の memory の上の view として
+    /// 読む（ram() と違い複製を作らない。wasm の線形メモリを伸ばさないため。§6.2）。
+    /// view は次に wasm を呼ぶまでの間だけ使うこと（メモリが伸びると無効になる）。
+    #[wasm_bindgen(js_name = ramPtr)]
+    pub fn ram_ptr(&self) -> u32 {
+        self.m
+            .sys
+            .bus
+            .ram(SDRAM_BASE)
+            .map(|(r, _)| r.as_ptr() as usize as u32)
+            .unwrap_or(0)
     }
 
     /// 画面（RGBA、行の詰め物なし）。表示が無効なら空。幅・高さは直後に
