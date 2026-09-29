@@ -125,8 +125,8 @@ impl JitHost for WebJitHost {
 pub fn jit_self_test(seed: u64, cases: u32, steps: u64) -> String {
     match jit::selftest::run(seed, cases, steps, &mut WebJitHost::boxed) {
         Ok(r) => format!(
-            "cases {} steps {} jit-executed {} blocks {} side-exits {}",
-            r.cases, r.total, r.jit_executed, r.blocks, r.side_exits
+            "cases {} steps {} jit-executed {} blocks {} side-exits {} links {}",
+            r.cases, r.total, r.jit_executed, r.blocks, r.side_exits, r.links
         ),
         Err(e) => format!("FAIL: {e}"),
     }
@@ -287,7 +287,7 @@ impl Emu {
             .map(|e| format!(r#","error":{:?}"#, e))
             .unwrap_or_default();
         format!(
-            r#"{{"blocks":{},"pages":{},"modules":{},"bytes":{},"max_func":{},"calls":{},"executed":{},"side_exits":{},"exit_page":{},"exit_thumb":{},"exit_other":{},"flushes":{}{err}}}"#,
+            r#"{{"blocks":{},"pages":{},"modules":{},"bytes":{},"max_func":{},"calls":{},"executed":{},"side_exits":{},"exit_page":{},"exit_thumb":{},"exit_other":{},"links":{},"flushes":{}{err}}}"#,
             s.blocks,
             s.pages,
             s.modules,
@@ -299,6 +299,7 @@ impl Emu {
             s.exit_page,
             s.exit_thumb,
             s.exit_other,
+            s.links,
             s.flushes
         )
     }

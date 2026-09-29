@@ -26,6 +26,7 @@ use crate::bus::{BusError, RamOff};
 use crate::cpu::{Abort, MemError};
 
 pub use code::{CodeCache, CodeMemory};
+pub(crate) use code::{VPAGE_ESZ, VPAGE_GEN, VPAGE_MASK, VPAGE_PAGE, VPAGE_VA};
 pub use disasm::{disasm, disasm_thumb};
 pub use idle::{POLL_LOOP_LEN, PollState};
 pub use ir::{Instr, Op, decode_instr};
@@ -277,6 +278,15 @@ pub trait System {
     /// 呼ぶ。コンパイル済みのブロックなら実行する。
     fn jit_run(&mut self, _cpu: &mut Cpu) -> JitRun {
         JitRun::No
+    }
+
+    /// PC が実行中のページにないときに、そのページをデコードキャッシュで引き当てて
+    /// pc の命令を返す（fetch_arm の「code_cur_va と違う」経路のうち、キャッシュを
+    /// 引き当てる部分だけ。TLB ミスなど引き当てられなければ None で、何も変えない）。
+    /// JIT ありの実行ループが、ページをまたいだ直後の命令からブロックとして JIT に
+    /// 入るために使う。既定は None。
+    fn enter_page(&mut self, _pc: u32) -> Option<Instr> {
+        None
     }
 }
 
@@ -619,6 +629,20 @@ impl Cpu {
                 } else {
                     self.run_page(sys, ins)?;
                 }
+                continue;
+            }
+            // JIT ありでは、ページをまたいだ直後の命令（分岐先）も step_one に回さず、
+            // ページを引き当ててブロックの先頭として JIT に入る（step_one に回すと
+            // 分岐先の次の命令から JIT に入ることになり、ブロックの途中の入口が
+            // 増えていた。2026-09-29 の計測）。引き当ては step_one の fetch_arm と
+            // 同じ処理なので結果は変わらない。JIT なしの経路は変えない（上と同じ形）。
+            if JIT
+                && !self.hist.enabled()
+                && self.cpsr & FLAG_T == 0
+                && !self.interrupt_pending(sys)
+                && let Some(ins) = sys.enter_page(self.regs[15])
+            {
+                self.run_page_jit(sys, ins)?;
                 continue;
             }
             let r = self.step_one(sys);

@@ -75,6 +75,15 @@ struct VpageEnt {
 
 const VPAGE_BITS: u32 = 6;
 
+// JIT の生成コードが vpages と JIT の枠を読む（ブロックの連結。jit/codegen.rs）ための配置。
+pub(crate) const VPAGE_MASK: u32 = (1 << VPAGE_BITS) - 1;
+pub(crate) const VPAGE_ESZ: u32 = std::mem::size_of::<VpageEnt>() as u32;
+pub(crate) const VPAGE_VA: u32 = std::mem::offset_of!(VpageEnt, va) as u32;
+pub(crate) const VPAGE_GEN: u32 = std::mem::offset_of!(VpageEnt, generation) as u32;
+pub(crate) const VPAGE_PAGE: u32 = std::mem::offset_of!(VpageEnt, page) as u32;
+// 枠の表の要素（Option<Box<[u32; 1024]>>）は、None が 0 のポインタ 1 個として読む。
+const _: () = assert!(std::mem::size_of::<JitSlots>() == std::mem::size_of::<usize>());
+
 /// デコードキャッシュ。
 pub struct CodeCache {
     /// 物理ページ番号 → pages の添字
@@ -232,6 +241,16 @@ impl CodeCache {
     pub fn jit_slot(&mut self, pc: u32) -> &mut u32 {
         let s = &mut self.jit[self.cur as usize];
         &mut s.get_or_insert_with(|| Box::new([0; 1024]))[((pc >> 2) & 0x3FF) as usize]
+    }
+
+    /// 生成コードが連結に読む vpages の先頭と、JIT の枠の表（pages と同じ添字の
+    /// Option<Box<[u32; 1024]>>）の先頭のアドレス（wasm32 でだけ意味がある）。
+    /// 呼び出しの間、Rust はこれらを変えない（表の伸び・枠の作成は Rust の経路だけ）。
+    pub(crate) fn jit_link_addrs(&self) -> (u32, u32) {
+        (
+            self.vpages.as_ptr() as usize as u32,
+            self.jit.as_ptr() as usize as u32,
+        )
     }
 
     /// ページ page の関数を作った回数。

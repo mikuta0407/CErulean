@@ -41,6 +41,7 @@ pub struct Report {
     pub total: u64,
     pub blocks: u64,
     pub side_exits: u64,
+    pub links: u64,
 }
 
 /// seed から cases 件の差分テストを行う。host は JIT のホストを作る。
@@ -101,6 +102,11 @@ pub fn run(
     rep.jit_executed = st.executed;
     rep.blocks = st.blocks;
     rep.side_exits = st.side_exits;
+    rep.links = st.links;
+    // 連結（段階5-3）の経路が試されたこと。
+    if st.links == 0 {
+        return Err("no links (RET_LINK) happened".into());
+    }
     if let Some(e) = a.jit().error() {
         return Err(format!("jit disabled: {e}"));
     }

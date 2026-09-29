@@ -284,6 +284,14 @@ impl System for Sys {
     fn jit_on(&self) -> bool {
         self.jit.enabled()
     }
+    fn enter_page(&mut self, pc: u32) -> Option<Instr> {
+        let Sys { mmu, bus, code, .. } = self;
+        let mut cm = CodeMem {
+            mmu,
+            arena: bus.arena(),
+        };
+        code.enter(pc, &mut cm)
+    }
     fn jit_run(&mut self, cpu: &mut Cpu) -> JitRun {
         let Sys {
             mmu,

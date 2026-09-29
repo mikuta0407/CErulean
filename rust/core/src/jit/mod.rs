@@ -60,7 +60,24 @@ pub(crate) struct JitCtx {
     pub remaining: u32,
     /// 出力: 実行した命令数
     pub executed: u32,
+    /// 連結（段階5-3）: デコードキャッシュの vpages・JIT の枠の表の先頭、変換の世代
+    /// （下位・上位）、連結してよいか（書き込みで捨てるページが溜まっていない）
+    pub vpages: u32,
+    pub jit_tab: u32,
+    pub gen_lo: u32,
+    pub gen_hi: u32,
+    pub link_ok: u32,
+    /// 出力: 連結する関数の番号（戻り値が LINK のとき）
+    pub next: u32,
 }
+
+// 生成関数の戻り値。
+pub(crate) const RET_NORMAL: u32 = 0;
+pub(crate) const RET_SIDE: u32 = 1;
+/// 次の PC がコンパイル済みのブロックの先頭（同じページの別の関数か、Rust が
+/// ページに入るときと同じ判定で引き当てた別のページ）。Rust は実行ループに戻らずに
+/// ctx.next の関数を続けて呼ぶ。
+pub(crate) const RET_LINK: u32 = 2;
 
 // デコードキャッシュのページの枠（命令ごとの u32）の値:
 //   0〜QUEUED-1: 未コンパイル（ブロックの先頭として入った回数）
@@ -105,6 +122,8 @@ pub struct JitStats {
     pub exit_page: u64,
     pub exit_thumb: u64,
     pub exit_other: u64,
+    /// 連結して続けて呼んだ回数（calls に含まない）
+    pub links: u64,
 }
 
 /// JIT の管理。
@@ -200,7 +219,7 @@ impl Jit {
         let slot = code.jit_slot(pc);
         let v = *slot;
         if v & COMPILED != 0 {
-            return Action::Ran(self.call(v & !COMPILED, cpu, mmu, arena, run));
+            return Action::Ran(self.call(v & !COMPILED, cpu, mmu, arena, run, code));
         }
         if v == QUEUED {
             // コンパイル待ちのブロックに何度も入るなら、batch に満たなくてもすぐ
@@ -250,15 +269,18 @@ impl Jit {
         mmu: &Mmu,
         arena: &mut [u8],
         run: &mut RunCtl,
+        code: &CodeCache,
     ) -> JitRun {
         let Some(host) = &mut self.host else {
             return JitRun::No;
         };
         let (perm_r, perm_w) = mmu.jit_perms();
+        let (vpages, jit_tab) = code.jit_link_addrs();
+        let generation = mmu.code_gen();
         // 生成コードは、ここで渡すアドレス（呼ぶ直前に &mut から作ったもの）を
-        // 通してだけ cpu.regs・cpu.cpsr・アリーナを書き換え、TLB を読む。呼び出しの
-        // 間 Rust の側はこれらの参照を使わない。書き換えの正しさは差分テスト
-        // （selftest）と基準シナリオで確かめる。
+        // 通してだけ cpu.regs・cpu.cpsr・アリーナを書き換え、TLB・vpages・JIT の枠を
+        // 読む。呼び出しの間 Rust の側はこれらの参照を使わない。書き換えの正しさは
+        // 差分テスト（selftest）と基準シナリオで確かめる。
         self.ctx = JitCtx {
             regs: addr(cpu.regs.as_mut_ptr()),
             cpsr: addr(&raw mut cpu.cpsr),
@@ -267,14 +289,37 @@ impl Jit {
             pid: mmu.pid,
             perm_r: perm_r as u32,
             perm_w: perm_w as u32,
-            remaining: run.budget.saturating_sub(run.n).min(u32::MAX as u64) as u32,
+            remaining: 0,
             executed: 0,
+            vpages,
+            jit_tab,
+            gen_lo: generation as u32,
+            gen_hi: (generation >> 32) as u32,
+            link_ok: !mmu.code_invalidated_pending() as u32,
+            next: 0,
         };
-        // ctx は生成コードが executed を書くので、&mut から作ったアドレスを渡す。
-        let pc0 = cpu.regs[15];
-        let side = host.call(func, addr(&raw mut self.ctx)) != 0;
+        let mut func = func;
+        let (side, last) = loop {
+            self.ctx.remaining = run.budget.saturating_sub(run.n).min(u32::MAX as u64) as u32;
+            self.ctx.executed = 0;
+            let pc0 = cpu.regs[15];
+            // ctx は生成コードが executed・next を書くので、&mut から作ったアドレスを渡す。
+            let ret = host.call(func, addr(&raw mut self.ctx));
+            let e = self.ctx.executed as u64;
+            run.n += e;
+            self.stats.executed += e;
+            if ret == RET_LINK {
+                // 連結: 生成コードは MMU・ページの中身・割り込み線・期限を変えないので、
+                // Rust が入口で確かめた条件（割り込みなし・ARM 状態）は続いている。
+                // 上限は ctx.remaining を入れ直して各ブロックの入口で確かめる。
+                self.stats.links += 1;
+                func = self.ctx.next;
+                continue;
+            }
+            break (ret == RET_SIDE, (pc0, e));
+        };
         if !side {
-            if (cpu.regs[15] ^ pc0) & !0xFFF != 0 {
+            if (cpu.regs[15] ^ last.0) & !0xFFF != 0 {
                 self.stats.exit_page += 1;
             } else if cpu.cpsr & crate::arm::FLAG_T != 0 {
                 self.stats.exit_thumb += 1;
@@ -282,13 +327,10 @@ impl Jit {
                 self.stats.exit_other += 1;
             }
         }
-        let executed = self.ctx.executed as u64;
-        run.n += executed;
         self.stats.calls += 1;
-        self.stats.executed += executed;
         self.stats.side_exits += side as u64;
         JitRun::Ran {
-            resume: side || executed == 0,
+            resume: side || last.1 == 0,
         }
     }
 

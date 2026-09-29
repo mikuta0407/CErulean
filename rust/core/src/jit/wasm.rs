@@ -118,6 +118,9 @@ impl Func {
     pub fn load(&mut self, offset: u32) -> &mut Self {
         self.op(0x28).memarg(2, offset)
     }
+    pub fn i64_load(&mut self, offset: u32) -> &mut Self {
+        self.op(0x29).memarg(3, offset)
+    }
     pub fn load8_u(&mut self, offset: u32) -> &mut Self {
         self.op(0x2D).memarg(0, offset)
     }
@@ -151,6 +154,9 @@ impl Func {
     }
     pub fn i64_extend_s(&mut self) -> &mut Self {
         self.op(0xAC)
+    }
+    pub fn i64_eq(&mut self) -> &mut Self {
+        self.op(0x51)
     }
     pub fn i64_add(&mut self) -> &mut Self {
         self.op(0x7C)

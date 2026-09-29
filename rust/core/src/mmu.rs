@@ -794,6 +794,11 @@ impl Mmu {
         }
     }
 
+    /// デコード結果を捨てるべき物理ページが溜まっているか（JIT の連結の条件）。
+    pub fn code_invalidated_pending(&self) -> bool {
+        !self.code_invalidated.is_empty()
+    }
+
     /// デコード結果を捨てるべき物理ページを取り出す（CPU がページに入るときに呼ぶ）。
     pub fn take_code_invalidated(&mut self) -> Option<u32> {
         self.code_invalidated.pop()

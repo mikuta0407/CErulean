@@ -15,7 +15,9 @@
 //!     ブロックの先頭なら、Rust に戻らずに続けて実行する（ブロックの連結）。
 //!     Thumb に切り替わった・ページを出た・ブロックの先頭でない場合は戻る。
 //!   - 戻るときは書き換えたレジスタと CPSR を書き戻し、regs[15] に次の PC を、
-//!     ctx.executed に実行した命令数を入れ、サイド出口なら 1、でなければ 0 を返す。
+//!     ctx.executed に実行した命令数を入れ、サイド出口なら RET_SIDE を返す。
+//!     でなければ、次の PC が別の関数のブロックの先頭なら ctx.next にその関数を入れて
+//!     RET_LINK（Rust がすぐ続けて呼ぶ。段階5-3）、それ以外は RET_NORMAL を返す。
 //!
 //! 同じ仮想ページの中を続けて実行してよい理由: 生成コードは MMU の状態・ページの
 //! 中身（コードページへのストアは出口）・割り込み線・期限を変えないので、Rust が
@@ -26,11 +28,12 @@
 //! 扱う（同じ物理ページが別の仮想アドレスに見えていても、同じ生成コードが正しく
 //! 動くように）。
 
-use super::JitCtx;
 use super::wasm::{Func, Local};
+use super::{COMPILED, JitCtx, RET_LINK, RET_NORMAL, RET_SIDE};
 use crate::arm::{FLAG_T, Instr, Op};
 use crate::arm::{OP_ADC, OP_ADD, OP_AND, OP_BIC, OP_CMN, OP_CMP, OP_EOR, OP_MOV, OP_MVN};
 use crate::arm::{OP_ORR, OP_RSB, OP_RSC, OP_SBC, OP_SUB, OP_TEQ, OP_TST};
+use crate::arm::{VPAGE_ESZ, VPAGE_GEN, VPAGE_MASK, VPAGE_PAGE, VPAGE_VA};
 use crate::mmu::{NO_RAM, TLB_SIZE, TLB_VALID, TlbEntry};
 
 /// ブロックの最大の長さ（命令数）。生成関数を小さく保つため。
@@ -272,6 +275,14 @@ const CTX_PERM_R: u32 = std::mem::offset_of!(JitCtx, perm_r) as u32;
 const CTX_PERM_W: u32 = std::mem::offset_of!(JitCtx, perm_w) as u32;
 const CTX_REMAINING: u32 = std::mem::offset_of!(JitCtx, remaining) as u32;
 const CTX_EXECUTED: u32 = std::mem::offset_of!(JitCtx, executed) as u32;
+const CTX_VPAGES: u32 = std::mem::offset_of!(JitCtx, vpages) as u32;
+const CTX_JIT_TAB: u32 = std::mem::offset_of!(JitCtx, jit_tab) as u32;
+const CTX_GEN_LO: u32 = std::mem::offset_of!(JitCtx, gen_lo) as u32;
+const CTX_LINK_OK: u32 = std::mem::offset_of!(JitCtx, link_ok) as u32;
+const CTX_NEXT: u32 = std::mem::offset_of!(JitCtx, next) as u32;
+// 世代は gen_lo・gen_hi を続けて 1 つの i64（リトルエンディアン）として読む。
+const _: () =
+    assert!(std::mem::offset_of!(JitCtx, gen_hi) == std::mem::offset_of!(JitCtx, gen_lo) + 4);
 const TLB_ESZ: u32 = std::mem::size_of::<TlbEntry>() as u32;
 const TLB_TAG: u32 = std::mem::offset_of!(TlbEntry, tag) as u32;
 const TLB_PERM: u32 = std::mem::offset_of!(TlbEntry, perm) as u32;
@@ -629,7 +640,62 @@ pub(crate) fn gen_page(blocks: &[(u32, Vec<Instr>)]) -> Func {
     }
     f.get(REGS).get(NPC).store(60);
     f.get(CTX).get(EXEC).store(CTX_EXECUTED);
-    f.get(SIDEF).ret();
+    f.get(SIDEF).if_().i32(RET_SIDE).ret().end();
+    // 連結（段階5-3）: 次の PC が別の関数のブロックの先頭なら、その関数の番号を
+    // ctx.next に入れて RET_LINK を返す。引き当ては CodeCache::enter の vpages が
+    // 当たる場合と同じ判定（仮想ページと変換の世代が一致）で、枠が COMPILED の
+    // ときだけ。書き込みで捨てるページが溜まっていれば（link_ok = 0）連結しない
+    // （enter はそれを先に捨てるので）。Thumb に切り替わったときもしない。
+    f.get(CTX).load(CTX_LINK_OK);
+    f.get(CTX).load(CTX_CPSR).load(0).i32(FLAG_T).and().eqz();
+    f.and().if_();
+    f.get(NPC)
+        .i32(12)
+        .shr_u()
+        .i32(VPAGE_MASK)
+        .and()
+        .i32(VPAGE_ESZ)
+        .mul()
+        .get(CTX)
+        .load(CTX_VPAGES)
+        .add()
+        .tee(T0);
+    f.load(VPAGE_VA).get(NPC).i32(!0xFFF).and().eq();
+    f.get(T0)
+        .i64_load(VPAGE_GEN)
+        .get(CTX)
+        .i64_load(CTX_GEN_LO)
+        .i64_eq();
+    f.and().if_();
+    // 枠の表の要素（None は 0）
+    f.get(T0)
+        .load(VPAGE_PAGE)
+        .i32(4)
+        .mul()
+        .get(CTX)
+        .load(CTX_JIT_TAB)
+        .add()
+        .load(0)
+        .tee(T1)
+        .if_();
+    f.get(T1)
+        .get(NPC)
+        .i32(2)
+        .shr_u()
+        .i32(0x3FF)
+        .and()
+        .i32(4)
+        .mul()
+        .add()
+        .load(0)
+        .tee(T2)
+        .i32(COMPILED)
+        .and()
+        .if_();
+    f.get(CTX).get(T2).i32(!COMPILED).and().store(CTX_NEXT);
+    f.i32(RET_LINK).ret();
+    f.end().end().end().end();
+    f.i32(RET_NORMAL).ret();
     f.end(); // $L（ここには来ないが、関数の型に合わせて値を置く）
     f.i32(0);
     g.f
