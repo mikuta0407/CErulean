@@ -252,8 +252,10 @@ const T4: Local = 18;
 const T5: Local = 19;
 const T6: Local = 20;
 const T7: Local = 21;
+/// サイド出口の位置（命令番号 | ブロック内の実行済み命令数 << 10。共通の出口が読む）
+const EXK: Local = 22;
 /// r0〜r14（r15 はローカルに持たない。読みは PAGE からの定数の差分）
-const R0: Local = 22;
+const R0: Local = 23;
 const NUM_LOCALS: u32 = R0 + 15;
 
 const fn r(n: u8) -> Local {
@@ -443,6 +445,82 @@ fn is_mem(op: Op) -> bool {
     )
 }
 
+/// 補助関数の番号（モジュールの中の関数番号。wasm::module に helpers() の順で渡す）。
+const HELPER_LOAD: u32 = 0;
+const HELPER_STORE: u32 = 1;
+
+/// 生成関数から呼ぶ補助関数（(引数の数, 関数)）。どのモジュールにも同じものを入れる。
+///
+/// TLB を引く `(va, tlb, pid, perm, arena) -> アリーナ上のアドレス（外れなら 0）`。
+/// 読み（ram）と書き（wram）の 2 つ。MMU の fast path と同じ条件でヒットを判定し、
+/// TLB は読むだけ。アリーナは Rust のヒープ上にあるので、ヒットのアドレスは 0 に
+/// ならない。
+pub(crate) fn helpers() -> Vec<(u32, Func)> {
+    const VA: Local = 0;
+    const TLB_P: Local = 1;
+    const PID_P: Local = 2;
+    const PERM_P: Local = 3;
+    const ARENA_P: Local = 4;
+    const MVA: Local = 5;
+    const E: Local = 6;
+    let tlb = |write: bool| {
+        let mut f = Func::new(2);
+        // MVA（FCSE: VA < 32MB は PID を OR する）
+        f.get(VA)
+            .get(PID_P)
+            .or()
+            .get(VA)
+            .get(VA)
+            .i32(0x0200_0000)
+            .lt_u()
+            .select()
+            .set(MVA);
+        // エントリ（直接マップ、添字は MVA[21:12]）
+        f.get(MVA)
+            .i32(12)
+            .shr_u()
+            .i32(TLB_SIZE as u32 - 1)
+            .and()
+            .i32(TLB_ESZ)
+            .mul()
+            .get(TLB_P)
+            .add()
+            .tee(E);
+        f.load(TLB_TAG)
+            .get(MVA)
+            .i32(12)
+            .shr_u()
+            .i32(TLB_VALID)
+            .or()
+            .ne()
+            .if_()
+            .i32(0)
+            .ret()
+            .end();
+        f.get(E)
+            .load8_u(TLB_PERM)
+            .get(PERM_P)
+            .and()
+            .eqz()
+            .if_()
+            .i32(0)
+            .ret()
+            .end();
+        f.get(E)
+            .load(if write { TLB_WRAM } else { TLB_RAM })
+            .tee(E)
+            .i32(NO_RAM)
+            .eq()
+            .if_()
+            .i32(0)
+            .ret()
+            .end();
+        f.get(ARENA_P).get(E).add().get(VA).i32(0xFFF).and().add();
+        (5, f)
+    };
+    vec![tlb(false), tlb(true)]
+}
+
 struct Gen {
     f: Func,
     /// 実行中のブロックの先頭の命令番号
@@ -495,27 +573,49 @@ pub(crate) fn gen_page(blocks: &[(u32, Vec<Instr>)]) -> Func {
             f.get(REGS).load(4 * x as u32).set(r(x));
         }
     }
-    // loop $L { block $exit { block $c(n-1) … block $c0 { br_table } ブロック 0 …
-    // ブロック n-1 } 出口 }。ブロック k は $c(k) の end の直後に置く。
+    // loop $L { block $exit { block $side { block $c(n-1) … block $c0 { br_table }
+    // ブロック 0 … ブロック n-1 } 共通のサイド出口 } 出口 }。ブロック k は $c(k) の
+    // end の直後に置く。
     f.loop_();
+    f.block();
     f.block();
     for _ in 0..n {
         f.block();
     }
-    // 命令番号 → ブロック（ブロックの先頭でなければ $exit）
-    let mut table = vec![n; 1024];
+    // 命令番号 → ブロック（ブロックの先頭でなければ $exit）。表は関数内の先頭の
+    // 命令番号の範囲だけにする（範囲外は引き算で大きな値になり既定の $exit へ）。
+    let lo = blocks.iter().map(|b| b.0).min().unwrap_or(0);
+    let hi = blocks.iter().map(|b| b.0).max().unwrap_or(0);
+    let mut table = vec![n + 1; (hi - lo + 1) as usize];
     for (k, (idx, _)) in blocks.iter().enumerate() {
-        table[*idx as usize] = k as u32;
+        table[(*idx - lo) as usize] = k as u32;
     }
     f.get(NPC).i32(2).shr_u().i32(0x3FF).and();
-    f.br_table(&table, n);
+    if lo != 0 {
+        f.i32(lo).sub();
+    }
+    f.br_table(&table, n + 1);
     for (k, (idx, b)) in blocks.iter().enumerate() {
         g.f.end();
         g.base = *idx;
-        // ここで $exit までに囲むのは $c(k+1)…$c(n-1)
-        g.depth = n - 1 - k as u32;
+        // ここで $exit までに囲むのは $c(k+1)…$c(n-1) と $side
+        g.depth = n - k as u32;
         g.block(b);
     }
+    g.f.end(); // $side
+    // 共通のサイド出口（各所は EXK を入れて $side へ分岐する。出口の命令列を
+    // 各所に展開すると関数が大きくなり、V8 の最適化コンパイルの作業領域が増える）
+    let f = &mut g.f;
+    f.get(PAGE)
+        .get(EXK)
+        .i32(0x3FF)
+        .and()
+        .i32(2)
+        .shl()
+        .add()
+        .set(NPC);
+    f.get(EXEC).get(EXK).i32(10).shr_u().add().set(EXEC);
+    f.i32(1).set(SIDEF);
     g.f.end(); // $exit
     // 出口: 書き戻して戻る
     let f = &mut g.f;
@@ -533,6 +633,19 @@ pub(crate) fn gen_page(blocks: &[(u32, Vec<Instr>)]) -> Func {
     f.end(); // $L（ここには来ないが、関数の型に合わせて値を置く）
     f.i32(0);
     g.f
+}
+
+/// ブロック 1 つ（form_block の結果、空でない）を生成したときの命令列の大きさ
+/// （関数の入口・振り分け・出口を除く。関数を上限の大きさで分ける目安）。
+pub(crate) fn block_size(idx: u32, b: &[Instr]) -> usize {
+    let mut g = Gen {
+        f: Func::new(NUM_LOCALS),
+        base: idx,
+        depth: 1,
+        pc8: false,
+    };
+    g.block(b);
+    g.f.len()
 }
 
 impl Gen {
@@ -560,15 +673,11 @@ impl Gen {
         self.f.br(self.depth);
     }
 
-    /// サイド出口: ブロックの k 命令目の手前で戻る（k 命令は実行済み）。
+    /// サイド出口: ブロックの k 命令目の手前で戻る（k 命令は実行済み）。共通の出口
+    /// （$side。$exit の 1 つ内側）で NPC・EXEC・SIDEF を入れる。
     fn side_exit(&mut self, k: u32) {
-        self.pc(k);
-        self.f.set(NPC);
-        if k != 0 {
-            self.f.get(EXEC).i32(k).add().set(EXEC);
-        }
-        self.f.i32(1).set(SIDEF);
-        self.br_exit();
+        self.f.i32((self.base + k) | (k << 10)).set(EXK);
+        self.f.br(self.depth - 1);
     }
 
     /// if を開く（side_exit の深さに数える）。
@@ -738,57 +847,17 @@ impl Gen {
 
     /// ソフト TLB を引き、ヒット（権限あり・RAM）ならアリーナ上のアドレスを積む。
     /// 仮想アドレスは T1（ワードなら 4 の倍数に揃えたもの）。外れならサイド出口。
+    /// 引くのは補助関数（helpers。アクセスごとに展開すると関数が大きくなるため）。
     fn mem_addr(&mut self, k: u32, write: bool) {
         let f = &mut self.f;
-        // MVA（FCSE: VA < 32MB は PID を OR する）
-        f.get(T1)
-            .get(PID)
-            .or()
-            .get(T1)
-            .get(T1)
-            .i32(0x0200_0000)
-            .lt_u()
-            .select();
-        f.set(T2);
-        // エントリ（直接マップ、添字は MVA[21:12]）
-        f.get(T2)
-            .i32(12)
-            .shr_u()
-            .i32(TLB_SIZE as u32 - 1)
-            .and()
-            .i32(TLB_ESZ)
-            .mul();
-        f.get(TLB).add().tee(T3);
-        f.load(TLB_TAG)
-            .get(T2)
-            .i32(12)
-            .shr_u()
-            .i32(TLB_VALID)
-            .or()
-            .ne();
+        f.get(T1).get(TLB).get(PID);
+        f.get(if write { PERM_W } else { PERM_R }).get(ARENA);
+        f.call(if write { HELPER_STORE } else { HELPER_LOAD });
+        f.tee(T3).eqz();
         self.open_if();
         self.side_exit(k);
         self.close_if();
-        let f = &mut self.f;
-        f.get(T3)
-            .load8_u(TLB_PERM)
-            .get(if write { PERM_W } else { PERM_R })
-            .and()
-            .eqz();
-        self.open_if();
-        self.side_exit(k);
-        self.close_if();
-        let f = &mut self.f;
-        f.get(T3)
-            .load(if write { TLB_WRAM } else { TLB_RAM })
-            .tee(T3)
-            .i32(NO_RAM)
-            .eq();
-        self.open_if();
-        self.side_exit(k);
-        self.close_if();
-        let f = &mut self.f;
-        f.get(ARENA).get(T3).add().get(T1).i32(0xFFF).and().add();
+        self.f.get(T3);
     }
 
     /// LDM/STM（ldm_ok の形）。exec_ldm_stm の「1 ページ内・TLB ヒット」の経路と同じ
@@ -1604,6 +1673,7 @@ mod tests {
             assert!(supported(&i), "{w:08X} -> {:?}", i.op);
             seen.insert(i.op as u8);
             gen_page(&[(0, vec![i])]);
+            let _ = helpers();
         }
         let all: std::collections::BTreeSet<u8> = JIT_OPS.iter().map(|&o| o as u8).collect();
         assert_eq!(seen, all);

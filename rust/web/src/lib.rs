@@ -287,11 +287,12 @@ impl Emu {
             .map(|e| format!(r#","error":{:?}"#, e))
             .unwrap_or_default();
         format!(
-            r#"{{"blocks":{},"pages":{},"modules":{},"bytes":{},"calls":{},"executed":{},"side_exits":{},"exit_page":{},"exit_thumb":{},"exit_other":{},"flushes":{}{err}}}"#,
+            r#"{{"blocks":{},"pages":{},"modules":{},"bytes":{},"max_func":{},"calls":{},"executed":{},"side_exits":{},"exit_page":{},"exit_thumb":{},"exit_other":{},"flushes":{}{err}}}"#,
             s.blocks,
             s.pages,
             s.modules,
             s.bytes,
+            s.max_func,
             s.calls,
             s.executed,
             s.side_exits,

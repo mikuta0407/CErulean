@@ -22,7 +22,7 @@ mod codegen;
 pub mod selftest;
 mod wasm;
 
-use crate::arm::{CodeCache, CodeMemory, Cpu, JitRun, RunCtl};
+use crate::arm::{CodeCache, CodeMemory, Cpu, Instr, JitRun, RunCtl};
 use crate::mmu::Mmu;
 
 /// 生成したモジュールの読み込みと呼び出し（web クレートが実装する）。
@@ -75,15 +75,23 @@ const COMPILED: u32 = 0x8000_0000;
 /// TODO: iOS Safari のメモリ予算を計測して決める（段階5-4）。
 const CODE_LIMIT: u64 = 32 << 20;
 
+/// 生成関数 1 つの命令列の大きさの目安の上限（バイト数。ブロック 1 つがこれを超える
+/// ときはそのブロックだけの関数にする）。
+const FUNC_LIMIT: usize = 8 << 10;
+
 /// 計測・試験用の数。
 #[derive(Clone, Debug, Default)]
 pub struct JitStats {
     /// 生成したブロックの数（ページの作り直しで同じブロックを何度も数える）
     pub blocks: u64,
-    /// 作った関数（ページ単位。作り直しを含む）・モジュール・バイト数の累計
+    /// 作った関数（ページ単位。大きさの上限で分けたもの・作り直しを含む）・モジュール・
+    /// バイト数の累計
     pub pages: u64,
     pub modules: u64,
     pub bytes: u64,
+    /// 作った関数の本体の最大のバイト数（V8 の最適化コンパイルの作業領域は関数の
+    /// 大きさで決まるので、メモリの目安にする。段階5-4）
+    pub max_func: u64,
     /// ブロックに入った回数・その中で実行した命令数・サイド出口の回数
     pub calls: u64,
     pub executed: u64,
@@ -366,14 +374,41 @@ impl Jit {
             old.sort_unstable();
             old.dedup();
             code.bump_jit_level(page);
-            funcs.push(codegen::gen_page(&blocks));
             self.stats.blocks += blocks.len() as u64;
-            targets.push((page, blocks.iter().map(|b| b.0).collect::<Vec<_>>(), old));
+            // 関数の大きさに上限を設けて、ページのブロックを先頭の命令番号の順に
+            // 分ける（V8 の最適化コンパイルの作業領域は関数の大きさとともに急に増え、
+            // 大きなページ関数で RSS が数百 MB 増えた。段階5-4 の計測）。別の関数の
+            // ブロックへは Rust に戻ってから入り直す。大きさはブロックの本体の
+            // 大きさの和で見積もる（入口の読み込み・振り分けの表・出口は含めない）。
+            let mut groups: Vec<Vec<(u32, Vec<Instr>)>> = vec![];
+            let mut size = 0;
+            for b in blocks {
+                let est = codegen::block_size(b.0, &b.1);
+                match groups.last_mut() {
+                    Some(g) if size + est <= FUNC_LIMIT => g.push(b),
+                    _ => {
+                        groups.push(vec![b]);
+                        size = 0;
+                    }
+                }
+                size += est;
+            }
+            for g in groups {
+                let f = codegen::gen_page(&g);
+                self.stats.max_func = self.stats.max_func.max(f.len() as u64);
+                funcs.push(f);
+                // 古い関数は最初のグループの分として捨てる
+                targets.push((
+                    page,
+                    g.iter().map(|b| b.0).collect::<Vec<_>>(),
+                    std::mem::take(&mut old),
+                ));
+            }
         }
         if funcs.is_empty() {
             return;
         }
-        let bytes = wasm::module(&funcs);
+        let bytes = wasm::module(&codegen::helpers(), &funcs);
         if self.loaded + bytes.len() as u64 > CODE_LIMIT {
             // 全部捨てる（作り直したページの古い関数も消える。枠も 0 に戻るので、
             // 今回のページの枠だけ下で入れ直す）。

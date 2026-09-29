@@ -22,12 +22,17 @@ pub type Local = u32;
 const BLOCK_EMPTY: u8 = 0x40;
 
 impl Func {
-    /// locals 個の i32 ローカル（番号 1..=locals）を持つ関数。
+    /// locals 個の i32 ローカル（番号は引数の後から。生成関数なら 1..=locals）を持つ関数。
     pub fn new(locals: u32) -> Func {
         Func {
             locals,
             code: Vec::with_capacity(256),
         }
+    }
+
+    /// 命令列のバイト数。
+    pub fn len(&self) -> usize {
+        self.code.len()
     }
 
     fn op(&mut self, b: u8) -> &mut Self {
@@ -83,6 +88,13 @@ impl Func {
     }
     pub fn select(&mut self) -> &mut Self {
         self.op(0x1B)
+    }
+
+    /// 関数番号 func（モジュールの中の番号。補助関数は 0 から）を呼ぶ。
+    pub fn call(&mut self, func: u32) -> &mut Self {
+        self.op(0x10);
+        uleb(&mut self.code, func);
+        self
     }
 
     // ---- 変数 ----
@@ -230,15 +242,22 @@ impl Func {
 
 const I32: u8 = 0x7F;
 
-/// 関数の列からモジュールのバイト列を作る。
-pub fn module(funcs: &[Func]) -> Vec<u8> {
-    let n = funcs.len() as u32;
+/// 補助関数（(引数の数, 関数)。生成関数から call で呼ぶ）と生成関数の列から
+/// モジュールのバイト列を作る。
+pub fn module(helpers: &[(u32, Func)], funcs: &[Func]) -> Vec<u8> {
+    let (h, n) = (helpers.len() as u32, funcs.len() as u32);
     let mut m = vec![0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00];
 
-    // type: (i32) -> i32
+    // type: 0 = (i32) -> i32、1+i = 補助関数 i の型
     section(&mut m, 1, |s| {
-        uleb(s, 1);
+        uleb(s, 1 + h);
         s.extend_from_slice(&[0x60, 1, I32, 1, I32]);
+        for (params, _) in helpers {
+            s.push(0x60);
+            uleb(s, *params);
+            s.extend(std::iter::repeat_n(I32, *params as usize));
+            s.extend_from_slice(&[1, I32]);
+        }
     });
     // import: e.m（メモリ、最小 0 ページ・最大なし。本体のメモリの大きさに依らず合う）
     section(&mut m, 2, |s| {
@@ -247,26 +266,29 @@ pub fn module(funcs: &[Func]) -> Vec<u8> {
         name(s, "m");
         s.extend_from_slice(&[0x02, 0x00, 0x00]);
     });
-    // function: すべて型 0
+    // function: 補助関数、生成関数（型 0）の順
     section(&mut m, 3, |s| {
-        uleb(s, n);
+        uleb(s, h + n);
+        for i in 0..h {
+            uleb(s, 1 + i);
+        }
         for _ in 0..n {
             uleb(s, 0);
         }
     });
-    // export: "0".."n-1"
+    // export: 生成関数を "0".."n-1"
     section(&mut m, 7, |s| {
         uleb(s, n);
         for i in 0..n {
             name(s, &i.to_string());
             s.push(0x00);
-            uleb(s, i);
+            uleb(s, h + i);
         }
     });
     // code
     section(&mut m, 10, |s| {
-        uleb(s, n);
-        for f in funcs {
+        uleb(s, h + n);
+        for f in helpers.iter().map(|(_, f)| f).chain(funcs) {
             let b = f.body();
             uleb(s, b.len() as u32);
             s.extend_from_slice(&b);
@@ -366,7 +388,7 @@ mod tests {
     fn module_layout() {
         let mut f = Func::new(0);
         f.get(0).get(0).load(0).i32(1).add().store(0).i32(0);
-        let m = module(&[f]);
+        let m = module(&[], &[f]);
         let want: &[u8] = &[
             0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, // magic, version
             0x01, 0x06, 0x01, 0x60, 0x01, 0x7F, 0x01, 0x7F, // type

@@ -56,8 +56,12 @@ pub fn run(
     a.set_jit(Some(host()), 1, 1);
     let mut rep = Report::default();
     let mut rng = Rng(seed);
-    for case in 0..cases {
-        let setup = Setup::random(&mut rng);
+    for case in 0..FIXED + cases {
+        let setup = if case < FIXED {
+            Setup::self_modifying(case)
+        } else {
+            Setup::random(&mut rng)
+        };
         setup.apply(&mut a);
         setup.apply(&mut b);
         // ランダムな間隔で止めて CPU 状態を比べる（フラグだけの食い違いが後の命令で
@@ -82,6 +86,13 @@ pub fn run(
                     b.cpu.arch_regs()
                 )));
             }
+        }
+        // 固定の件は、書き換えがインタプリタで効いたこと自体も確かめる（試験の前提）。
+        if case < FIXED && b.cpu.regs[7] != 96 {
+            return Err(describe(format!(
+                "self-modifying case: interp r7 = {}",
+                b.cpu.regs[7]
+            )));
         }
         rep.cases += 1;
         rep.total += a.steps();
@@ -170,7 +181,43 @@ struct MmuSetup {
     data_ap: u32,
 }
 
+/// 固定の件の数（ランダムな件の前に行う）。
+const FIXED: u32 = 2;
+
 impl Setup {
+    /// 固定の件: ループの途中で、ループの中の命令を別の命令に書き換える
+    /// （ADD r7,#1 → ADD r7,#2）。書き換えの後は新しい命令が実行されなければならない
+    /// （生成コード・デコード結果の捨て漏れがあると r7 が変わる）。ランダムな件では
+    /// 同じ値を書き続けることが多く、捨て漏れが結果に出にくいため。
+    /// n = 0 は MMU 無効、1 は有効。
+    fn self_modifying(n: u32) -> Setup {
+        let mut code = vec![
+            0xE287_7001, // L: ADD r7, r7, #1（書き換えられる）
+            0xE289_9001, //    ADD r9, r9, #1
+            0xE359_0020, //    CMP r9, #32
+            0x0582_A000, //    STREQ r10, [r2]（r2 = L）
+            0xE359_0040, //    CMP r9, #64
+            0x1AFF_FFF9, //    BNE L
+            0xEAFF_FFFE, //    B .
+        ];
+        code.resize((CODE_PAGES * 1024) as usize, 0xEAFF_FFFE);
+        let mut regs = [0u32; 15];
+        regs[2] = CODE;
+        regs[10] = 0xE287_7002;
+        Setup {
+            code,
+            data: vec![0; DATA_LEN as usize],
+            regs,
+            cpsr: MODE_SVC,
+            mmu: (n == 1).then_some(MmuSetup {
+                ctrl: 1,
+                dacr: 1,
+                pid: 0,
+                data_ap: 3,
+            }),
+        }
+    }
+
     fn random(rng: &mut Rng) -> Setup {
         let n = (CODE_PAGES * 1024) as usize;
         // 件ごとに重点の種類を 1 つ選び、命令の半分をそれにする（まれな形を密に試す）。
@@ -196,7 +243,15 @@ impl Setup {
                         DATA + rng.below(DATA_LEN)
                     }
                 }
-                2 => CODE + rng.below(CODE_PAGES * 4096),
+                // コードへのストアのベース。3 件に 1 件は先頭のループの範囲（書き換えた
+                // 命令がすぐまた実行され、デコード結果・生成コードの捨て漏れが結果に出る）
+                2 => {
+                    if rng.below(3) == 0 {
+                        CODE + rng.below(80)
+                    } else {
+                        CODE + rng.below(CODE_PAGES * 4096)
+                    }
+                }
                 3 => {
                     if rng.below(3) == 0 {
                         UART1
@@ -297,7 +352,7 @@ impl Setup {
 }
 
 /// 命令語 1 個（JIT の対象を中心に、分岐・対象外を混ぜる）。
-const KINDS: u32 = 22;
+const KINDS: u32 = 23;
 
 fn gen_word(rng: &mut Rng, focus: u32) -> u32 {
     let cond = if rng.below(5) == 0 {
@@ -432,6 +487,16 @@ fn gen_word(rng: &mut Rng, focus: u32) -> u32 {
                 | load << 20
                 | base << 16
                 | list
+        }
+        // コード（r2。先頭のループの範囲のことが多い）へのストア。書き換えた命令が
+        // また実行されるので、コードページへの書き込みの検出漏れが結果に出る。
+        22 => {
+            let off = rng.below(64);
+            match rng.below(3) {
+                0 => cond | 0x0580_0000 | 2 << 16 | src(rng) << 12 | off,
+                1 => cond | 0x05C0_0000 | 2 << 16 | src(rng) << 12 | off,
+                _ => cond | 0x01C0_00B0 | 2 << 16 | src(rng) << 12 | (off & 0xF0) << 4 | off & 0xF,
+            }
         }
         _ => match rng.below(6) {
             0 => cond | 0x010F_0000 | dst(rng) << 12,
