@@ -21,12 +21,14 @@ emu.input("down", 10, 20, "");
 assert.equal(emu.run(2000n), "ok");
 emu.input("up", 0, 0, "");
 emu.input("keydown", 0, 0, "Enter");
+emu.setClock(Int32Array.from([2030, 1, 2, 3, 4, 5]));
+assert.throws(() => emu.setClock(Int32Array.from([2030, 1, 2])));
 assert.throws(() => emu.input("keydown", 0, 0, "NoSuchKey"));
 assert.throws(() => emu.input("down", 240, 0, ""));
 assert.throws(() => emu.input("bogus", 0, 0, ""));
 const script = emu.recordStop("start.snap", "abc");
 assert.equal(emu.recording(), false);
-assert.match(script, /@1000i down 10 20\n@2000i up\n@2000i key down Enter\n/);
+assert.match(script, /@1000i down 10 20\n@2000i up\n@2000i key down Enter\n@2000i rtc 2030-01-02T03:04:05\n/);
 
 // スナップショットの小分けの読み書き: 1MB 以下の断片で書き、断片のまま読み戻すと
 // 同じ状態になる（Worker の自動保存・再開が使う）。

@@ -28,6 +28,7 @@
 //! down <x> <y> / move <x> <y> / up   ペンの押下・移動・解放
 //! key down <名前> / key up <名前>     キーの押下・解放
 //! press <名前> [押下時間]  key down → 押下時間後に key up（既定 100ms）
+//! rtc <YYYY-MM-DDTHH:MM:SS> RTC（ゲストの時計。ローカル時刻）をこの時刻に合わせる
 //! shot <ファイル>          画面を保存
 //! snap <ファイル>          スナップショットを保存
 //! quit                     実行を終了
@@ -46,6 +47,9 @@ pub enum Kind {
     TouchUp,
     KeyDown,
     KeyUp,
+    /// RTC を合わせる（段階3。ブラウザ版が再開時にホストの時刻を渡す。記録される
+    /// 入力なので、再生しても同じ命令境界で同じ時刻になる）
+    Rtc,
     Shot,
     Snap,
     Quit,
@@ -59,6 +63,7 @@ impl fmt::Display for Kind {
             Kind::TouchUp => "up",
             Kind::KeyDown => "key down",
             Kind::KeyUp => "key up",
+            Kind::Rtc => "rtc",
             Kind::Shot => "shot",
             Kind::Snap => "snap",
             Kind::Quit => "quit",
@@ -77,6 +82,8 @@ pub struct Event {
     pub y: i64,
     /// KeyDown/KeyUp のキー名
     pub key: String,
+    /// Rtc の年月日時分秒
+    pub rtc: [i64; 6],
     /// Shot/Snap のファイル
     pub path: String,
     /// 元の行番号（エラー表示用。0 は行なし）
@@ -91,6 +98,7 @@ impl Event {
             x: 0,
             y: 0,
             key: String::new(),
+            rtc: [0; 6],
             path: String::new(),
             line: 0,
         }
@@ -200,6 +208,16 @@ pub fn parse(src: &str, steps_per_second: u64) -> Result<Vec<Event>, Error> {
                     ..ev(Kind::KeyUp)
                 });
             }
+            "rtc" => {
+                if args.len() != 1 {
+                    return Err(errf("usage: rtc YYYY-MM-DDTHH:MM:SS".into()));
+                }
+                let rtc = parse_datetime(args[0]).map_err(errf)?;
+                events.push(Event {
+                    rtc,
+                    ..ev(Kind::Rtc)
+                });
+            }
             cmd @ ("shot" | "snap") => {
                 if args.len() != 1 {
                     return Err(errf(format!("usage: {cmd} <file>")));
@@ -224,6 +242,56 @@ pub fn parse(src: &str, steps_per_second: u64) -> Result<Vec<Event>, Error> {
         }
     }
     Ok(events)
+}
+
+/// "YYYY-MM-DDTHH:MM:SS" を年月日時分秒に（範囲は Go の time.Parse と同じく検査する。
+/// CLI の --rtc と rtc コマンドが使う）。
+pub fn parse_datetime(s: &str) -> Result<[i64; 6], String> {
+    let bad = || format!("want YYYY-MM-DDTHH:MM:SS, got {s:?}");
+    let b = s.as_bytes();
+    if b.len() != 19
+        || b[4] != b'-'
+        || b[7] != b'-'
+        || b[10] != b'T'
+        || b[13] != b':'
+        || b[16] != b':'
+    {
+        return Err(bad());
+    }
+    let num = |r: std::ops::Range<usize>| s[r].parse::<i64>().map_err(|_| bad());
+    let v = [
+        num(0..4)?,
+        num(5..7)?,
+        num(8..10)?,
+        num(11..13)?,
+        num(14..16)?,
+        num(17..19)?,
+    ];
+    let leap = (v[0] % 4 == 0 && v[0] % 100 != 0) || v[0] % 400 == 0;
+    let mdays = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    if !(1..=12).contains(&v[1])
+        || v[2] < 1
+        || v[2] > mdays[(v[1] - 1) as usize]
+        || v[3] > 23
+        || v[4] > 59
+        || v[5] > 59
+    {
+        return Err(bad());
+    }
+    Ok(v)
 }
 
 /// 座標（Go の strconv.Atoi と同じく先頭の + を許す。負は不可）。
@@ -354,6 +422,10 @@ pub fn format(header: &[String], events: &[Event]) -> Result<String, Error> {
             Kind::Shot | Kind::Snap => {
                 check_word(&ev.path).map_err(|e| Error(format!("script: event {i}: path {e}")))?;
                 write!(b, " {}", ev.path).unwrap();
+            }
+            Kind::Rtc => {
+                let [y, mo, d, h, mi, se] = ev.rtc;
+                write!(b, " {y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{se:02}").unwrap();
             }
             Kind::TouchUp | Kind::Quit => {}
         }
@@ -513,6 +585,10 @@ mod tests {
                 path: "a.snap".into(),
                 ..e(3700000000, Kind::Snap)
             },
+            Event {
+                rtc: [2026, 9, 29, 7, 4, 5],
+                ..e(3700000000, Kind::Rtc)
+            },
             e(3700000001, Kind::Quit),
         ];
         let text = format(&["recorded by test".into(), "start: x.snap".into()], &input).unwrap();
@@ -550,6 +626,23 @@ mod tests {
             }],
         ] {
             assert!(format(&[], &ev).is_err(), "{ev:?}");
+        }
+    }
+
+    /// rtc コマンド: 日時の書式と範囲（閏年を含む）を検査する。
+    #[test]
+    fn rtc_command() {
+        let evs = parse("@5i rtc 2024-02-29T23:59:59\n", SPS).unwrap();
+        assert_eq!(evs[0].kind, Kind::Rtc);
+        assert_eq!(evs[0].rtc, [2024, 2, 29, 23, 59, 59]);
+        for bad in [
+            "@0i rtc",
+            "@0i rtc 2023-02-29T00:00:00",
+            "@0i rtc 2024-13-01T00:00:00",
+            "@0i rtc 2024-01-01T24:00:00",
+            "@0i rtc 2024-01-01 00:00:00",
+        ] {
+            assert!(parse(bad, SPS).is_err(), "{bad}");
         }
     }
 

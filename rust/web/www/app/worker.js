@@ -53,6 +53,11 @@ let saving = false;
 let lastSaveT = 0;
 let inputSinceSave = false;
 let recStartSteps = null;
+// 再開したとき（保存からの再開・非表示からの復帰・起動の早送りの後）にゲストの時計を
+// ホストの時刻に合わせるか。合わせるのは記録される入力（rtc）なので決定論は崩れない。
+// スナップショットは保存時点の時刻の続きなので、合わせないと実際の日時からずれる（§7.4）。
+let syncClock = true;
+let hiddenAt = 0;
 const uartDec = new TextDecoder("latin1");
 
 const post = (m, transfer) => postMessage(m, transfer ?? []);
@@ -277,6 +282,20 @@ async function autosave(reason) {
   }
 }
 
+// ---- ゲストの時計 ----
+
+function rtcNow() {
+  const d = new Date();
+  return [d.getFullYear(), d.getMonth() + 1, d.getDate(), d.getHours(), d.getMinutes(), d.getSeconds()];
+}
+
+function setClockNow(reason) {
+  if (!emu || stopped) return;
+  const t = rtcNow();
+  emu.setClock(Int32Array.from(t));
+  log(`時計を合わせた（${reason}）: ${t[0]}-${String(t[1]).padStart(2, "0")}-${String(t[2]).padStart(2, "0")} ${t.slice(3).map((v) => String(v).padStart(2, "0")).join(":")}`);
+}
+
 // ---- 実行 ----
 
 function rebase() {
@@ -318,6 +337,8 @@ function tick() {
       rebase();
       if (turboUntil && emu.steps() >= turboUntil) {
         turboUntil = 0n;
+        // 早送りの間は仮想時間が実時間より速く進んだので合わせ直す
+        if (syncClock) setClockNow("起動の早送りの後");
         enqueue(() => autosave("Today"));
       }
     } else {
@@ -502,6 +523,7 @@ const handlers = {
         const meta = await readJson(d, `${n}.json`);
         const { e, id } = machineFromSnapshot(await readState(d, n));
         start(e, id, `${meta.kind === "auto" ? "自動保存" : "保存"} ${n}`, true);
+        if (syncClock && turboUntil === 0n) setClockNow("再開");
         return;
       } catch (err) {
         log(`${n} を読めません（壊れている可能性）: ${err.message}`);
@@ -549,6 +571,7 @@ const handlers = {
     const raw = await gunzipIfNeeded(new Blob([bytes]));
     const { e, id } = machineFromSnapshot(raw);
     start(e, id, "読み込んだスナップショット", false);
+    if (syncClock) setClockNow("読み込み");
     await handlers.save();
   },
   async recordStart() {
@@ -593,8 +616,11 @@ const handlers = {
     hidden = h;
     if (!emu) return;
     if (h) {
+      hiddenAt = Date.now();
       await autosave("非表示");
     } else {
+      // 止めていた間の分だけゲストの時計が遅れるので合わせる（短い切り替えは無視する）
+      if (syncClock && turboUntil === 0n && Date.now() - hiddenAt > 2000) setClockNow("復帰");
       rebase();
       schedule();
     }
@@ -602,6 +628,12 @@ const handlers = {
   speed({ v }) {
     speed = v;
     if (emu) rebase();
+  },
+  clockOption({ on }) {
+    syncClock = on;
+  },
+  syncClock() {
+    setClockNow("手動");
   },
   skipTurbo() {
     turboUntil = 0n;

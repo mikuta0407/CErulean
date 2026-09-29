@@ -5,6 +5,10 @@
 const $ = (id) => document.getElementById(id);
 const canvas = $("screen");
 const ctx = canvas.getContext("2d");
+// 時計の自動合わせの設定は端末ごとに覚える（保存できない環境では既定の「合わせる」）
+try {
+  $("clockSync").checked = localStorage.getItem("cerulean-clock-sync") !== "0";
+} catch {}
 
 let worker = null;
 const send = (op, args = {}, transfer = []) => worker?.postMessage({ op, ...args }, transfer);
@@ -54,6 +58,7 @@ function startWorker() {
     showStop(`Worker が異常終了しました: ${e.message}`, true);
   };
   send("init");
+  send("clockOption", { on: $("clockSync").checked });
   return new Promise(() => {});
 }
 
@@ -300,6 +305,13 @@ $("pause").onclick = () => send("pause", { on: !paused });
 $("speed").onchange = () => send("speed", { v: +$("speed").value });
 $("jit").onchange = () => send("jit", { on: $("jit").checked });
 $("skipTurbo").onclick = () => send("skipTurbo");
+$("clockSync").onchange = () => {
+  try {
+    localStorage.setItem("cerulean-clock-sync", $("clockSync").checked ? "1" : "0");
+  } catch {}
+  send("clockOption", { on: $("clockSync").checked });
+};
+$("clockNow").onclick = () => booted && send("syncClock");
 $("saveNow").onclick = () => booted && send("save");
 $("rec").onclick = () => booted && send(recording ? "recordStop" : "recordStart");
 $("recScript").onclick = () => send("exportRecording", { what: "script" });

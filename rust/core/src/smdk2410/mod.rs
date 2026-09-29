@@ -373,9 +373,12 @@ impl Machine {
         Ok(())
     }
 
-    /// RTC の現在時刻を年月日時分秒で設定する（reset の前に呼ぶ）。壁時計の値が
-    /// そのまま RTC に入る。ホストの時計を読むのは呼び出し側の責務で、コアは
-    /// 渡された時刻からの仮想時間で決定論的に進める。
+    /// RTC の現在時刻を年月日時分秒で設定する（reset の前か、実行の合間の命令境界で
+    /// 呼ぶ）。壁時計の値がそのまま RTC に入る。ホストの時計を読むのは呼び出し側の
+    /// 責務で、コアは渡された時刻からの仮想時間で決定論的に進める。1 秒未満の端数は
+    /// 捨てる（設定した瞬間が秒の変わり目）。
+    /// 実行中に変えても OAL は時刻を読むたびに RTC を読むので、ゲストの時計は
+    /// すぐに変わる（2026-09 の観察: Today 画面で仮想 5 秒に 48 回読む）。
     pub fn set_rtc(
         &mut self,
         year: i64,
@@ -385,10 +388,11 @@ impl Machine {
         minute: i64,
         second: i64,
     ) {
-        self.sys
-            .board
-            .rtc
-            .set_time(year, month, day, hour, minute, second);
+        // 溜めたティックを先に渡す（RTC は時間を持つ。変えた後の経過から数え直す）
+        let b = &mut self.sys.board;
+        b.sync_time();
+        b.rtc.set_time(year, month, day, hour, minute, second);
+        b.update_deadline();
     }
 
     /// CPU をリセットし、エントリポイント（物理アドレス）から開始する。

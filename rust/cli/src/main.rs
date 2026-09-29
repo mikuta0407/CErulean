@@ -141,53 +141,9 @@ fn parse_u64(s: &str) -> Result<u64, String> {
     r.map_err(|_| format!("bad number {s:?}"))
 }
 
-/// "YYYY-MM-DDTHH:MM:SS" を年月日時分秒に（範囲は Go の time.Parse と同じく検査する）。
+/// "YYYY-MM-DDTHH:MM:SS" を年月日時分秒に（script::parse_datetime と同じ規則）。
 fn parse_rtc(s: &str) -> Result<[i64; 6], String> {
-    let bad = || format!("--rtc: want YYYY-MM-DDTHH:MM:SS, got {s:?}");
-    let b = s.as_bytes();
-    if b.len() != 19
-        || b[4] != b'-'
-        || b[7] != b'-'
-        || b[10] != b'T'
-        || b[13] != b':'
-        || b[16] != b':'
-    {
-        return Err(bad());
-    }
-    let num = |r: std::ops::Range<usize>| s[r].parse::<i64>().map_err(|_| bad());
-    let v = [
-        num(0..4)?,
-        num(5..7)?,
-        num(8..10)?,
-        num(11..13)?,
-        num(14..16)?,
-        num(17..19)?,
-    ];
-    let leap = (v[0] % 4 == 0 && v[0] % 100 != 0) || v[0] % 400 == 0;
-    let mdays = [
-        31,
-        if leap { 29 } else { 28 },
-        31,
-        30,
-        31,
-        30,
-        31,
-        31,
-        30,
-        31,
-        30,
-        31,
-    ];
-    if !(1..=12).contains(&v[1])
-        || v[2] < 1
-        || v[2] > mdays[(v[1] - 1) as usize]
-        || v[3] > 23
-        || v[4] > 59
-        || v[5] > 59
-    {
-        return Err(bad());
-    }
-    Ok(v)
+    script::parse_datetime(s).map_err(|e| format!("--rtc: {e}"))
 }
 
 /// "lo" または "lo-hi"。

@@ -4,9 +4,9 @@
 //   node tools/browser/app-e2e.mjs <イメージ> <出力ディレクトリ> [--desktop] [--headed]
 //
 //  1. イメージから起動 → Today に着いたら自動保存されること
-//  2. 記録開始 → タップ・ハードウェアボタン・PC のキーで操作 → 記録停止 → スクリプトと
+//  2. 記録開始 → タップ・ハードウェアボタン・PC のキー・時計合わせ → 記録停止 → スクリプトと
 //     起点スナップショットを書き出す（ダウンロード）
-//  3. リロード → 「続きから再開」で再開できること
+//  3. リロード → 「続きから再開」で再開でき、ゲストの時計が今に合うこと
 //  4. Chrome を強制終了（SIGKILL）→ 開き直して再開できること
 //  5. 2 つ目のタブでは「別のタブで動いています」になること
 //  6. 書き出したスクリプトをネイティブ CLI（rust/target/release/cerulean）で再生し、
@@ -108,12 +108,13 @@ try {
   await sleep(5000);
   await h.key("KeyA", "a", 65);
   await h.key("KeyB", "b", 66);
+  await h.click("clockNow"); // 時計合わせ（rtc）も記録に入り、CLI で再生できること
   await sleep(2000);
   await h.shot("recorded-ops");
   await h.click("rec");
   await h.waitFor("recording stopped", () => h.visible("recText"), 60_000);
   const script = await p.eval(`document.getElementById("recText").textContent`);
-  check(/key down A/.test(script) && /key down Down/.test(script) && /down \d+ \d+/.test(script), "記録にタップ・ボタン・キーが入った");
+  check(/key down A/.test(script) && /key down Down/.test(script) && /down \d+ \d+/.test(script) && /\d+i rtc \d{4}-/.test(script), "記録にタップ・ボタン・キー・時計合わせが入った");
   await h.click("recScript");
   await h.click("recSnap");
   await h.waitFor("downloads", () => {
@@ -140,6 +141,7 @@ try {
   await h.waitFor("reloaded", () => p.eval(`document.getElementById("startMsg") && document.getElementById("startMsg").textContent !== "準備中…"`).catch(() => false), 20_000);
   const r1 = await resume(p, h, "reload");
   check(r1 >= manualSteps, `リロード後にいちばん新しい保存（命令 ${manualSteps} 以降）から再開した（リロード時 ${beforeReload}）`);
+  check(await logHas(h, /時計を合わせた（再開）/), "再開時にゲストの時計を合わせた");
   await h.shot("after-reload");
 
   // 4. 強制終了から再開

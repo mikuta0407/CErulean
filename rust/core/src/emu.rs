@@ -33,7 +33,7 @@ pub struct Session {
 #[derive(Debug)]
 pub enum RunError<E> {
     /// 予定したイベントの適用に失敗した
-    Event { event: Event, err: E },
+    Event { event: Box<Event>, err: E },
     /// エミュレーションが止まった（未実装命令・バスエラー）
     Stop(StopError),
 }
@@ -93,7 +93,12 @@ impl Session {
                 match apply(m, &ev) {
                     Ok(true) => return Ok(true),
                     Ok(false) => {}
-                    Err(err) => return Err(RunError::Event { event: ev, err }),
+                    Err(err) => {
+                        return Err(RunError::Event {
+                            event: Box::new(ev),
+                            err,
+                        });
+                    }
                 }
             }
             if steps >= until {
@@ -108,7 +113,7 @@ impl Session {
     }
 
     /// 対話入力を今の命令境界（steps()）で直ちに適用し、記録中なら記録する。
-    /// ev.step は上書きされる。入力（down/move/up/key）以外は不可。
+    /// ev.step は上書きされる。入力（down/move/up/key/rtc）以外は不可。
     pub fn inject(&mut self, m: &mut Machine, mut ev: Event) -> Result<(), String> {
         if !is_input(ev.kind) {
             return Err(format!("emu: {} cannot be injected", ev.kind));
@@ -145,7 +150,7 @@ impl Session {
 fn is_input(k: Kind) -> bool {
     matches!(
         k,
-        Kind::TouchDown | Kind::TouchMove | Kind::TouchUp | Kind::KeyDown | Kind::KeyUp
+        Kind::TouchDown | Kind::TouchMove | Kind::TouchUp | Kind::KeyDown | Kind::KeyUp | Kind::Rtc
     )
 }
 
@@ -158,6 +163,10 @@ pub fn apply_input(m: &mut Machine, ev: &Event) -> Result<bool, String> {
         Kind::TouchUp => m.touch_up(),
         Kind::KeyDown => m.key_down(&ev.key).map_err(|e| e.to_string())?,
         Kind::KeyUp => m.key_up(&ev.key).map_err(|e| e.to_string())?,
+        Kind::Rtc => {
+            let [y, mo, d, h, mi, s] = ev.rtc;
+            m.set_rtc(y, mo, d, h, mi, s);
+        }
         k => return Err(format!("{k}: not handled")),
     }
     Ok(false)
@@ -175,6 +184,11 @@ pub fn validate(m: &Machine, ev: &Event) -> Result<(), String> {
                     ev.kind, ev.x, ev.y
                 ));
             }
+        }
+        // RTC の年は 2 桁の BCD（BCDYEAR）なので、2000〜2099 年だけを受け付ける
+        // （範囲外は下 2 桁に折り返されて別の年に見える）。
+        Kind::Rtc if !(2000..=2099).contains(&ev.rtc[0]) => {
+            return Err(format!("rtc: year {} outside 2000-2099", ev.rtc[0]));
         }
         Kind::KeyDown | Kind::KeyUp if !KEY_SCAN_CODES.iter().any(|(n, _)| *n == ev.key) => {
             let names: Vec<&str> = KEY_SCAN_CODES.iter().map(|(n, _)| *n).collect();
@@ -307,5 +321,32 @@ mod tests {
             text.contains("@25i key down Enter\n@25i down 5 6\n"),
             "{text}"
         );
+    }
+
+    /// rtc は RTC を今の命令境界で合わせ、記録してスクリプトに書ける。範囲外の年は不可。
+    #[test]
+    fn inject_rtc() {
+        let mut m = spin_machine();
+        let mut s = Session::new();
+        m.run_until(10).unwrap();
+        s.start_recording(&m);
+        let ev = Event {
+            rtc: [2030, 1, 2, 3, 4, 5],
+            ..Event::new(0, Kind::Rtc)
+        };
+        s.inject(&mut m, ev.clone()).unwrap();
+        let t = m.sys.board.rtc.now();
+        assert_eq!(
+            (t.year, t.month, t.day, t.hour, t.minute, t.second),
+            (2030, 1, 2, 3, 4, 5)
+        );
+        let bad = Event {
+            rtc: [2100, 1, 1, 0, 0, 0],
+            ..ev
+        };
+        assert!(s.inject(&mut m, bad).is_err());
+        let (start, evs) = s.stop_recording();
+        let text = format_recording("a.snap", "", start, &evs).unwrap();
+        assert!(text.contains("@10i rtc 2030-01-02T03:04:05\n"), "{text}");
     }
 }

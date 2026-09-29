@@ -368,6 +368,24 @@ impl Emu {
             .map_err(|e| JsError::new(&e))
     }
 
+    /// ゲストの時計（RTC）を今の命令境界で合わせる（記録中なら記録する）。rtc は
+    /// ローカル時刻の年月日時分秒（再開時にフロントエンドがホストの時刻から渡す）。
+    #[wasm_bindgen(js_name = setClock)]
+    pub fn set_clock(&mut self, rtc: &[i32]) -> Result<(), JsError> {
+        let [y, mo, d, h, mi, s] = rtc else {
+            return Err(JsError::new("rtc must have 6 elements"));
+        };
+        let ev = Event {
+            rtc: [
+                *y as i64, *mo as i64, *d as i64, *h as i64, *mi as i64, *s as i64,
+            ],
+            ..Event::new(0, Kind::Rtc)
+        };
+        self.sess
+            .inject(&mut self.m, ev)
+            .map_err(|e| JsError::new(&e))
+    }
+
     /// 入力の記録を始める（再生の起点のスナップショットは呼び出し側が同じ命令境界で
     /// 保存する）。
     #[wasm_bindgen(js_name = recordStart)]
