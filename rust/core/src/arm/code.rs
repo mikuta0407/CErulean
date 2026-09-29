@@ -82,6 +82,8 @@ pub struct CodeCache {
     pages: Vec<CodePage>,
     /// pages と同じ添字の JIT の枠（JIT を使うページだけ作る）
     jit: Vec<JitSlots>,
+    /// pages と同じ添字の、ページの関数を作った回数（JIT の作り直しを間引く。jit/mod.rs）
+    jit_level: Vec<u8>,
     /// 実行中のページ（pages の添字）
     cur: u32,
     vpages: [VpageEnt; 1 << VPAGE_BITS],
@@ -99,6 +101,7 @@ impl CodeCache {
             index: HashMap::new(),
             pages: vec![],
             jit: vec![],
+            jit_level: vec![],
             cur: 0,
             vpages: [VpageEnt {
                 va: 1,
@@ -159,6 +162,7 @@ impl CodeCache {
                         marked: false,
                     });
                     self.jit.push(None);
+                    self.jit_level.push(0);
                     self.index.insert(pa >> 12, i);
                     i
                 }
@@ -211,6 +215,7 @@ impl CodeCache {
             if let Some(s) = &mut self.jit[i as usize] {
                 s.fill(0);
             }
+            self.jit_level[i as usize] = 0;
         }
     }
 
@@ -227,6 +232,21 @@ impl CodeCache {
     pub fn jit_slot(&mut self, pc: u32) -> &mut u32 {
         let s = &mut self.jit[self.cur as usize];
         &mut s.get_or_insert_with(|| Box::new([0; 1024]))[((pc >> 2) & 0x3FF) as usize]
+    }
+
+    /// ページ page の関数を作った回数。
+    pub fn jit_level(&self, page: u32) -> u8 {
+        self.jit_level[page as usize]
+    }
+
+    pub fn bump_jit_level(&mut self, page: u32) {
+        let l = &mut self.jit_level[page as usize];
+        *l = l.saturating_add(1);
+    }
+
+    /// ページ page の命令番号 idx がデコード済み（一度は実行された）か。
+    pub fn is_decoded(&self, page: u32, idx: u32) -> bool {
+        self.pages[page as usize].arm[idx as usize].is_some()
     }
 
     /// ページ page の命令番号 idx の JIT の枠（なければ 0）。
@@ -251,6 +271,7 @@ impl CodeCache {
     /// JIT の枠をすべて捨てる。
     pub fn clear_jit(&mut self) {
         self.jit.iter_mut().for_each(|s| *s = None);
+        self.jit_level.fill(0);
     }
 
     /// デコード済みのページ数（計測用。wasm のメモリ予算の検討に使う）。

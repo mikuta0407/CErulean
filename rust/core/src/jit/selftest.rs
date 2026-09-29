@@ -60,10 +60,29 @@ pub fn run(
         let setup = Setup::random(&mut rng);
         setup.apply(&mut a);
         setup.apply(&mut b);
-        let ra = a.run_until(steps);
-        let rb = b.run_until(steps);
-        compare(&mut a, &mut b, ra, rb)
-            .map_err(|e| format!("seed {seed} case {case} ({}): {e}", setup.describe()))?;
+        // ランダムな間隔で止めて CPU 状態を比べる（フラグだけの食い違いが後の命令で
+        // 上書きされて見えなくなるのを防ぐ。止める点ではブロックの途中で上限に
+        // かかる場合も試される）。
+        let chunk = 1 + rng.below(200) as u64;
+        let describe = |e: String| format!("seed {seed} case {case} ({}): {e}", setup.describe());
+        let mut t = 0;
+        while t < steps {
+            t = (t + chunk).min(steps);
+            let ra = a.run_until(t);
+            let rb = b.run_until(t);
+            let stopped = ra.is_err() || rb.is_err();
+            if t == steps || stopped {
+                compare(&mut a, &mut b, ra, rb).map_err(describe)?;
+                break;
+            }
+            if a.cpu_dump() != b.cpu_dump() {
+                return Err(describe(format!(
+                    "cpu at {t}: jit {:08X?} / interp {:08X?}",
+                    a.cpu.arch_regs(),
+                    b.cpu.arch_regs()
+                )));
+            }
+        }
         rep.cases += 1;
         rep.total += a.steps();
     }
@@ -75,12 +94,10 @@ pub fn run(
         return Err(format!("jit disabled: {e}"));
     }
     // 対象の Op が全部コンパイルされたこと。
-    let missing: Vec<String> = (0..=255u8)
-        .filter_map(|o| {
-            let op = super::codegen::op_by_number(o)?;
-            (super::codegen::supported(op) && st.ops.get(o as usize).copied().unwrap_or(0) == 0)
-                .then(|| format!("{op:?}"))
-        })
+    let missing: Vec<String> = super::codegen::JIT_OPS
+        .iter()
+        .filter(|op| st.ops.get(**op as usize).copied().unwrap_or(0) == 0)
+        .map(|op| format!("{op:?}"))
         .collect();
     if !missing.is_empty() {
         return Err(format!("ops never compiled: {}", missing.join(" ")));
@@ -156,7 +173,17 @@ struct MmuSetup {
 impl Setup {
     fn random(rng: &mut Rng) -> Setup {
         let n = (CODE_PAGES * 1024) as usize;
-        let code = (0..n).map(|_| gen_word(rng)).collect();
+        // 件ごとに重点の種類を 1 つ選び、命令の半分をそれにする（まれな形を密に試す）。
+        let focus = rng.below(KINDS);
+        let mut code: Vec<u32> = (0..n).map(|_| gen_word(rng, focus)).collect();
+        // 半分の件は、先頭の短い命令列をループにする（同じ形を同じレジスタの値で
+        // 何度も実行し、JIT 側は 2 周目から生成コードで走る。まれな値の組み合わせを
+        // 確実に試すため）。
+        if rng.below(2) == 0 {
+            let k = 4 + rng.below(13);
+            // B 先頭（差分は PC+8 基準の語数）
+            code[k as usize] = 0xEA00_0000 | ((k + 2).wrapping_neg() & 0x00FF_FFFF);
+        }
         let data = (0..DATA_LEN).map(|_| rng.u32() as u8).collect();
         let mut regs = [0u32; 15];
         for (i, r) in regs.iter_mut().enumerate() {
@@ -181,6 +208,11 @@ impl Setup {
                     // BX・MOV pc の行き先（まれに Thumb）
                     let t = CODE + 4 * rng.below(CODE_PAGES * 1024);
                     t | (rng.below(10) == 0) as u32
+                }
+                // レジスタ指定シフトの量の境目（下位 8 ビットが 0・1・31・32・33・255 など）
+                13 | 14 if rng.below(2) == 0 => {
+                    [0, 1, 2, 31, 32, 33, 63, 64, 255, 256, 0x120][rng.below(11) as usize]
+                        | rng.u32() & 0xFFFF_FE00
                 }
                 _ => rng.u32(),
             };
@@ -265,7 +297,9 @@ impl Setup {
 }
 
 /// 命令語 1 個（JIT の対象を中心に、分岐・対象外を混ぜる）。
-fn gen_word(rng: &mut Rng) -> u32 {
+const KINDS: u32 = 22;
+
+fn gen_word(rng: &mut Rng, focus: u32) -> u32 {
     let cond = if rng.below(5) == 0 {
         rng.below(15)
     } else {
@@ -273,8 +307,14 @@ fn gen_word(rng: &mut Rng) -> u32 {
     } << 28;
     // 書き込み先は r6〜r12（ベースの r0〜r5 を壊しにくくする）。
     let dst = |rng: &mut Rng| 6 + rng.below(7);
-    let src = |rng: &mut Rng| rng.below(15);
-    match rng.below(20) {
+    // 読むレジスタはまれに PC（PC+8 として読む形を試す）
+    let src = |rng: &mut Rng| rng.below(16);
+    let kind = if rng.below(2) == 0 {
+        focus
+    } else {
+        rng.below(KINDS)
+    };
+    match kind {
         // データ処理（即値）
         0..=3 => {
             let op = rng.below(16);
@@ -345,7 +385,7 @@ fn gen_word(rng: &mut Rng) -> u32 {
         }
         // 対象外: レジスタ指定シフト・乗算・LDM/STM（r0/r1 のデータ領域）・MRS・
         // ライトバックつき LDR/STR・ハーフワード
-        16 => {
+        16 | 20 | 21 => {
             let op = rng.below(16);
             let s = ((8..=11).contains(&op) || rng.below(2) == 0) as u32;
             cond | 0x10
@@ -353,19 +393,110 @@ fn gen_word(rng: &mut Rng) -> u32 {
                 | s << 20
                 | src(rng) << 16
                 | dst(rng) << 12
-                | src(rng) << 8
+                | if rng.below(2) == 0 {
+                    13 + rng.below(2)
+                } else {
+                    src(rng)
+                } << 8
                 | rng.below(4) << 5
                 | src(rng)
         }
-        17 => cond | 0x0000_0090 | dst(rng) << 16 | src(rng) << 8 | src(rng),
+        // 乗算（MUL/MLA、長い乗算）
+        17 => {
+            let long = rng.below(2) << 23;
+            let flags = rng.below(8) << 20; // 符号・アキュムレート・S
+            cond | 0x90
+                | long
+                | flags & if long != 0 { 0x70_0000 } else { 0x30_0000 }
+                | dst(rng) << 16
+                | dst(rng) << 12
+                | src(rng) << 8
+                | src(rng)
+        }
+        // LDM/STM（ベースは r0/r1 のデータ領域。全モード・ライトバック・ベースを含む
+        // リスト・PC を含むリスト）
         18 => {
             let base = rng.below(2);
-            cond | 0x0800_0000 | rng.below(2) << 20 | base << 16 | (rng.u32() & 0x1FC0)
+            let load = rng.below(2);
+            let mut list = rng.u32() & 0x1FC0 | 0x40;
+            if rng.below(4) == 0 {
+                list |= 1 << base;
+            }
+            if rng.below(if load == 1 { 16 } else { 4 }) == 0 {
+                list |= 1 << 15;
+            }
+            cond | 0x0800_0000
+                | rng.below(2) << 24
+                | rng.below(2) << 23
+                | rng.below(2) << 21
+                | load << 20
+                | base << 16
+                | list
         }
-        _ => match rng.below(3) {
+        _ => match rng.below(6) {
             0 => cond | 0x010F_0000 | dst(rng) << 12,
-            1 => cond | 0x0490_0004 | rng.below(5) << 16 | dst(rng) << 12,
-            _ => cond | 0x01D0_00B2 | rng.below(5) << 16 | dst(rng) << 12,
+            // レジスタオフセットの LDR/STR（スケーリングつき。オフセットは r6〜r12 の
+            // 小さなシフト結果にならないので、r13/r14 の小さな値も使う）
+            4 => {
+                let load = rng.below(2);
+                let rt = if load == 1 { dst(rng) } else { src(rng) };
+                let pre = rng.below(2);
+                cond | 0x0600_0000
+                    | pre << 24
+                    | rng.below(2) << 23
+                    | rng.below(2) << 22
+                    | (pre & rng.below(2)) << 21
+                    | load << 20
+                    | rng.below(5) << 16
+                    | rt << 12
+                    | rng.below(3) << 7
+                    | (13 + rng.below(2))
+            }
+            // レジスタオフセットのハーフワード・符号付き転送
+            5 => {
+                let (load, sh) = [(1, 1), (1, 2), (1, 3), (0, 1)][rng.below(4) as usize];
+                let rt = if load == 1 { dst(rng) } else { src(rng) };
+                let pre = rng.below(2);
+                cond | 0x0000_0090
+                    | pre << 24
+                    | rng.below(2) << 23
+                    | (pre & rng.below(2)) << 21
+                    | load << 20
+                    | rng.below(5) << 16
+                    | rt << 12
+                    | sh << 5
+                    | (13 + rng.below(2))
+            }
+            // ライトバックつきの LDR/STR/LDRB/STRB（プリ W=1・ポスト W=0。まれに LDRT 等）
+            1 => {
+                let pre = rng.below(2);
+                let w = if rng.below(8) == 0 { 1 - pre } else { pre };
+                let load = rng.below(2);
+                let rt = if load == 1 { dst(rng) } else { src(rng) };
+                cond | 0x0400_0000
+                    | pre << 24
+                    | rng.below(2) << 23
+                    | rng.below(2) << 22
+                    | w << 21
+                    | load << 20
+                    | rng.below(5) << 16
+                    | rt << 12
+                    | rng.below(64)
+            }
+            // LDRH/LDRSB/LDRSH/STRH 即値
+            _ => {
+                let (load, sh) = [(1, 1), (1, 2), (1, 3), (0, 1)][rng.below(4) as usize];
+                let rt = if load == 1 { dst(rng) } else { src(rng) };
+                let off = rng.below(256);
+                cond | 0x0140_0090
+                    | rng.below(2) << 23
+                    | load << 20
+                    | rng.below(5) << 16
+                    | rt << 12
+                    | (off >> 4) << 8
+                    | sh << 5
+                    | off & 0xF
+            }
         },
     }
 }

@@ -1,122 +1,49 @@
 //! ブロックの切り出しと、IR → wasm 関数の生成（段階5。設計は docs/stage5-design.md）。
 //!
-//! 生成関数の約束（`(ctx) -> 結果`）:
-//!   - 入口で「残りの命令数 ≥ ブロック長」を確かめ、足りなければ何もせず
-//!     `SIDE | 0` を返す。
+//! 生成関数の約束（`(ctx) -> サイド出口か`。関数は物理ページ 1 枚につき 1 つで、
+//! そのページのコンパイル済みブロックをすべて含む。段階5-2）:
+//!   - 入口のブロックは regs[15] から決まる（ページ内の命令番号で br_table）。
+//!   - 各ブロックの入口で「残りの命令数 ≥ ブロック長」を確かめ、足りなければ戻る
+//!     （サイド出口。次の命令はインタプリタが実行する）。
 //!   - 命令は IR（ir.rs）の意味をそのまま写す。1 IR 命令 = 1 ARM 命令。条件不成立の
 //!     命令も 1 命令と数える（インタプリタと同じ）。
 //!   - ロード・ストアはソフト TLB のヒット（権限あり・RAM・ストアなら wram あり）の
-//!     ときだけ行う。それ以外はその命令の手前で戻る（サイド出口: 書き換えた
-//!     レジスタと CPSR を書き戻し、regs[15] にその命令の PC を入れて `SIDE | k` を返す。
-//!     k は実行を終えた命令数）。インタプリタがその命令から続けるので、MMIO・TLB の
-//!     埋め方・フォルト・コードページへの書き込みの検出はインタプリタの経路で起きる。
-//!     TLB は読むだけで変えない。
-//!   - 最後まで実行したら regs[15] に次の PC を入れて k（= ブロック長）を返す。
+//!     ときだけ行う。それ以外はその命令の手前で戻る（サイド出口）。インタプリタが
+//!     その命令から続けるので、MMIO・TLB の埋め方・フォルト・コードページへの
+//!     書き込みの検出はインタプリタの経路で起きる。TLB は読むだけで変えない。
+//!   - ブロックを終えたら、次の PC が同じ仮想ページにあり、その命令番号が関数内の
+//!     ブロックの先頭なら、Rust に戻らずに続けて実行する（ブロックの連結）。
+//!     Thumb に切り替わった・ページを出た・ブロックの先頭でない場合は戻る。
+//!   - 戻るときは書き換えたレジスタと CPSR を書き戻し、regs[15] に次の PC を、
+//!     ctx.executed に実行した命令数を入れ、サイド出口なら 1、でなければ 0 を返す。
 //!
-//! PC はブロックに入ったときの regs[15] を基準にした差分で扱う（同じ物理ページが
-//! 別の仮想アドレスに見えていても、同じ生成コードが正しく動くように）。
+//! 同じ仮想ページの中を続けて実行してよい理由: 生成コードは MMU の状態・ページの
+//! 中身（コードページへのストアは出口）・割り込み線・期限を変えないので、Rust が
+//! 入口で確かめた条件（code_cur_va が有効・割り込みなし・ARM 状態）は、Thumb への
+//! BX を除いて関数の中で変わらない。上限はブロックごとに確かめる。
 //!
-//! 生成コードは割り込み線・期限を変える命令（MMIO・CPSR のモード・MCR）を含まない
-//! ので、ブロックに入る前に Rust が確かめた条件（割り込みなし・上限の残り）は
-//! ブロックの間ずっと成り立つ。BX で Thumb に切り替わることはある（呼び出し側が
-//! 戻った後に確かめる）。
+//! PC はページの仮想アドレス（入口の regs[15] のページ）を基準にした定数の差分で
+//! 扱う（同じ物理ページが別の仮想アドレスに見えていても、同じ生成コードが正しく
+//! 動くように）。
 
 use super::JitCtx;
 use super::wasm::{Func, Local};
 use crate::arm::{FLAG_T, Instr, Op};
+use crate::arm::{OP_ADC, OP_ADD, OP_AND, OP_BIC, OP_CMN, OP_CMP, OP_EOR, OP_MOV, OP_MVN};
+use crate::arm::{OP_ORR, OP_RSB, OP_RSC, OP_SBC, OP_SUB, OP_TEQ, OP_TST};
 use crate::mmu::{NO_RAM, TLB_SIZE, TLB_VALID, TlbEntry};
 
 /// ブロックの最大の長さ（命令数）。生成関数を小さく保つため。
 pub(crate) const MAX_BLOCK: usize = 64;
 
-/// 戻り値のサイド出口の印（下位 16 ビットが実行した命令数）。
-pub(crate) const SIDE: u32 = 1 << 16;
-
-/// 5-1 で JIT する Op（特化済みの単純なもの）。
-pub(crate) fn supported(op: Op) -> bool {
-    use Op::*;
-    matches!(
-        op,
-        MovImm
-            | AddImm
-            | SubImm
-            | AndImm
-            | OrrImm
-            | EorImm
-            | BicImm
-            | CmpImm
-            | CmnImm
-            | SubsImm
-            | AddsImm
-            | TstImm
-            | TstImmC
-            | TeqImm
-            | TeqImmC
-            | AndsImm
-            | AndsImmC
-            | OrrsImm
-            | OrrsImmC
-            | MovsImm
-            | MovsImmC
-            | MovReg
-            | AddReg
-            | SubReg
-            | AndReg
-            | OrrReg
-            | EorReg
-            | BicReg
-            | CmpReg
-            | SubsReg
-            | AddsReg
-            | MovsReg
-            | TstReg
-            | MovShift
-            | MvnShift
-            | AddShift
-            | SubShift
-            | RsbShift
-            | AndShift
-            | OrrShift
-            | EorShift
-            | BicShift
-            | MovPcReg
-            | BxReg
-            | LdrImm
-            | LdrbImm
-            | StrImm
-            | StrbImm
-            | B
-            | Bl
-    )
-}
-
-/// PC を書く（ブロックを終える）Op。
-pub(crate) fn terminates(op: Op) -> bool {
-    matches!(op, Op::B | Op::Bl | Op::BxReg | Op::MovPcReg)
-}
-
-/// ページ内の命令 idx（0〜1023）から始まるブロックを切り出す。instr_at は
-/// ページ内の命令番号の命令を返す。対象外の命令・PC を書く命令（含める）・
-/// ページ末尾・MAX_BLOCK で終わる。先頭が対象外なら空。
-pub(crate) fn form_block(idx: u32, mut instr_at: impl FnMut(u32) -> Instr) -> Vec<Instr> {
-    let mut v = vec![];
-    let mut i = idx;
-    while i < 1024 && v.len() < MAX_BLOCK {
-        let ins = instr_at(i);
-        if !supported(ins.op) {
-            break;
-        }
-        v.push(ins);
-        if terminates(ins.op) {
-            break;
-        }
-        i += 1;
-    }
-    v
-}
-
-/// 特化した Op の一覧（Op の番号の順。試験で全 Op を試したかを見るのに使う）。
-const SPECIAL_OPS: &[Op] = &[
+/// JIT する Op（段階5-1: 特化済みの単純なもの、5-2: ライトバック・ハーフワード・
+/// LDM/STM・汎用のデータ処理を追加）。汎用の Op は命令語の形でさらに絞る（supported）。
+pub(crate) const JIT_OPS: &[Op] = &[
+    Op::DataProc,
+    Op::Ldst,
+    Op::LdstMisc,
+    Op::LdmStm,
+    Op::MulSwp,
     Op::MovImm,
     Op::AddImm,
     Op::SubImm,
@@ -179,12 +106,124 @@ const SPECIAL_OPS: &[Op] = &[
     Op::StrbImm,
     Op::B,
     Op::Bl,
-    Op::BSpin,
 ];
 
-/// Op の番号から特化した Op を引く（汎用の Op は JIT の対象外なので None）。
-pub(crate) fn op_by_number(o: u8) -> Option<Op> {
-    SPECIAL_OPS.iter().copied().find(|op| *op as u8 == o)
+/// JIT する命令か。
+#[inline(always)]
+pub(crate) fn supported(i: &Instr) -> bool {
+    use Op::*;
+    match i.op {
+        DataProc => dp_ok(i.imm),
+        LdmStm => ldm_ok(i.imm),
+        Ldst => ldst_ok(i.imm),
+        LdstMisc => ldst_misc_ok(i.imm),
+        MulSwp => mul_ok(i.imm),
+        // 汎用の残りと、BSpin（アイドルスキップの印を付ける）は対象外
+        Mrs | Msr | Branch | Bx | Swi | McrMrc | UnimplV5 | UnimplMrsImm | UndefLdstReg
+        | UndefLdcStc | UndefCdp | BSpin => false,
+        _ => true,
+    }
+}
+
+/// 汎用のデータ処理のうち JIT するもの: Rd が PC でない形（Rd=PC は分岐・例外復帰に
+/// なるのでインタプリタに回す）。PC を読む形は read_reg と同じく PC+8 として扱う。
+fn dp_ok(w: u32) -> bool {
+    (w >> 12) & 0xF != 15
+}
+
+/// 汎用の LDR/STR/LDRB/STRB のうち JIT するもの: Rd が PC でなく、PC に書き戻さず、
+/// LDRT/STRT（P=0・W=1）でない形。PC を読む形は PC+8。
+fn ldst_ok(w: u32) -> bool {
+    let wb = w & (1 << 24) == 0 || w & (1 << 21) != 0;
+    (w >> 12) & 0xF != 15
+        && !(wb && (w >> 16) & 0xF == 15)
+        && !(w & (1 << 24) == 0 && w & (1 << 21) != 0)
+}
+
+/// 汎用のハーフワード・符号付き転送のうち JIT するもの: Rd が PC でなく、PC に
+/// 書き戻さず、LDRD/STRD（L=0 の SB/SH。v5TE）でない形。PC を読む形は PC+8。
+fn ldst_misc_ok(w: u32) -> bool {
+    let (load, sh) = (w & (1 << 20) != 0, (w >> 5) & 3);
+    let wb = w & (1 << 24) == 0 || w & (1 << 21) != 0;
+    (w >> 12) & 0xF != 15 && !(wb && (w >> 16) & 0xF == 15) && (load || sh == 1) && sh != 0
+}
+
+/// 乗算のうち JIT するもの: MUL/MLA/UMULL/UMLAL/SMULL/SMLAL で PC を使わない形
+/// （SWP は対象外）。
+fn mul_ok(w: u32) -> bool {
+    w & (1 << 24) == 0
+        && [w & 0xF, (w >> 8) & 0xF, (w >> 12) & 0xF, (w >> 16) & 0xF]
+            .iter()
+            .all(|&r| r != 15)
+}
+
+/// LDM/STM のうち JIT するもの: S=0（ユーザーバンク転送・CPSR の復帰でない）、
+/// Rn が PC でない、リストが空でない形。
+fn ldm_ok(w: u32) -> bool {
+    w & (1 << 22) == 0 && (w >> 16) & 0xF != 15 && w & 0xFFFF != 0
+}
+
+/// PC を書く（ブロックを終える）命令。
+pub(crate) fn terminates(i: &Instr) -> bool {
+    match i.op {
+        Op::B | Op::Bl | Op::BxReg | Op::MovPcReg => true,
+        // PC を含む LDM
+        Op::LdmStm => i.imm & (1 << 20) != 0 && i.imm & (1 << 15) != 0,
+        _ => false,
+    }
+}
+
+/// ページ内の命令 idx（0〜1023）から始まるブロックを切り出す。instr_at は
+/// ページ内の命令番号の命令を返す。対象外の命令・PC を書く命令（含める）・
+/// ページ末尾・MAX_BLOCK で終わる。先頭が対象外なら空。
+/// is_entry(i) が真の命令番号（関数内の別のブロックの先頭）の手前でも終える
+/// （そこからは関数の中の振り分けで続ける。同じ命令を複数のブロックに重ねて
+/// 生成しないため。重ねると関数が大きくなり、V8 がコンパイルでメモリを使い果たした）。
+pub(crate) fn form_block(
+    idx: u32,
+    mut instr_at: impl FnMut(u32) -> Instr,
+    is_entry: impl Fn(u32) -> bool,
+) -> Vec<Instr> {
+    let mut v = vec![];
+    let mut i = idx;
+    while i < 1024 && v.len() < MAX_BLOCK && (i == idx || !is_entry(i)) {
+        let ins = instr_at(i);
+        if !supported(&ins) {
+            break;
+        }
+        v.push(ins);
+        if terminates(&ins) {
+            break;
+        }
+        i += 1;
+    }
+    v
+}
+
+/// 命令番号 s から始まるブロック（form_block の結果、空でない）の後に、同じページで
+/// 実行が続き得る命令番号（ページの外・動的な分岐先は含まない）。
+pub(crate) fn successors(s: u32, block: &[Instr]) -> Vec<u32> {
+    let j = s + block.len() as u32 - 1;
+    let last = &block[block.len() - 1];
+    let mut v = vec![];
+    if terminates(last) {
+        if matches!(last.op, Op::B | Op::Bl) {
+            // 分岐先のページ内のオフセット（imm は regs[15] = PC+4 に足す差分）
+            let o = (4 * j + 4).wrapping_add(last.imm);
+            if o < 0x1000 {
+                v.push(o / 4);
+            }
+        }
+        if last.cond != 0xE || last.op == Op::Bl {
+            v.push(j + 1); // 不成立の続き・BL からの戻り先
+        }
+    } else {
+        // 対象外の命令・MAX_BLOCK・ページ末尾で切れた。対象外の命令はインタプリタが
+        // 実行し、その次がブロックの先頭になる。
+        v.push(j + 1);
+        v.push(j + 2);
+    }
+    v
 }
 
 // ---- ローカル変数の割り当て ----
@@ -197,14 +236,24 @@ const PERM_R: Local = 5;
 const PERM_W: Local = 6;
 const CPSR_A: Local = 7;
 const CPSR: Local = 8;
+/// 次に実行する（出口では regs[15] に入れる）PC
 const NPC: Local = 9;
-const PC0: Local = 10;
+/// 実行中のページの仮想アドレスの先頭
+const PAGE: Local = 10;
 const T0: Local = 11;
 const T1: Local = 12;
 const T2: Local = 13;
 const T3: Local = 14;
-/// r0〜r14（r15 はローカルに持たない。読みは PC0 からの差分）
-const R0: Local = 15;
+/// 上限までの残りの命令数・実行した命令数・サイド出口の印
+const REM: Local = 15;
+const EXEC: Local = 16;
+const SIDEF: Local = 17;
+const T4: Local = 18;
+const T5: Local = 19;
+const T6: Local = 20;
+const T7: Local = 21;
+/// r0〜r14（r15 はローカルに持たない。読みは PAGE からの定数の差分）
+const R0: Local = 22;
 const NUM_LOCALS: u32 = R0 + 15;
 
 const fn r(n: u8) -> Local {
@@ -220,6 +269,7 @@ const CTX_PID: u32 = std::mem::offset_of!(JitCtx, pid) as u32;
 const CTX_PERM_R: u32 = std::mem::offset_of!(JitCtx, perm_r) as u32;
 const CTX_PERM_W: u32 = std::mem::offset_of!(JitCtx, perm_w) as u32;
 const CTX_REMAINING: u32 = std::mem::offset_of!(JitCtx, remaining) as u32;
+const CTX_EXECUTED: u32 = std::mem::offset_of!(JitCtx, executed) as u32;
 const TLB_ESZ: u32 = std::mem::size_of::<TlbEntry>() as u32;
 const TLB_TAG: u32 = std::mem::offset_of!(TlbEntry, tag) as u32;
 const TLB_PERM: u32 = std::mem::offset_of!(TlbEntry, perm) as u32;
@@ -246,16 +296,98 @@ fn reads_writes(i: &Instr) -> (u16, u16) {
         CmpReg | TstReg => (rn | rm, 0),
         MovPcReg => (rm, 0),
         BxReg => (rn, 0),
-        LdrImm | LdrbImm => (rn, rd),
-        StrImm | StrbImm => (rn | rd, 0),
+        LdrImm | LdrbImm | LdrhImm | LdrsbImm | LdrshImm => (rn, rd),
+        StrImm | StrbImm | StrhImm => (rn | rd, 0),
+        LdrPre | LdrPost | LdrbPre | LdrbPost => (rn, rd | rn),
+        StrPre | StrPost | StrbPre | StrbPost => (rn | rd, rn),
         Bl => (0, bit(14)),
+        DataProc => {
+            let w = i.imm;
+            let op = (w >> 21) & 0xF;
+            let mut rd_ = if (OP_TST..=OP_CMN).contains(&op) {
+                0
+            } else {
+                bit((w >> 12) & 0xF)
+            };
+            let mut r = if op != OP_MOV && op != OP_MVN {
+                bit((w >> 16) & 0xF)
+            } else {
+                0
+            };
+            if w & (1 << 25) == 0 {
+                r |= bit(w & 0xF);
+                if w & 0x10 != 0 {
+                    r |= bit((w >> 8) & 0xF);
+                }
+            }
+            if rd_ == 0 {
+                rd_ = 0;
+            }
+            (r, rd_)
+        }
+        Ldst => {
+            let w = i.imm;
+            let (rn_, rd_) = (bit((w >> 16) & 0xF), bit((w >> 12) & 0xF));
+            let rm_ = if w & (1 << 25) != 0 { bit(w & 0xF) } else { 0 };
+            let wb = if w & (1 << 24) == 0 || w & (1 << 21) != 0 {
+                rn_
+            } else {
+                0
+            };
+            if w & (1 << 20) != 0 {
+                (rn_ | rm_, rd_ | wb)
+            } else {
+                (rn_ | rm_ | rd_, wb)
+            }
+        }
+        LdstMisc => {
+            let w = i.imm;
+            let (rn_, rd_) = (bit((w >> 16) & 0xF), bit((w >> 12) & 0xF));
+            let rm_ = if w & (1 << 22) == 0 { bit(w & 0xF) } else { 0 };
+            let wb = if w & (1 << 24) == 0 || w & (1 << 21) != 0 {
+                rn_
+            } else {
+                0
+            };
+            if w & (1 << 20) != 0 {
+                (rn_ | rm_, rd_ | wb)
+            } else {
+                (rn_ | rm_ | rd_, wb)
+            }
+        }
+        MulSwp => {
+            let w = i.imm;
+            let (rm_, rs_) = (bit(w & 0xF), bit((w >> 8) & 0xF));
+            let (r12, r16) = (bit((w >> 12) & 0xF), bit((w >> 16) & 0xF));
+            let acc = w & (1 << 21) != 0;
+            if w & (1 << 23) != 0 {
+                // 長い乗算: RdLo = bits 15:12、RdHi = bits 19:16
+                (rm_ | rs_ | if acc { r12 | r16 } else { 0 }, r12 | r16)
+            } else {
+                (rm_ | rs_ | if acc { r12 } else { 0 }, r16)
+            }
+        }
+        LdmStm => {
+            let w = i.imm;
+            let (rn_, list) = (bit((w >> 16) & 0xF), (w & 0x7FFF) as u16);
+            let wb = if w & (1 << 21) != 0 { rn_ } else { 0 };
+            if w & (1 << 20) != 0 {
+                (rn_, list | wb)
+            } else {
+                (rn_ | list, wb)
+            }
+        }
         _ => (0, 0),
     }
 }
 
 /// CPSR を読み書きするか（条件・フラグ・BX の T）。
 fn uses_cpsr(i: &Instr) -> bool {
-    i.cond != 0xE || sets_cpsr(i)
+    // 汎用のデータ処理は C を読むことがある（ADC 等・RRX・シフタキャリー）
+    i.cond != 0xE
+        || sets_cpsr(i)
+        || i.op == Op::DataProc
+        || (i.op == Op::Ldst && i.imm & (1 << 25) != 0) // RRX のオフセット
 }
 
 fn sets_cpsr(i: &Instr) -> bool {
@@ -282,42 +414,72 @@ fn sets_cpsr(i: &Instr) -> bool {
             | MovsReg
             | TstReg
             | BxReg
-    )
+    ) || (matches!(i.op, DataProc | MulSwp) && i.imm & (1 << 20) != 0)
 }
 
 fn is_mem(op: Op) -> bool {
-    matches!(op, Op::LdrImm | Op::LdrbImm | Op::StrImm | Op::StrbImm)
+    use Op::*;
+    matches!(
+        op,
+        LdrImm
+            | LdrbImm
+            | StrImm
+            | StrbImm
+            | LdrhImm
+            | LdrsbImm
+            | LdrshImm
+            | StrhImm
+            | LdrPre
+            | LdrPost
+            | LdrbPre
+            | LdrbPost
+            | StrPre
+            | StrPost
+            | StrbPre
+            | StrbPost
+            | LdmStm
+            | Ldst
+            | LdstMisc
+    )
 }
 
 struct Gen {
     f: Func,
-    /// 書き換えたレジスタ（出口で書き戻す）
-    dirty: u16,
-    /// CPSR を書き換えた
-    cpsr_dirty: bool,
+    /// 実行中のブロックの先頭の命令番号
+    base: u32,
+    /// 出口（$exit）までに囲んでいるブロックの数（ブロックの中の if を含む）
+    depth: u32,
+    /// 生成中の命令が汎用の Op か（汎用の実行関数は r15 を read_reg の PC+8 で読む。
+    /// 特化した Op は regs[15] = PC+4 のまま読み、必要なら即値で補正済み）
+    pc8: bool,
 }
 
-/// ブロック（form_block の結果、空でない）の wasm 関数を作る。
-pub(crate) fn gen_block(block: &[Instr]) -> Func {
-    let len = block.len() as u32;
-    let mut used = 0u16;
-    let (mut cpsr, mut mem) = (false, false);
-    for i in block {
-        let (rd, wr) = reads_writes(i);
-        used |= rd | wr;
-        cpsr |= uses_cpsr(i);
-        mem |= is_mem(i.op);
+/// 物理ページ 1 枚のブロック（(先頭の命令番号, form_block の結果)。空でなく、先頭の
+/// 命令番号が重ならないもの）を 1 つの wasm 関数にする。
+pub(crate) fn gen_page(blocks: &[(u32, Vec<Instr>)]) -> Func {
+    let (mut used, mut written) = (0u16, 0u16);
+    let (mut cpsr, mut cpsr_set, mut mem) = (false, false, false);
+    for (_, b) in blocks {
+        for i in b {
+            let (rd, wr) = reads_writes(i);
+            used |= rd | wr;
+            written |= wr;
+            cpsr |= uses_cpsr(i);
+            cpsr_set |= sets_cpsr(i);
+            mem |= is_mem(i.op);
+        }
     }
+    let n = blocks.len() as u32;
     let mut g = Gen {
         f: Func::new(NUM_LOCALS),
-        dirty: 0,
-        cpsr_dirty: false,
+        base: 0,
+        depth: 0,
+        pc8: false,
     };
     let f = &mut g.f;
-    // 上限の確認（ブロックの途中では数えない）。
-    f.get(CTX).load(CTX_REMAINING).i32(len).lt_u();
-    f.if_().i32(SIDE).ret().end();
-    f.get(CTX).load(CTX_REGS).tee(REGS).load(60).set(PC0);
+    f.get(CTX).load(CTX_REMAINING).set(REM);
+    f.get(CTX).load(CTX_REGS).tee(REGS).load(60).tee(NPC);
+    f.i32(!0xFFF).and().set(PAGE);
     if cpsr {
         f.get(CTX).load(CTX_CPSR).tee(CPSR_A).load(0).set(CPSR);
     }
@@ -328,73 +490,144 @@ pub(crate) fn gen_block(block: &[Instr]) -> Func {
         f.get(CTX).load(CTX_PERM_R).set(PERM_R);
         f.get(CTX).load(CTX_PERM_W).set(PERM_W);
     }
-    for n in 0..15u8 {
-        if used & (1 << n) != 0 {
-            f.get(REGS).load(4 * n as u32).set(r(n));
+    for x in 0..15u8 {
+        if used & (1 << x) != 0 {
+            f.get(REGS).load(4 * x as u32).set(r(x));
         }
     }
-    let mut npc = false;
-    for (k, i) in block.iter().enumerate() {
-        let k = k as u32;
-        if terminates(i.op) {
-            // 条件不成立なら次の命令へ。
-            g.pc(k + 1);
-            g.f.set(NPC);
-            npc = true;
-        }
-        let cond = i.cond != 0xE;
-        if cond {
-            g.cond(i.cond);
-            g.f.if_();
-        }
-        g.instr(k, i);
-        if cond {
-            g.f.end();
-        }
-        g.dirty |= reads_writes(i).1;
-        g.cpsr_dirty |= sets_cpsr(i);
+    // loop $L { block $exit { block $c(n-1) … block $c0 { br_table } ブロック 0 …
+    // ブロック n-1 } 出口 }。ブロック k は $c(k) の end の直後に置く。
+    f.loop_();
+    f.block();
+    for _ in 0..n {
+        f.block();
     }
-    g.exit(len, false, npc);
+    // 命令番号 → ブロック（ブロックの先頭でなければ $exit）
+    let mut table = vec![n; 1024];
+    for (k, (idx, _)) in blocks.iter().enumerate() {
+        table[*idx as usize] = k as u32;
+    }
+    f.get(NPC).i32(2).shr_u().i32(0x3FF).and();
+    f.br_table(&table, n);
+    for (k, (idx, b)) in blocks.iter().enumerate() {
+        g.f.end();
+        g.base = *idx;
+        // ここで $exit までに囲むのは $c(k+1)…$c(n-1)
+        g.depth = n - 1 - k as u32;
+        g.block(b);
+    }
+    g.f.end(); // $exit
+    // 出口: 書き戻して戻る
+    let f = &mut g.f;
+    for x in 0..15u8 {
+        if written & (1 << x) != 0 {
+            f.get(REGS).get(r(x)).store(4 * x as u32);
+        }
+    }
+    if cpsr_set {
+        f.get(CPSR_A).get(CPSR).store(0);
+    }
+    f.get(REGS).get(NPC).store(60);
+    f.get(CTX).get(EXEC).store(CTX_EXECUTED);
+    f.get(SIDEF).ret();
+    f.end(); // $L（ここには来ないが、関数の型に合わせて値を置く）
+    f.i32(0);
     g.f
 }
 
 impl Gen {
-    /// ブロック先頭から k 命令目の PC を積む。
+    /// ブロックの k 命令目の PC を積む。
     fn pc(&mut self, k: u32) {
-        self.f.get(PC0);
-        if k != 0 {
-            self.f.i32(4 * k).add();
+        self.f.get(PAGE);
+        let off = 4 * (self.base + k);
+        if off != 0 {
+            self.f.i32(off).add();
         }
     }
 
-    /// レジスタ n の値を積む（r15 は実行中の regs[15] = PC+4。IR の実行と同じ）。
+    /// レジスタ n の値を積む（r15 は、特化した Op では実行中の regs[15] = PC+4、
+    /// 汎用の Op では read_reg の PC+8。どちらも IR の実行と同じ）。
     fn reg(&mut self, k: u32, n: u8) {
         if n == 15 {
-            self.pc(k + 1);
+            self.pc(k + if self.pc8 { 2 } else { 1 });
         } else {
             self.f.get(r(n));
         }
     }
 
-    /// 出口: 書き換えたものを書き戻して戻る。k は実行を終えた命令数。npc なら
-    /// regs[15] に NPC を、でなければ k 命令目の PC を入れる。
-    fn exit(&mut self, k: u32, side: bool, npc: bool) {
-        for n in 0..15u8 {
-            if self.dirty & (1 << n) != 0 {
-                self.f.get(REGS).get(r(n)).store(4 * n as u32);
+    /// $exit へ分岐する（depth は今囲んでいる if の数を含む）。
+    fn br_exit(&mut self) {
+        self.f.br(self.depth);
+    }
+
+    /// サイド出口: ブロックの k 命令目の手前で戻る（k 命令は実行済み）。
+    fn side_exit(&mut self, k: u32) {
+        self.pc(k);
+        self.f.set(NPC);
+        if k != 0 {
+            self.f.get(EXEC).i32(k).add().set(EXEC);
+        }
+        self.f.i32(1).set(SIDEF);
+        self.br_exit();
+    }
+
+    /// if を開く（side_exit の深さに数える）。
+    fn open_if(&mut self) {
+        self.f.if_();
+        self.depth += 1;
+    }
+
+    fn close_if(&mut self) {
+        self.f.end();
+        self.depth -= 1;
+    }
+
+    /// ブロック 1 つ（入口の上限の確認、命令列、次のブロックへの連結）。
+    fn block(&mut self, b: &[Instr]) {
+        let len = b.len() as u32;
+        // 上限の確認（ブロックの途中では数えない）。NPC は入口の PC のまま。
+        self.f.get(REM).i32(len).lt_u();
+        self.open_if();
+        self.side_exit(0);
+        self.close_if();
+        let mut term = None;
+        for (k, i) in b.iter().enumerate() {
+            let k = k as u32;
+            if terminates(i) {
+                // 条件不成立なら次の命令へ。
+                self.pc(k + 1);
+                self.f.set(NPC);
+                term = Some(i.op);
+            }
+            let cond = i.cond != 0xE;
+            if cond {
+                self.cond(i.cond);
+                self.open_if();
+            }
+            self.instr(k, i);
+            if cond {
+                self.close_if();
             }
         }
-        if self.cpsr_dirty {
-            self.f.get(CPSR_A).get(CPSR).store(0);
+        if term.is_none() {
+            self.pc(len);
+            self.f.set(NPC);
         }
-        self.f.get(REGS);
-        if npc {
-            self.f.get(NPC);
-        } else {
-            self.pc(k);
+        let f = &mut self.f;
+        f.get(EXEC).i32(len).add().set(EXEC);
+        f.get(REM).i32(len).sub().set(REM);
+        if term == Some(Op::BxReg) {
+            // Thumb に切り替わったら戻る（Rust が Thumb の実行に回す）。
+            self.f.get(CPSR).i32(FLAG_T).and();
+            self.open_if();
+            self.br_exit();
+            self.close_if();
         }
-        self.f.store(60);
-        self.f.i32(k | if side { SIDE } else { 0 }).ret();
+        // 同じ仮想ページなら続ける（$L は $exit の 1 つ外）。
+        let f = &mut self.f;
+        f.get(NPC).get(PAGE).xor().i32(!0xFFF).and().eqz();
+        f.br_if(self.depth + 1);
+        self.br_exit();
     }
 
     /// 条件（cond_passed）を 0/1 で積む。
@@ -533,34 +766,529 @@ impl Gen {
             .i32(TLB_VALID)
             .or()
             .ne();
-        f.if_();
-        self.exit(k, true, false);
-        self.f.end();
+        self.open_if();
+        self.side_exit(k);
+        self.close_if();
         let f = &mut self.f;
         f.get(T3)
             .load8_u(TLB_PERM)
             .get(if write { PERM_W } else { PERM_R })
             .and()
             .eqz();
-        f.if_();
-        self.exit(k, true, false);
-        self.f.end();
+        self.open_if();
+        self.side_exit(k);
+        self.close_if();
         let f = &mut self.f;
         f.get(T3)
             .load(if write { TLB_WRAM } else { TLB_RAM })
             .tee(T3)
             .i32(NO_RAM)
             .eq();
-        f.if_();
-        self.exit(k, true, false);
-        self.f.end();
+        self.open_if();
+        self.side_exit(k);
+        self.close_if();
         let f = &mut self.f;
         f.get(ARENA).get(T3).add().get(T1).i32(0xFFF).and().add();
+    }
+
+    /// LDM/STM（ldm_ok の形）。exec_ldm_stm の「1 ページ内・TLB ヒット」の経路と同じ
+    /// 条件のときだけ実行し、それ以外（ページをまたぐ・TLB ミス・MMIO・コードページへの
+    /// ストア）は出口にする（インタプリタが 1 ワードずつの経路とアボートを扱う）。
+    fn ldm_stm(&mut self, k: u32, w: u32) {
+        let (pre, up, wb, load) = (
+            w & (1 << 24) != 0,
+            w & (1 << 23) != 0,
+            w & (1 << 21) != 0,
+            w & (1 << 20) != 0,
+        );
+        let rn = ((w >> 16) & 0xF) as u8;
+        let list = w & 0xFFFF;
+        let n = list.count_ones();
+        let delta = match (up, pre) {
+            (true, false) => 0,
+            (true, true) => 4,
+            (false, false) => (4u32).wrapping_sub(4 * n),
+            (false, true) => (4 * n).wrapping_neg(),
+        };
+        let new_base = if up { 4 * n } else { (4 * n).wrapping_neg() };
+        self.reg(k, rn);
+        self.f.tee(T0).i32(delta).add().i32(!3).and().tee(T1);
+        // 1 ページに収まらなければ出口（ram_run と同じ条件）
+        self.f.i32(0xFFF).and().i32(0x1000 - 4 * n).gt_u();
+        self.open_if();
+        self.side_exit(k);
+        self.close_if();
+        self.mem_addr(k, !load);
+        self.f.set(T5);
+        let regs = (0..16u8).filter(|&x| list & (1 << x) != 0);
+        if load {
+            // ライトバックが先。Rn がリストにあればロード値が上書きする。
+            if wb {
+                self.f.get(T0).i32(new_base).add().set(r(rn));
+            }
+            for (j, x) in regs.enumerate() {
+                self.f.get(T5).load(4 * j as u32);
+                if x == 15 {
+                    self.f.i32(!3).and().set(NPC); // load_pc（S=0）
+                } else {
+                    self.f.set(r(x));
+                }
+            }
+        } else {
+            // 全部書いてからライトバック（Rn は変更前の値を書く）。PC は PC+8。
+            for (j, x) in regs.enumerate() {
+                self.f.get(T5);
+                if x == 15 {
+                    self.pc(k + 2);
+                } else {
+                    self.f.get(r(x));
+                }
+                self.f.store(4 * j as u32);
+            }
+            if wb {
+                self.f.get(T0).i32(new_base).add().set(r(rn));
+            }
+        }
+    }
+
+    /// 汎用の LDR/STR/LDRB/STRB（ldst_ok の形。exec_ldst と同じ意味・順序）。
+    fn ldst(&mut self, k: u32, w: u32) {
+        let (pre, up, byte, wb, load) = (
+            w & (1 << 24) != 0,
+            w & (1 << 23) != 0,
+            w & (1 << 22) != 0,
+            w & (1 << 21) != 0,
+            w & (1 << 20) != 0,
+        );
+        let (rn, rd) = (((w >> 16) & 0xF) as u8, ((w >> 12) & 0xF) as u8);
+        // T2 = オフセット（スケーリング付きレジスタは即値シフトの値だけ）
+        if w & (1 << 25) != 0 {
+            self.reg_shift_imm(k, w, false);
+        } else {
+            self.f.i32(w & 0xFFF).set(T2);
+        }
+        self.xfer(
+            k,
+            rn,
+            rd,
+            pre,
+            up,
+            !pre || wb,
+            load,
+            if byte { 1 } else { 4 },
+            false,
+        );
+    }
+
+    /// 汎用のハーフワード・符号付き転送（ldst_misc_ok の形。exec_ldst_misc と同じ）。
+    fn ldst_misc(&mut self, k: u32, w: u32) {
+        let (pre, up, wb, load) = (
+            w & (1 << 24) != 0,
+            w & (1 << 23) != 0,
+            w & (1 << 21) != 0,
+            w & (1 << 20) != 0,
+        );
+        let (rn, rd) = (((w >> 16) & 0xF) as u8, ((w >> 12) & 0xF) as u8);
+        if w & (1 << 22) != 0 {
+            self.f.i32(((w >> 4) & 0xF0) | (w & 0xF)).set(T2);
+        } else {
+            self.reg(k, (w & 0xF) as u8);
+            self.f.set(T2);
+        }
+        // sh: 01 = H（ゼロ拡張）、10 = SB、11 = SH
+        let (size, signed) = match (w >> 5) & 3 {
+            1 => (2, false),
+            2 => (1, true),
+            _ => (2, true),
+        };
+        self.xfer(k, rn, rd, pre, up, !pre || wb, load, size, signed);
+    }
+
+    /// 転送の本体（オフセットは T2）。size は 1/2/4、signed は LDRSB（size=1）・LDRSH。
+    #[allow(clippy::too_many_arguments)]
+    fn xfer(
+        &mut self,
+        k: u32,
+        rn: u8,
+        rd: u8,
+        pre: bool,
+        up: bool,
+        writeback: bool,
+        load: bool,
+        size: u32,
+        signed: bool,
+    ) {
+        self.reg(k, rn);
+        self.f.tee(T0).get(T2);
+        if up {
+            self.f.add();
+        } else {
+            self.f.sub();
+        }
+        self.f.set(T4); // indexed
+        if pre {
+            self.f.get(T4).set(T0);
+        }
+        // T0 = アクセスするアドレス（ワード・ハーフワードは揃えてから TLB を引く）
+        self.f.get(T0);
+        match size {
+            4 => {
+                self.f.i32(!3).and();
+            }
+            2 => {
+                self.f.i32(!1).and();
+            }
+            _ => {}
+        }
+        self.f.set(T1);
+        self.mem_addr(k, !load);
+        if load {
+            match (size, signed) {
+                (4, _) => {
+                    self.f.load(0).get(T0).i32(3).and().i32(3).shl().rotr();
+                }
+                (2, false) => {
+                    self.f.load16_u(0);
+                }
+                (2, true) => {
+                    self.f.load16_s(0);
+                }
+                (_, false) => {
+                    self.f.load8_u(0);
+                }
+                _ => {
+                    self.f.load8_s(0);
+                }
+            }
+            self.f.set(T5);
+            if writeback {
+                self.f.get(T4).set(r(rn));
+            }
+            self.f.get(T5).set(r(rd));
+        } else {
+            self.reg(k, rd);
+            match size {
+                4 => self.f.store(0),
+                2 => self.f.store16(0),
+                _ => self.f.store8(0),
+            };
+            if writeback {
+                self.f.get(T4).set(r(rn));
+            }
+        }
+    }
+
+    /// MUL/MLA/UMULL/UMLAL/SMULL/SMLAL（mul_ok の形。exec_mul・exec_mul_long と同じ）。
+    fn mul(&mut self, k: u32, w: u32) {
+        let (rm, rs) = ((w & 0xF) as u8, ((w >> 8) & 0xF) as u8);
+        let (r12, r16) = (((w >> 12) & 0xF) as u8, ((w >> 16) & 0xF) as u8);
+        let (acc, s) = (w & (1 << 21) != 0, w & (1 << 20) != 0);
+        if w & (1 << 23) == 0 {
+            self.reg(k, rm);
+            self.reg(k, rs);
+            self.f.mul();
+            if acc {
+                self.reg(k, r12);
+                self.f.add();
+            }
+            self.f.set(T1);
+            self.f.get(T1).set(r(r16));
+            if s {
+                self.set_nz(T1, 0x3FFF_FFFF, 0);
+            }
+            return;
+        }
+        let signed = w & (1 << 22) != 0;
+        // 64 ビットの積（と加算）をスタックで 2 回計算して下位・上位を取り出す
+        // （i64 のローカルを持たないため）。
+        let prod = |g: &mut Gen| {
+            g.reg(k, rm);
+            if signed {
+                g.f.i64_extend_s()
+            } else {
+                g.f.i64_extend_u()
+            };
+            g.reg(k, rs);
+            if signed {
+                g.f.i64_extend_s()
+            } else {
+                g.f.i64_extend_u()
+            };
+            g.f.i64_mul();
+            if acc {
+                g.reg(k, r16);
+                g.f.i64_extend_u().i64(32).i64_shl();
+                g.reg(k, r12);
+                g.f.i64_extend_u().i64_or().i64_add();
+            }
+        };
+        prod(self);
+        self.f.wrap().set(T1); // 下位
+        prod(self);
+        self.f.i64(32).i64_shr_u().wrap().set(T2); // 上位
+        self.f.get(T1).set(r(r12));
+        self.f.get(T2).set(r(r16));
+        if s {
+            // N = bit63、Z = 64 ビット全体が 0
+            let f = &mut self.f;
+            f.get(CPSR).i32(0x3FFF_FFFF).and();
+            f.get(T2).i32(0x8000_0000).and().or();
+            f.get(T1).get(T2).or().eqz().i32(30).shl().or();
+            f.set(CPSR);
+        }
+    }
+
+    /// シフタキャリー（C フラグの今の値）を 0/1 で積む。
+    fn carry_in(&mut self) {
+        self.f.get(CPSR).i32(29).shr_u().i32(1).and();
+    }
+
+    /// 汎用のデータ処理（dp_ok の形。exec_data_proc と同じ意味）。
+    /// T2 = 第 2 オペランド、T3 = シフタキャリー（0/1）、T0 = Rn、T1 = 結果。
+    fn data_proc(&mut self, k: u32, w: u32) {
+        let op = (w >> 21) & 0xF;
+        let s = w & (1 << 20) != 0;
+        let (rn, rd) = (((w >> 16) & 0xF) as u8, ((w >> 12) & 0xF) as u8);
+        let logical = matches!(
+            op,
+            OP_AND | OP_EOR | OP_TST | OP_TEQ | OP_ORR | OP_MOV | OP_BIC | OP_MVN
+        );
+        let need_c = s && logical;
+        // ---- 第 2 オペランドとシフタキャリー ----
+        if w & (1 << 25) != 0 {
+            let rot = ((w >> 8) & 0xF) * 2;
+            let val = (w & 0xFF).rotate_right(rot);
+            self.f.i32(val).set(T2);
+            if need_c {
+                if rot == 0 {
+                    self.carry_in();
+                } else {
+                    self.f.i32(val >> 31);
+                }
+                self.f.set(T3);
+            }
+        } else if w & 0x10 == 0 {
+            self.reg_shift_imm(k, w, need_c);
+        } else {
+            self.reg_shift_reg(k, w);
+        }
+        // ---- 演算 ----
+        if op != OP_MOV && op != OP_MVN {
+            self.reg(k, rn);
+            self.f.set(T0);
+        }
+        let f = &mut self.f;
+        let arith = match op {
+            OP_AND | OP_TST => {
+                f.get(T0).get(T2).and();
+                None
+            }
+            OP_EOR | OP_TEQ => {
+                f.get(T0).get(T2).xor();
+                None
+            }
+            OP_ORR => {
+                f.get(T0).get(T2).or();
+                None
+            }
+            OP_MOV => {
+                f.get(T2);
+                None
+            }
+            OP_BIC => {
+                f.get(T0).get(T2).i32(u32::MAX).xor().and();
+                None
+            }
+            OP_MVN => {
+                f.get(T2).i32(u32::MAX).xor();
+                None
+            }
+            // add_with_carry(a, b, cin) の (a, b の反転, cin): 0 = 定数 0、1 = 定数 1、2 = C
+            OP_SUB | OP_CMP => Some((T0, T2, true, 1)),
+            OP_RSB => Some((T2, T0, true, 1)),
+            OP_ADD | OP_CMN => Some((T0, T2, false, 0)),
+            OP_ADC => Some((T0, T2, false, 2)),
+            OP_SBC => Some((T0, T2, true, 2)),
+            _ => {
+                debug_assert_eq!(op, OP_RSC);
+                Some((T2, T0, true, 2))
+            }
+        };
+        match arith {
+            None => {
+                self.f.set(T1);
+                if s {
+                    // N・Z は結果、C はシフタキャリー、V は不変
+                    let f = &mut self.f;
+                    f.get(CPSR).i32(0x1FFF_FFFF).and();
+                    f.get(T1).i32(0x8000_0000).and().or();
+                    f.get(T1).eqz().i32(30).shl().or();
+                    f.get(T3).i32(29).shl().or();
+                    f.set(CPSR);
+                }
+            }
+            Some((a, b, inv, cin)) => {
+                // T6 = a、T7 = b（反転済み）、T4 = a + b、T1 = T4 + cin
+                let f = &mut self.f;
+                f.get(a).set(T6);
+                f.get(b);
+                if inv {
+                    f.i32(u32::MAX).xor();
+                }
+                f.set(T7);
+                f.get(T6).get(T7).add().tee(T4);
+                match cin {
+                    0 => {}
+                    1 => {
+                        f.i32(1).add();
+                    }
+                    _ => {
+                        self.carry_in();
+                        self.f.add();
+                    }
+                }
+                self.f.set(T1);
+                if s {
+                    let f = &mut self.f;
+                    f.get(CPSR).i32(0x0FFF_FFFF).and();
+                    f.get(T1).i32(0x8000_0000).and().or();
+                    f.get(T1).eqz().i32(30).shl().or();
+                    // C: a + b の桁上がり、または + cin の桁上がり
+                    f.get(T4).get(T6).lt_u().get(T1).get(T4).lt_u().or();
+                    f.i32(29).shl().or();
+                    // V: (a ^ res) & (b ^ res) の最上位
+                    f.get(T6).get(T1).xor().get(T7).get(T1).xor().and();
+                    f.i32(31).shr_u().i32(28).shl().or();
+                    f.set(CPSR);
+                }
+            }
+        }
+        if !(OP_TST..=OP_CMN).contains(&op) {
+            self.f.get(T1).set(r(rd));
+        }
+    }
+
+    /// 即値シフト（shift_imm）: T2 = 値、need_c なら T3 = キャリー。
+    fn reg_shift_imm(&mut self, k: u32, w: u32, need_c: bool) {
+        let (t, a) = ((w >> 5) & 3, (w >> 7) & 0x1F);
+        self.reg(k, (w & 0xF) as u8);
+        self.f.set(T5); // v
+        let f = &mut self.f;
+        match (t, a) {
+            (0, 0) => {
+                f.get(T5).set(T2);
+            }
+            (0, _) => {
+                f.get(T5).i32(a).shl().set(T2);
+            }
+            (1, 0) => {
+                f.i32(0).set(T2);
+            }
+            (1, _) => {
+                f.get(T5).i32(a).shr_u().set(T2);
+            }
+            (2, 0) => {
+                f.get(T5).i32(31).shr_s().set(T2);
+            }
+            (2, _) => {
+                f.get(T5).i32(a).shr_s().set(T2);
+            }
+            (_, 0) => {
+                // RRX
+                f.get(T5).i32(1).shr_u();
+                f.get(CPSR)
+                    .i32(29)
+                    .shr_u()
+                    .i32(1)
+                    .and()
+                    .i32(31)
+                    .shl()
+                    .or()
+                    .set(T2);
+            }
+            _ => {
+                f.get(T5).i32(a).rotr().set(T2);
+            }
+        }
+        if !need_c {
+            return;
+        }
+        match (t, a) {
+            (0, 0) => self.carry_in(),
+            (0, _) => {
+                self.f.get(T5).i32(32 - a).shr_u().i32(1).and();
+            }
+            (1, 0) | (2, 0) => {
+                self.f.get(T5).i32(31).shr_u();
+            }
+            (1, _) | (2, _) => {
+                self.f.get(T5).i32(a - 1).shr_u().i32(1).and();
+            }
+            (_, 0) => {
+                self.f.get(T5).i32(1).and();
+            }
+            _ => {
+                self.f.get(T2).i32(31).shr_u();
+            }
+        }
+        self.f.set(T3);
+    }
+
+    /// レジスタ指定シフト（shift_reg）: T2 = 値、T3 = キャリー（量 0 なら今の C）。
+    fn reg_shift_reg(&mut self, k: u32, w: u32) {
+        let t = (w >> 5) & 3;
+        self.reg(k, (w & 0xF) as u8);
+        self.f.tee(T5).set(T2); // v（量 0 ならそのまま）
+        self.reg(k, ((w >> 8) & 0xF) as u8);
+        self.f.i32(0xFF).and().set(T4); // amount
+        self.carry_in();
+        self.f.set(T3);
+        let f = &mut self.f;
+        f.get(T4).if_(); // amount != 0
+        match t {
+            0 | 1 => {
+                f.get(T4).i32(32).lt_u().if_();
+                // 1〜31
+                if t == 0 {
+                    f.get(T5).i32(32).get(T4).sub().shr_u().i32(1).and().set(T3);
+                    f.get(T5).get(T4).shl().set(T2);
+                } else {
+                    f.get(T5).get(T4).i32(1).sub().shr_u().i32(1).and().set(T3);
+                    f.get(T5).get(T4).shr_u().set(T2);
+                }
+                f.else_();
+                // 32 ならはみ出したビット、33 以上なら 0
+                if t == 0 {
+                    f.get(T5).i32(1).and();
+                } else {
+                    f.get(T5).i32(31).shr_u();
+                }
+                f.i32(0).get(T4).i32(32).eq().select().set(T3);
+                f.i32(0).set(T2);
+                f.end();
+            }
+            2 => {
+                f.get(T4).i32(32).lt_u().if_();
+                f.get(T5).get(T4).i32(1).sub().shr_u().i32(1).and().set(T3);
+                f.get(T5).get(T4).shr_s().set(T2);
+                f.else_();
+                f.get(T5).i32(31).shr_u().set(T3);
+                f.get(T5).i32(31).shr_s().set(T2);
+                f.end();
+            }
+            _ => {
+                // ROR: 量 & 31 が 0 なら値そのまま、C は bit31
+                f.get(T5).get(T4).i32(31).and().rotr().tee(T2);
+                f.i32(31).shr_u().set(T3);
+            }
+        }
+        f.end();
     }
 
     /// 1 命令（条件は呼び出し側）。
     fn instr(&mut self, k: u32, i: &Instr) {
         use Op::*;
+        self.pc8 = matches!(i.op, DataProc | Ldst | LdstMisc | MulSwp | LdmStm);
         let (rd, rn, imm) = (i.rd, i.rn, i.imm);
         let rm = (imm & 0xF) as u8;
         match i.op {
@@ -750,13 +1478,69 @@ impl Gen {
                     self.f.set(r(14));
                 }
                 // imm は regs[15]（= PC+4）に足す差分
-                self.f
-                    .get(PC0)
-                    .i32((4 * k + 4).wrapping_add(imm))
-                    .add()
-                    .set(NPC);
+                let off = (4 * (self.base + k) + 4).wrapping_add(imm);
+                self.f.get(PAGE).i32(off).add().set(NPC);
             }
-            _ => unreachable!("gen_block: unsupported op {:?}", i.op),
+            LdrhImm | LdrsbImm | LdrshImm | StrhImm => {
+                self.reg(k, rn);
+                self.f.i32(imm).add().tee(T0);
+                if i.op != LdrsbImm {
+                    self.f.i32(!1).and(); // 非アラインのハーフワードは揃える（汎用と同じ）
+                }
+                self.f.set(T1);
+                self.mem_addr(k, i.op == StrhImm);
+                match i.op {
+                    LdrhImm => self.f.load16_u(0).set(r(rd)),
+                    LdrsbImm => self.f.load8_s(0).set(r(rd)),
+                    LdrshImm => self.f.load16_s(0).set(r(rd)),
+                    _ => {
+                        self.reg(k, rd);
+                        self.f.store16(0)
+                    }
+                };
+            }
+            LdrPre | LdrPost | LdrbPre | LdrbPost | StrPre | StrPost | StrbPre | StrbPost => {
+                // ldst_wb と同じ順序: アクセスが出口になったらベースは書き換えない。
+                // ロードで Rd=Rn ならロード値が勝つ。ストアは書き換える前の Rd を書く。
+                let load = matches!(i.op, LdrPre | LdrPost | LdrbPre | LdrbPost);
+                let byte = matches!(i.op, LdrbPre | LdrbPost | StrbPre | StrbPost);
+                let pre = matches!(i.op, LdrPre | LdrbPre | StrPre | StrbPre);
+                self.reg(k, rn);
+                self.f.tee(T0).i32(imm).add().set(T4); // T4 = 書き戻すベース
+                if pre {
+                    self.f.get(T4).set(T0); // T0 = アクセスするアドレス
+                }
+                self.f.get(T0);
+                if !byte {
+                    self.f.i32(!3).and();
+                }
+                self.f.set(T1);
+                self.mem_addr(k, !load);
+                if load {
+                    if byte {
+                        self.f.load8_u(0);
+                    } else {
+                        self.f.load(0).get(T0).i32(3).and().i32(3).shl().rotr();
+                    }
+                    self.f.set(T5);
+                    self.f.get(T4).set(r(rn));
+                    self.f.get(T5).set(r(rd));
+                } else {
+                    self.reg(k, rd);
+                    if byte {
+                        self.f.store8(0);
+                    } else {
+                        self.f.store(0);
+                    }
+                    self.f.get(T4).set(r(rn));
+                }
+            }
+            LdmStm => self.ldm_stm(k, imm),
+            Ldst => self.ldst(k, imm),
+            LdstMisc => self.ldst_misc(k, imm),
+            MulSwp => self.mul(k, imm),
+            DataProc => self.data_proc(k, imm),
+            _ => unreachable!("gen_page: unsupported op {:?}", i.op),
         }
     }
 }
@@ -764,28 +1548,32 @@ impl Gen {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::arm::decode_instr;
 
     #[test]
     fn block_stops_at_branch_and_unsupported() {
         // MOV r0,#1; ADD r1,r0,#2; B .; MOV r2,#3
         let words = [0xE3A00001, 0xE2801002, 0xEAFFFFFE, 0xE3A02003];
-        let b = form_block(0, |i| decode_instr(words[i as usize]));
+        let b = form_block(0, |i| decode_instr(words[i as usize]), |_| false);
         assert_eq!(b.len(), 3);
         // SWI は対象外
         let words = [0xE3A00001, 0xEF000000];
-        let b = form_block(0, |i| decode_instr(words[i as usize]));
+        let b = form_block(0, |i| decode_instr(words[i as usize]), |_| false);
         assert_eq!(b.len(), 1);
-        let b = form_block(1, |i| decode_instr(words[i as usize]));
+        let b = form_block(1, |i| decode_instr(words[i as usize]), |_| false);
         assert!(b.is_empty());
     }
 
     #[test]
     fn block_stops_at_page_end() {
-        let b = form_block(1020, |_| decode_instr(0xE3A00001));
+        let b = form_block(1020, |_| decode_instr(0xE3A00001), |_| false);
         assert_eq!(b.len(), 4);
-        let b = form_block(0, |_| decode_instr(0xE3A00001));
+        let b = form_block(0, |_| decode_instr(0xE3A00001), |_| false);
         assert_eq!(b.len(), MAX_BLOCK);
+        // 別のブロックの先頭の手前で終わる
+        let b = form_block(0, |_| decode_instr(0xE3A00001), |i| i == 5);
+        assert_eq!(b.len(), 5);
     }
 
     /// 対象の Op がすべて生成できる（生成で panic しない）。実行の確かめは Node の
@@ -800,26 +1588,28 @@ mod tests {
             0xE1C11002, 0xE1510002, 0xE0511002, 0xE0911002, 0xE1B01002, 0xE1110002, 0xE1A01102,
             0xE1E01122, 0xE0811142, 0xE0411162, 0xE0611102, 0xE0011122, 0xE1811142, 0xE0211162,
             0xE1C11102, 0xE5910004, 0xE5D10004, 0xE5810004, 0xE5C10004, 0xE59F0004, 0xE1A0F00E,
-            0xE12FFF1E, 0xEB000000, 0xEA000000,
+            0xE12FFF1E, 0xEB000000, 0xEA000000, // 5-1
+            0xE1D100B2, 0xE1D100D2, 0xE1D100F2, 0xE1C100B2, 0xE5B10004, 0xE4910004, 0xE5F10004,
+            0xE4D10004, 0xE5A10004, 0xE4810004, 0xE5E10004,
+            0xE4C10004, // ハーフワード・ライトバック
+            0xE0A12003, 0xE0B12312, 0xE1B01062, 0xE0F12353,
+            0xE1D01000, // 汎用のデータ処理
+            0xE8BD4010, 0xE92D4010, 0xE8BD8010, 0xE9900006, // LDM/STM
+            0xE7912103, 0xE6112003, 0xE19120B3, 0xE11120D3, // 汎用の LDR/STR・LDRH 等
+            0xE0020391, 0xE0221392, 0xE0821392, 0xE0E21392, // MUL/MLA/UMULL/SMLAL
         ];
         let mut seen = std::collections::BTreeSet::new();
         for w in words {
             let i = decode_instr(w);
-            assert!(supported(i.op), "{w:08X} -> {:?}", i.op);
+            assert!(supported(&i), "{w:08X} -> {:?}", i.op);
             seen.insert(i.op as u8);
-            gen_block(&[i]);
+            gen_page(&[(0, vec![i])]);
         }
-        // SPECIAL_OPS が特化の Op を順に全部並べていること（Op は repr(u8) で、特化は
-        // MovImm から BSpin まで連続）。
-        for (n, op) in SPECIAL_OPS.iter().enumerate() {
-            assert_eq!(*op as u8, Op::MovImm as u8 + n as u8);
-        }
-        assert_eq!(*SPECIAL_OPS.last().unwrap(), Op::BSpin);
-        let all: Vec<u8> = SPECIAL_OPS
-            .iter()
-            .filter(|&&o| supported(o))
-            .map(|&o| o as u8)
-            .collect();
-        assert_eq!(seen.into_iter().collect::<Vec<_>>(), all);
+        let all: std::collections::BTreeSet<u8> = JIT_OPS.iter().map(|&o| o as u8).collect();
+        assert_eq!(seen, all);
+        // 表の先頭・対象外の形
+        assert!(!supported(&decode_instr(0xE08FF002))); // ADD pc, pc, r2
+        assert!(!supported(&decode_instr(0xE1B0F00E))); // MOVS pc, lr
+        assert!(!supported(&decode_instr(0xE8DD8000))); // LDM ^ （S=1）
     }
 }

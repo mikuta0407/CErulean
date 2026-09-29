@@ -32,6 +32,8 @@ pub trait JitHost {
     fn load(&mut self, wasm: &[u8], nfuncs: u32) -> Result<u32, String>;
     /// 関数 func を ctx（[`JitCtx`] のアドレス）で呼び、戻り値を返す。
     fn call(&mut self, func: u32, ctx: u32) -> u32;
+    /// 関数 func を捨てる（番号は再利用しない）。
+    fn release(&mut self, func: u32);
     /// 読み込んだ関数をすべて捨てる（番号は 0 から振り直す）。
     fn release_all(&mut self);
 }
@@ -56,6 +58,8 @@ pub(crate) struct JitCtx {
     pub perm_w: u32,
     /// 上限までの残りの命令数（u32 に切り詰めたもの）
     pub remaining: u32,
+    /// 出力: 実行した命令数
+    pub executed: u32,
 }
 
 // デコードキャッシュのページの枠（命令ごとの u32）の値:
@@ -74,8 +78,10 @@ const CODE_LIMIT: u64 = 32 << 20;
 /// 計測・試験用の数。
 #[derive(Clone, Debug, Default)]
 pub struct JitStats {
-    /// コンパイルしたブロック・モジュール・バイト数
+    /// 生成したブロックの数（ページの作り直しで同じブロックを何度も数える）
     pub blocks: u64,
+    /// 作った関数（ページ単位。作り直しを含む）・モジュール・バイト数の累計
+    pub pages: u64,
     pub modules: u64,
     pub bytes: u64,
     /// ブロックに入った回数・その中で実行した命令数・サイド出口の回数
@@ -86,6 +92,11 @@ pub struct JitStats {
     pub flushes: u64,
     /// コンパイルしたブロックに含まれた Op ごとの数（試験で全 Op を試したかを見る）
     pub ops: Vec<u64>,
+    /// サイド出口でない戻りのうち、ページを出た・Thumb に切り替わった・次の PC が
+    /// ブロックの先頭でなかった回数（ブロックの連結が切れた理由）
+    pub exit_page: u64,
+    pub exit_thumb: u64,
+    pub exit_other: u64,
 }
 
 /// JIT の管理。
@@ -97,6 +108,8 @@ pub struct Jit {
     batch: usize,
     /// コンパイル待ち（ページの添字, 命令番号）
     queue: Vec<(u32, u32)>,
+    /// 前回のコンパイルの後に、コンパイル待ちのブロックに入った回数
+    queued_hits: u32,
     ctx: JitCtx,
     /// 今読み込んでいるコードのバイト数
     loaded: u64,
@@ -118,6 +131,7 @@ impl Jit {
             threshold: 64,
             batch: 32,
             queue: vec![],
+            queued_hits: 0,
             ctx: JitCtx::default(),
             loaded: 0,
             stats: JitStats::default(),
@@ -180,15 +194,34 @@ impl Jit {
         if v & COMPILED != 0 {
             return Action::Ran(self.call(v & !COMPILED, cpu, mmu, arena, run));
         }
+        if v == QUEUED {
+            // コンパイル待ちのブロックに何度も入るなら、batch に満たなくてもすぐ
+            // コンパイルする（ループがコンパイル待ちのまま解釈され続けないように）。
+            self.queued_hits += 1;
+            if self.queued_hits >= self.threshold {
+                return Action::Compile;
+            }
+            return Action::Ran(JitRun::No);
+        }
         if v >= QUEUED {
             return Action::Ran(JitRun::No);
         }
-        if v + 1 < self.threshold {
+        // 関数を作ったことのあるページの新しい入口は、作り直すたびに 4 倍入るまで
+        // 待つ（まれにしか通らない入口のたびにページ全体を作り直すと、生成コードが
+        // 膨らみ V8 のメモリが増え続けた。2026-09-29 の計測）。
+        let page = code.cur_page();
+        let level = code.jit_level(page).min(10) as u32;
+        let need = self
+            .threshold
+            .saturating_mul(1 << (2 * level))
+            .min(QUEUED - 1);
+        let slot = code.jit_slot(pc);
+        if v + 1 < need {
             *slot = v + 1;
             return Action::Ran(JitRun::No);
         }
         *slot = QUEUED;
-        self.queue.push((code.cur_page(), (pc >> 2) & 0x3FF));
+        self.queue.push((page, (pc >> 2) & 0x3FF));
         if self.queue.len() >= self.batch {
             Action::Compile
         } else {
@@ -227,10 +260,21 @@ impl Jit {
             perm_r: perm_r as u32,
             perm_w: perm_w as u32,
             remaining: run.budget.saturating_sub(run.n).min(u32::MAX as u64) as u32,
+            executed: 0,
         };
-        let r = host.call(func, addr(&self.ctx));
-        let executed = (r & 0xFFFF) as u64;
-        let side = r & codegen::SIDE != 0;
+        // ctx は生成コードが executed を書くので、&mut から作ったアドレスを渡す。
+        let pc0 = cpu.regs[15];
+        let side = host.call(func, addr(&raw mut self.ctx)) != 0;
+        if !side {
+            if (cpu.regs[15] ^ pc0) & !0xFFF != 0 {
+                self.stats.exit_page += 1;
+            } else if cpu.cpsr & crate::arm::FLAG_T != 0 {
+                self.stats.exit_thumb += 1;
+            } else {
+                self.stats.exit_other += 1;
+            }
+        }
+        let executed = self.ctx.executed as u64;
         run.n += executed;
         self.stats.calls += 1;
         self.stats.executed += executed;
@@ -240,7 +284,9 @@ impl Jit {
         }
     }
 
-    /// コンパイル待ちのブロックをまとめて 1 モジュールにし、読み込む。
+    /// コンパイル待ちのブロックのあるページごとに、そのページのコンパイル済みの
+    /// ブロックも含めた関数を作り直し（ブロックを連結するため。codegen.rs）、
+    /// まとめて 1 モジュールにして読み込む。古い関数は捨てる。
     pub(crate) fn compile(&mut self, code: &mut CodeCache, mem: &mut impl CodeMemory) {
         if self.host.is_none() {
             self.queue.clear();
@@ -249,44 +295,109 @@ impl Jit {
         // 書き込まれたページのデコード結果（と枠）を先に捨てる（待ち行列の中の
         // そのページのブロックは枠が QUEUED でなくなるので飛ばされる）。
         code.drain_invalidated(mem);
+        self.queued_hits = 0;
+        let mut pages: Vec<u32> = std::mem::take(&mut self.queue)
+            .into_iter()
+            .filter(|&(page, idx)| code.slot(page, idx) == QUEUED)
+            .map(|(page, _)| page)
+            .collect();
+        pages.sort_unstable();
+        pages.dedup();
         let mut funcs = vec![];
+        // (ページ, ブロックの先頭の命令番号の列, 古い関数の番号の列)
         let mut targets = vec![];
-        for (page, idx) in std::mem::take(&mut self.queue) {
-            if code.slot(page, idx) != QUEUED {
+        for page in pages {
+            let mut blocks = vec![];
+            let mut old = vec![];
+            // 関数に入れるブロックの先頭（コンパイル待ちとコンパイル済み。先頭が対象外の
+            // ものは NEVER にして外す）
+            let mut entry = vec![false; 1024];
+            for idx in 0..1024 {
+                let v = code.slot(page, idx);
+                if v & COMPILED != 0 {
+                    old.push(v & !COMPILED);
+                } else if v != QUEUED {
+                    continue;
+                }
+                if codegen::supported(&code.instr_at(page, idx, mem)) {
+                    entry[idx as usize] = true;
+                } else {
+                    code.set_slot(page, idx, NEVER);
+                }
+            }
+            // 入口から静的にたどれる同じページ内の続き（分岐先・条件分岐と BL の次・
+            // 対象外の命令の次）も入口に加える（後で 1 つずつ熱くなるたびに作り直さない
+            // ように）。一度も実行されていない命令（デコードされていない）は加えない。
+            let mut work: Vec<u32> = (0..1024u32).filter(|&i| entry[i as usize]).collect();
+            while let Some(s) = work.pop() {
+                let block = codegen::form_block(s, |i| code.instr_at(page, i, mem), |_| false);
+                for n in codegen::successors(s, &block) {
+                    if n < 1024
+                        && !entry[n as usize]
+                        && code.is_decoded(page, n)
+                        && code.slot(page, n) != NEVER
+                        && codegen::supported(&code.instr_at(page, n, mem))
+                    {
+                        entry[n as usize] = true;
+                        work.push(n);
+                    }
+                }
+            }
+            for idx in 0..1024u32 {
+                if !entry[idx as usize] {
+                    continue;
+                }
+                let block = codegen::form_block(
+                    idx,
+                    |i| code.instr_at(page, i, mem),
+                    |i| entry[i as usize],
+                );
+                if self.stats.ops.is_empty() {
+                    self.stats.ops = vec![0; 256];
+                }
+                for i in &block {
+                    self.stats.ops[i.op as usize] += 1;
+                }
+                blocks.push((idx, block));
+            }
+            if blocks.is_empty() {
                 continue;
             }
-            let block = codegen::form_block(idx, |i| code.instr_at(page, i, mem));
-            if block.is_empty() {
-                code.set_slot(page, idx, NEVER);
-                continue;
-            }
-            if self.stats.ops.is_empty() {
-                self.stats.ops = vec![0; 256];
-            }
-            for i in &block {
-                self.stats.ops[i.op as usize] += 1;
-            }
-            funcs.push(codegen::gen_block(&block));
-            targets.push((page, idx));
+            old.sort_unstable();
+            old.dedup();
+            code.bump_jit_level(page);
+            funcs.push(codegen::gen_page(&blocks));
+            self.stats.blocks += blocks.len() as u64;
+            targets.push((page, blocks.iter().map(|b| b.0).collect::<Vec<_>>(), old));
         }
         if funcs.is_empty() {
             return;
         }
         let bytes = wasm::module(&funcs);
         if self.loaded + bytes.len() as u64 > CODE_LIMIT {
+            // 全部捨てる（作り直したページの古い関数も消える。枠も 0 に戻るので、
+            // 今回のページの枠だけ下で入れ直す）。
             self.flush(code);
             self.stats.flushes += 1;
+            for (_, _, old) in &mut targets {
+                old.clear();
+            }
         }
         let Some(host) = &mut self.host else {
             return;
         };
         match host.load(&bytes, funcs.len() as u32) {
             Ok(base) => {
-                for (n, (page, idx)) in targets.into_iter().enumerate() {
-                    code.set_slot(page, idx, COMPILED | (base + n as u32));
+                for (n, (page, idxs, old)) in targets.into_iter().enumerate() {
+                    for idx in idxs {
+                        code.set_slot(page, idx, COMPILED | (base + n as u32));
+                    }
+                    for f in old {
+                        host.release(f);
+                    }
                 }
                 self.loaded += bytes.len() as u64;
-                self.stats.blocks += funcs.len() as u64;
+                self.stats.pages += funcs.len() as u64;
                 self.stats.modules += 1;
                 self.stats.bytes += bytes.len() as u64;
             }
@@ -299,6 +410,21 @@ impl Jit {
             }
         }
     }
+}
+
+impl Drop for Jit {
+    fn drop(&mut self) {
+        // ホストのテーブルは他のマシンと共有なので、自分の関数を返す。
+        if let Some(h) = &mut self.host {
+            h.release_all();
+        }
+    }
+}
+
+/// JIT の対象の Op か（実行ループがブロックの切れ目を知るのに使う）。
+#[inline(always)]
+pub(crate) fn supported(i: &crate::arm::Instr) -> bool {
+    codegen::supported(i)
 }
 
 /// enter の結果。

@@ -29,6 +29,11 @@ pub use code::{CodeCache, CodeMemory};
 pub use disasm::{disasm, disasm_thumb};
 pub use idle::{POLL_LOOP_LEN, PollState};
 pub use ir::{Instr, Op, decode_instr};
+// データ処理のオペコード（JIT の生成が汎用のデータ処理を写すのに使う）
+pub(crate) use exec_arm::{
+    OP_ADC, OP_ADD, OP_AND, OP_BIC, OP_CMN, OP_CMP, OP_EOR, OP_MOV, OP_MVN, OP_ORR, OP_RSB, OP_RSC,
+    OP_SBC, OP_SUB, OP_TEQ, OP_TST,
+};
 
 // ---- PSR（CPSR/SPSR）----
 //
@@ -696,7 +701,9 @@ impl Cpu {
             if rc.n >= rc.budget || self.cpsr & FLAG_T != 0 || self.interrupt_pending(sys) {
                 return Ok(());
             }
-            block_start = self.regs[15] != pc.wrapping_add(4);
+            // PC を書いた命令の後に加え、JIT の対象外の命令の後もブロックの先頭にする
+            // （ブロックはそこで切れるので、続きを別のブロックとして JIT に入れる）。
+            block_start = self.regs[15] != pc.wrapping_add(4) || !crate::jit::supported(&ins);
             match sys.cur_instr(self.regs[15]) {
                 Some(i) => ins = i,
                 None => return Ok(()),

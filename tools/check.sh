@@ -2,7 +2,7 @@
 # check.sh: コミット前のローカルの確認（CI は置かない方針。2026-09 ユーザー確認）。
 #   - Rust: fmt・clippy・テスト（ネイティブと wasm32-wasip1）
 #   - web: wasm32-unknown-unknown でビルドし、wasm-bindgen の出力を Node で読み込む。
-#     JIT とインタプリタの差分テスト（web/tests/jit-diff.mjs。約 6 秒）も Node で走らせる
+#     JIT とインタプリタの差分テスト（web/tests/jit-diff.mjs。約 20 秒）も Node で走らせる
 # CERULEAN_IMAGE があれば実イメージのテストも走る（数十秒）。
 # 必要なツール: rustup（rust/rust-toolchain.toml の版）、wasm-bindgen-cli
 # （rust/Cargo.toml の wasm-bindgen と同じ版）、Node.js。

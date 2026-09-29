@@ -42,6 +42,33 @@ impl Func {
     }
 
     // ---- 制御 ----
+    pub fn block(&mut self) -> &mut Self {
+        self.op(0x02).op(BLOCK_EMPTY)
+    }
+    pub fn loop_(&mut self) -> &mut Self {
+        self.op(0x03).op(BLOCK_EMPTY)
+    }
+    /// depth 番目（0 が最も内側）の block の終わり・loop の始めへ分岐する。
+    pub fn br(&mut self, depth: u32) -> &mut Self {
+        self.op(0x0C);
+        uleb(&mut self.code, depth);
+        self
+    }
+    pub fn br_if(&mut self, depth: u32) -> &mut Self {
+        self.op(0x0D);
+        uleb(&mut self.code, depth);
+        self
+    }
+    /// スタックの値 i で targets[i]（範囲外なら default）の深さへ分岐する。
+    pub fn br_table(&mut self, targets: &[u32], default: u32) -> &mut Self {
+        self.op(0x0E);
+        uleb(&mut self.code, targets.len() as u32);
+        for &t in targets {
+            uleb(&mut self.code, t);
+        }
+        uleb(&mut self.code, default);
+        self
+    }
     pub fn if_(&mut self) -> &mut Self {
         self.op(0x04).op(BLOCK_EMPTY)
     }
@@ -82,6 +109,18 @@ impl Func {
     pub fn load8_u(&mut self, offset: u32) -> &mut Self {
         self.op(0x2D).memarg(0, offset)
     }
+    pub fn load8_s(&mut self, offset: u32) -> &mut Self {
+        self.op(0x2C).memarg(0, offset)
+    }
+    pub fn load16_s(&mut self, offset: u32) -> &mut Self {
+        self.op(0x2E).memarg(1, offset)
+    }
+    pub fn load16_u(&mut self, offset: u32) -> &mut Self {
+        self.op(0x2F).memarg(1, offset)
+    }
+    pub fn store16(&mut self, offset: u32) -> &mut Self {
+        self.op(0x3B).memarg(1, offset)
+    }
     pub fn store(&mut self, offset: u32) -> &mut Self {
         self.op(0x36).memarg(2, offset)
     }
@@ -90,6 +129,35 @@ impl Func {
     }
 
     // ---- 整数 ----
+    pub fn i64(&mut self, v: i64) -> &mut Self {
+        self.op(0x42);
+        sleb64(&mut self.code, v);
+        self
+    }
+    pub fn i64_extend_u(&mut self) -> &mut Self {
+        self.op(0xAD)
+    }
+    pub fn i64_extend_s(&mut self) -> &mut Self {
+        self.op(0xAC)
+    }
+    pub fn i64_add(&mut self) -> &mut Self {
+        self.op(0x7C)
+    }
+    pub fn i64_mul(&mut self) -> &mut Self {
+        self.op(0x7E)
+    }
+    pub fn i64_or(&mut self) -> &mut Self {
+        self.op(0x84)
+    }
+    pub fn i64_shl(&mut self) -> &mut Self {
+        self.op(0x86)
+    }
+    pub fn i64_shr_u(&mut self) -> &mut Self {
+        self.op(0x88)
+    }
+    pub fn wrap(&mut self) -> &mut Self {
+        self.op(0xA7)
+    }
     pub fn i32(&mut self, v: u32) -> &mut Self {
         self.op(0x41);
         sleb(&mut self.code, v as i32);
@@ -106,6 +174,9 @@ impl Func {
     }
     pub fn lt_u(&mut self) -> &mut Self {
         self.op(0x49)
+    }
+    pub fn gt_u(&mut self) -> &mut Self {
+        self.op(0x4B)
     }
     pub fn ge_u(&mut self) -> &mut Self {
         self.op(0x4F)
@@ -223,6 +294,20 @@ pub(crate) fn uleb(b: &mut Vec<u8>, mut v: u32) {
         let byte = (v & 0x7F) as u8;
         v >>= 7;
         if v == 0 {
+            b.push(byte);
+            return;
+        }
+        b.push(byte | 0x80);
+    }
+}
+
+/// 符号つき LEB128（i64.const の即値）。
+pub(crate) fn sleb64(b: &mut Vec<u8>, mut v: i64) {
+    loop {
+        let byte = (v & 0x7F) as u8;
+        v >>= 7;
+        let done = (v == 0 && byte & 0x40 == 0) || (v == -1 && byte & 0x40 != 0);
+        if done {
             b.push(byte);
             return;
         }
