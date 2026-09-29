@@ -10,7 +10,13 @@
 //! kbd          SPI1 のキーボード用マイコン（バス外のボード部品）
 //! intc timer lcd rtc adc spi uart0 uart1 uart2 dma   周辺機器
 //! stub:<名前>  値保持スタブ（board.rs の StubId の順）
+//! pcic         PC カードコントローラ（machine の版数 2 から）
+//! cf           ソケットの CompactFlash の状態（カードが挿さっているときだけ）
+//! cf:blk       カードのディスクの 64KB の区画（番号 u32 と中身。0 でない区画だけ）
 //! ```
+//!
+//! machine の版数 1（PC カードの前）は読み込める: コントローラは初期状態・カードなし、
+//! GPIO の EINTPEND は 0 にする（版数 1 では値保持スタブで、意味のある値ではない）。
 //!
 //! 派生情報（デコードキャッシュ・世代・watched・命令履歴・実行ループの作業領域・
 //! アイドルスキップの観測）は含めない。時間の溜め（pending）は保存前に必ず
@@ -20,7 +26,12 @@ use std::io::{Read, Write};
 
 use crate::snapshot::{self, Encoder, Error, Reader, Writer, format_err};
 
-use super::board::NUM_STUBS;
+use super::board::{NUM_STUBS, StubId};
+use crate::pccard::{CfCard, Pd6710};
+use crate::s3c2410::eint;
+
+/// machine チャンクの版数（2: PC カードのチャンクを足した。2026-09-29）。
+const MACHINE_VERSION: u16 = 2;
 use super::{Machine, SDRAM_BASE, SDRAM_SIZE};
 
 const STUB_NAMES: [&str; NUM_STUBS] = [
@@ -68,6 +79,9 @@ impl Machine {
             adc,
             spi,
             kbd,
+            pcic,
+            card,
+            eint_levels: _,
             uart,
             dma,
             stubs,
@@ -80,7 +94,7 @@ impl Machine {
             run: _,
         } = board;
         debug_assert!(*pending == 0 && !*in_run);
-        s.chunk("machine", 1, |e| {
+        s.chunk("machine", MACHINE_VERSION, |e| {
             e.u64(*steps);
             e.u32(*tick_acc);
             e.u32(*entry_pa);
@@ -108,6 +122,16 @@ impl Machine {
                 st.save_state(e)
             })?;
         }
+        s.chunk("pcic", Pd6710::STATE_VERSION, |e| pcic.save_state(e))?;
+        if let Some(c) = card {
+            s.chunk("cf", CfCard::STATE_VERSION, |e| c.save_state(e))?;
+            for (i, b) in c.disk_blocks() {
+                s.chunk("cf:blk", 1, |e| {
+                    e.u32(i);
+                    e.bytes(b);
+                })?;
+            }
+        }
         s.finish()?;
         Ok(())
     }
@@ -124,7 +148,11 @@ impl Machine {
             ));
         }
         let c = s.expect("machine")?;
-        let mut d = c.decoder(1)?;
+        let version = c.version;
+        if version != 1 && version != MACHINE_VERSION {
+            return format_err(format!("machine: unsupported version {version}"));
+        }
+        let mut d = c.decoder(version)?;
         let (steps, tick_acc, entry_pa) = (d.u64()?, d.u32()?, d.u32()?);
         d.finish()?;
         if tick_acc >= 8 {
@@ -183,7 +211,45 @@ impl Machine {
                 [i]
                 .load_state(d));
         }
-        s.expect_end()?;
+        let mut pcic = Pd6710::new();
+        let mut card = None;
+        if version >= 2 {
+            let c = s.expect("pcic")?;
+            let mut d = c.decoder(Pd6710::STATE_VERSION)?;
+            pcic.load_state(&mut d)?;
+            d.finish()?;
+            let mut next = s.next_chunk()?;
+            if let Some(c) = next.as_ref().filter(|c| c.name == "cf") {
+                let mut d = c.decoder(CfCard::STATE_VERSION)?;
+                let mut cf = CfCard::load_state(&mut d)?;
+                d.finish()?;
+                next = s.next_chunk()?;
+                while let Some(c) = next.as_ref().filter(|c| c.name == "cf:blk") {
+                    let mut d = c.decoder(1)?;
+                    let i = d.u32()?;
+                    let data = d.bytes()?;
+                    cf.load_disk_block(i, data).map_err(Error::Format)?;
+                    d.finish()?;
+                    next = s.next_chunk()?;
+                }
+                card = Some(cf);
+            }
+            if let Some(c) = next {
+                return format_err(format!("unexpected chunk {}", c.name));
+            }
+            if pcic.inserted() != card.is_some() {
+                return format_err("pcic: socket state does not match the card");
+            }
+        } else {
+            s.expect_end()?;
+            let gpio = &mut b.stubs[StubId::Gpio as usize];
+            if gpio.read(eint::EINTPEND, 4) != 0 {
+                gpio.write(eint::EINTPEND, 4, 0);
+            }
+        }
+        b.pcic = pcic;
+        b.card = card;
+        b.restore_eint();
 
         b.steps = steps;
         b.tick_acc = tick_acc;

@@ -497,3 +497,170 @@ fn real_image_snapshot_resume() {
     c.save_snapshot(&mut sc, "id").unwrap();
     assert!(sa == sc, "final state differs");
 }
+
+// ---- PC カード（バンク2）と外部割り込み ----
+
+fn bus_w(m: &mut Machine, pa: u32, size: u32, v: u32) {
+    let Sys { bus, board, .. } = &mut m.sys;
+    bus.write(pa, size, v, board).unwrap();
+}
+
+fn bus_r(m: &mut Machine, pa: u32, size: u32) -> u32 {
+    let Sys { bus, board, .. } = &mut m.sys;
+    bus.read(pa, size, board).unwrap()
+}
+
+/// PD6710 のレジスタ（Index/Data のポート 0x3E0/0x3E1。I/O 空間は PA 0x11000000〜）。
+fn pcic_w(m: &mut Machine, reg: u8, v: u8) {
+    bus_w(m, 0x1100_03E0, 1, reg as u32);
+    bus_w(m, 0x1100_03E1, 1, v as u32);
+}
+
+fn pcic_r(m: &mut Machine, reg: u8) -> u8 {
+    bus_w(m, 0x1100_03E0, 1, reg as u32);
+    bus_r(m, 0x1100_03E1, 1) as u8
+}
+
+fn srcpnd(m: &Machine) -> u32 {
+    m.sys.board.intc.srcpnd
+}
+
+/// pcc_smdk2410.dll・atadisk.dll と同じ手順（2026-09-29 に観察した値）で、挿入の
+/// 管理割り込み（-INTR → EINT3）・CIS・構成・ATA のコマンドと割り込み（IRQ3 → EINT8）
+/// がバス越しに通ること。
+#[test]
+fn pc_card_through_the_bus() {
+    let mut m = Machine::new();
+    assert_eq!(pcic_r(&mut m, 0x00), 0x82, "Chip Revision");
+    // GPF3 = EINT3（立ち下がり）、GPG0 = EINT8（High レベル）、EINT8 のマスクを外す。
+    // 方式を先に決める（リセット値の 000 は Low レベルで、ピンが Low なので EINTPEND が
+    // 立つ。実機と同じ）
+    bus_w(&mut m, 0x5600_0088, 4, 0x2000);
+    bus_w(&mut m, 0x5600_0050, 4, 0x80);
+    bus_w(&mut m, 0x5600_008C, 4, 0x1);
+    bus_w(&mut m, 0x5600_0060, 4, 0x2);
+    bus_w(&mut m, 0x5600_00A4, 4, 0x00FF_FEF0);
+    pcic_w(&mut m, 0x05, 0x0C); // カード検出・Ready の管理割り込み
+    pcic_w(&mut m, 0x03, 0x10); // 管理割り込みは -INTR
+    assert_eq!(srcpnd(&m), 0);
+
+    let mut disk = vec![0u8; 64 * 512];
+    disk[5 * 512] = 0x5A;
+    m.insert_card(disk).unwrap();
+    assert_eq!(srcpnd(&m) & 1 << 3, 1 << 3, "insertion raises EINT3");
+    assert_eq!(pcic_r(&mut m, 0x01) & 0x0C, 0x0C, "card detected");
+    assert_eq!(pcic_r(&mut m, 0x04), 0x08, "Card Detect Change");
+    assert_eq!(pcic_r(&mut m, 0x04), 0x00, "cleared by reading");
+    m.sys.board.intc.write(0x00, 4, 1 << 3);
+
+    // 電源・リセット解除・属性メモリの窓（System 0〜7FFFFF、REG）
+    pcic_w(&mut m, 0x02, 0x93);
+    pcic_w(&mut m, 0x03, 0x50);
+    for (r, v) in [
+        (0x10, 0x00),
+        (0x11, 0x00),
+        (0x12, 0xFF),
+        (0x13, 0xC7),
+        (0x14, 0x00),
+        (0x15, 0x40),
+    ] {
+        pcic_w(&mut m, r, v);
+    }
+    pcic_w(&mut m, 0x06, 0x21);
+    assert_eq!(pcic_r(&mut m, 0x01) & 0x60, 0x60, "powered and ready");
+    assert_eq!(bus_r(&mut m, 0x1000_0000, 1), 0x01, "CISTPL_DEVICE");
+    bus_w(&mut m, 0x1000_0200, 1, 0x42); // 構成 2（プライマリ）・レベル
+    // I/O 窓 0: 1F0〜1F7、窓 1: 3F6〜3F7（自動の幅）、カードの IRQ は IRQ3
+    for (r, v) in [(0x08, 0xF0), (0x09, 0x01), (0x0A, 0xF7), (0x0B, 0x01)] {
+        pcic_w(&mut m, r, v);
+    }
+    for (r, v) in [(0x0C, 0xF6), (0x0D, 0x03), (0x0E, 0xF7), (0x0F, 0x03)] {
+        pcic_w(&mut m, r, v);
+    }
+    pcic_w(&mut m, 0x07, 0x22);
+    pcic_w(&mut m, 0x06, 0xE1);
+    pcic_w(&mut m, 0x03, 0x73);
+    assert_eq!(bus_r(&mut m, 0x1100_03F6, 1), 0x50, "Alt Status");
+
+    // LBA 5 を読む: 割り込みは EINT8（レベル）。Status を読むまで立て直される
+    for (port, v) in [
+        (0x1F2, 1),
+        (0x1F3, 5),
+        (0x1F4, 0),
+        (0x1F5, 0),
+        (0x1F6, 0xE0),
+        (0x1F7, 0x20),
+    ] {
+        bus_w(&mut m, 0x1100_0000 + port, 1, v);
+    }
+    let int_eint8_23 = 1 << 5;
+    assert_ne!(srcpnd(&m) & int_eint8_23, 0);
+    bus_w(&mut m, 0x5600_00A8, 4, 1 << 8); // EINTPEND をクリア
+    m.sys.board.intc.write(0x00, 4, int_eint8_23);
+    assert_ne!(srcpnd(&m) & int_eint8_23, 0, "level: still requested");
+    assert_eq!(bus_r(&mut m, 0x1100_01F7, 1), 0x58, "Status (DRQ)");
+    bus_w(&mut m, 0x5600_00A8, 4, 1 << 8);
+    m.sys.board.intc.write(0x00, 4, int_eint8_23);
+    assert_eq!(srcpnd(&m) & int_eint8_23, 0, "released by reading Status");
+    assert_eq!(bus_r(&mut m, 0x1100_01F0, 2), 0x5A, "first data word");
+    // 32 ビットの読み出しは続く番地への 16 ビットの 2 回: 下位はデータ、上位は
+    // 1F2h/1F3h（セクタ数 1・セクタ番号 5）
+    assert_eq!(bus_r(&mut m, 0x1100_01F0, 4), 0x0501_0000);
+
+    // スナップショット: 同じバイト列に戻り、カードの中身も戻る
+    let mut buf = vec![];
+    m.save_snapshot(&mut buf, "id").unwrap();
+    let mut r = Machine::new();
+    r.load_snapshot(&buf[..]).unwrap();
+    let mut again = vec![];
+    r.save_snapshot(&mut again, "id").unwrap();
+    assert!(buf == again, "save after load must give the same bytes");
+    assert_eq!(r.card_disk(), m.card_disk());
+
+    // 電源投入で RDY が変わった（Ready Change）。読んで -INTR を戻してから抜く:
+    // カード検出の変化で再び EINT3（立ち下がり）
+    assert_eq!(pcic_r(&mut m, 0x04), 0x04, "Ready Change");
+    m.sys.board.intc.write(0x00, 4, u32::MAX);
+    let disk = m.eject_card().unwrap();
+    assert_eq!(disk[5 * 512], 0x5A);
+    assert_eq!(srcpnd(&m) & 1 << 3, 1 << 3);
+    assert_eq!(pcic_r(&mut m, 0x01) & 0x4C, 0, "no card, no power");
+    assert!(m.eject_card().is_none());
+}
+
+/// PC カードの前の版（machine の版数 1）のスナップショットを読める
+/// （コントローラは初期状態・カードなし）。
+#[test]
+fn snapshot_version_1_loads_without_pc_card() {
+    let mut m = synthetic("idle.words");
+    m.run_until(1000).unwrap();
+    let mut buf = vec![];
+    m.save_snapshot(&mut buf, "id").unwrap();
+    // 版数 2 の machine チャンクを版数 1 にし、末尾の pcic チャンクを外して作り直す
+    let v1 = rewrite_as_v1(&buf);
+    let mut r = Machine::new();
+    r.load_snapshot(&v1[..]).unwrap();
+    assert_eq!(r.steps(), 1000);
+    assert!(r.card_disk().is_none());
+    assert_eq!(r.sys.board.pcic, crate::pccard::Pd6710::new());
+}
+
+/// スナップショットを読み直し、machine を版数 1 に、pcic 以降を除いて書き直す。
+fn rewrite_as_v1(buf: &[u8]) -> Vec<u8> {
+    use crate::snapshot::{Reader, Writer};
+    let mut rd = Reader::new(buf).unwrap();
+    let mut w = Writer::new(
+        vec![],
+        &rd.header.machine.clone(),
+        &rd.header.image_id.clone(),
+    )
+    .unwrap();
+    while let Some(c) = rd.next_chunk().unwrap() {
+        if c.name == "pcic" {
+            break;
+        }
+        let v = if c.name == "machine" { 1 } else { c.version };
+        w.raw_chunk(&c.name, v, &c.body).unwrap();
+    }
+    w.finish().unwrap()
+}

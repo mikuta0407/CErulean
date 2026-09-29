@@ -318,6 +318,10 @@ impl Emu {
             match ev.kind {
                 Kind::Quit => Ok(true),
                 Kind::Shot | Kind::Snap => Ok(false),
+                // TODO(段階3 のカード): ブラウザ版のカードの挿抜はメニューから行う（未実装）
+                Kind::CardInsert | Kind::CardEject => {
+                    Err("card: not supported in scripts here".into())
+                }
                 _ => emu::apply_input(m, ev),
             }
         };
@@ -366,6 +370,42 @@ impl Emu {
         self.sess
             .inject(&mut self.m, ev)
             .map_err(|e| JsError::new(&e))
+    }
+
+    /// ストレージカードを挿す（今の命令境界。記録中なら `card insert <name>` として
+    /// 記録する。name は再生のときにイメージを置くファイル名）。
+    #[wasm_bindgen(js_name = cardInsert)]
+    pub fn card_insert(&mut self, disk: Vec<u8>, name: &str) -> Result<(), JsError> {
+        self.m
+            .insert_card(disk)
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        let ev = Event {
+            path: name.into(),
+            ..Event::new(0, Kind::CardInsert)
+        };
+        self.sess.record_applied(&self.m, ev);
+        Ok(())
+    }
+
+    /// カードを抜いてディスクイメージ（ゲストの書き込みを含む）を返す。挿していなければ
+    /// undefined。記録中なら `card eject` として記録する。
+    #[wasm_bindgen(js_name = cardEject)]
+    pub fn card_eject(&mut self) -> Option<Vec<u8>> {
+        let disk = self.m.eject_card()?;
+        self.sess
+            .record_applied(&self.m, Event::new(0, Kind::CardEject));
+        Some(disk)
+    }
+
+    #[wasm_bindgen(js_name = cardInserted)]
+    pub fn card_inserted(&self) -> bool {
+        self.m.card_disk().is_some()
+    }
+
+    /// 挿しているカードの今の中身の写し（書き出し用。状態は変えない）。
+    #[wasm_bindgen(js_name = cardDisk)]
+    pub fn card_disk(&self) -> Option<Vec<u8>> {
+        self.m.card_disk().map(|d| d.to_vec())
     }
 
     /// ゲストの時計（RTC）を今の命令境界で合わせる（記録中なら記録する）。rtc は
@@ -529,5 +569,124 @@ impl Emu {
     #[wasm_bindgen(js_name = frameHeight)]
     pub fn frame_height(&self) -> u32 {
         self.frame_h
+    }
+}
+
+// ---- ストレージカードのイメージ（抜いている間の出し入れ。cerulean-fat）----
+
+/// 抜いているカードのディスクイメージ（MBR＋FAT）。ファイルの出し入れをして、
+/// bytes() で取り出したものを Emu.cardInsert に渡す。
+#[wasm_bindgen]
+pub struct CardImage {
+    d: Vec<u8>,
+}
+
+fn fat_err(e: cerulean_fat::Error) -> JsError {
+    JsError::new(&e.to_string())
+}
+
+fn fat_time(t: &[i32]) -> Result<cerulean_fat::Timestamp, JsError> {
+    let [y, mo, d, h, mi, s] = t else {
+        return Err(JsError::new("time must have 6 elements"));
+    };
+    Ok(cerulean_fat::Timestamp {
+        year: (*y).clamp(0, u16::MAX as i32) as u16,
+        month: *mo as u8,
+        day: *d as u8,
+        hour: *h as u8,
+        minute: *mi as u8,
+        second: *s as u8,
+    })
+}
+
+/// JSON の文字列（制御文字と「"」「\」をエスケープする）。
+fn json_str(s: &str) -> String {
+    let mut o = String::with_capacity(s.len() + 2);
+    o.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => o.push_str("\\\""),
+            '\\' => o.push_str("\\\\"),
+            c if (c as u32) < 0x20 => o.push_str(&format!("\\u{:04x}", c as u32)),
+            c => o.push(c),
+        }
+    }
+    o.push('"');
+    o
+}
+
+#[wasm_bindgen]
+impl CardImage {
+    /// 既存のイメージを開く（FAT として開けなければエラー）。
+    #[wasm_bindgen(constructor)]
+    pub fn new(bytes: Vec<u8>) -> Result<CardImage, JsError> {
+        let mut d = bytes;
+        cerulean_fat::Fs::open(&mut d).map_err(fat_err)?;
+        Ok(CardImage { d })
+    }
+
+    /// 空のカード（FAT16。大きさは MB 単位）。
+    pub fn format(mb: u32, label: &str) -> Result<CardImage, JsError> {
+        let d = cerulean_fat::format(mb as u64 * (1 << 20), label).map_err(fat_err)?;
+        Ok(CardImage { d })
+    }
+
+    fn fs(&mut self) -> Result<cerulean_fat::Fs<'_>, JsError> {
+        cerulean_fat::Fs::open(&mut self.d).map_err(fat_err)
+    }
+
+    /// フォルダの一覧（JSON の配列: name・dir・size・modified [年,月,日,時,分,秒]）。
+    pub fn list(&mut self, path: &str) -> Result<String, JsError> {
+        let fs = self.fs()?;
+        let v = fs.list(path).map_err(fat_err)?;
+        let items: Vec<String> = v
+            .iter()
+            .map(|e| {
+                let t = e.modified;
+                format!(
+                    r#"{{"name":{},"dir":{},"size":{},"modified":[{},{},{},{},{},{}]}}"#,
+                    json_str(&e.name),
+                    e.is_dir,
+                    e.size,
+                    t.year,
+                    t.month,
+                    t.day,
+                    t.hour,
+                    t.minute,
+                    t.second
+                )
+            })
+            .collect();
+        Ok(format!("[{}]", items.join(",")))
+    }
+
+    pub fn read(&mut self, path: &str) -> Result<Vec<u8>, JsError> {
+        self.fs()?.read_file(path).map_err(fat_err)
+    }
+
+    /// ファイルを書く（あれば置き換え、親のフォルダは作る）。t はローカル時刻。
+    pub fn write(&mut self, path: &str, data: &[u8], t: &[i32]) -> Result<(), JsError> {
+        let t = fat_time(t)?;
+        self.fs()?.write_file(path, data, t).map_err(fat_err)
+    }
+
+    pub fn mkdir(&mut self, path: &str, t: &[i32]) -> Result<(), JsError> {
+        let t = fat_time(t)?;
+        self.fs()?.mkdir(path, t).map_err(fat_err)
+    }
+
+    /// ファイルかフォルダ（中身ごと）を消す。
+    pub fn remove(&mut self, path: &str) -> Result<(), JsError> {
+        self.fs()?.remove(path, true).map_err(fat_err)
+    }
+
+    #[wasm_bindgen(js_name = freeBytes)]
+    pub fn free_bytes(&mut self) -> Result<f64, JsError> {
+        Ok(self.fs()?.free_bytes() as f64)
+    }
+
+    /// イメージの写し。
+    pub fn bytes(&self) -> Vec<u8> {
+        self.d.clone()
     }
 }

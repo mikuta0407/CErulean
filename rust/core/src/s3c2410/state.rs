@@ -22,6 +22,7 @@ impl Intc {
             intoffset,
             subsrcpnd,
             intsubmsk,
+            level_src: _,
             irq,
             fiq,
         } = self;
@@ -42,9 +43,11 @@ impl Intc {
             intoffset,
             subsrcpnd,
             intsubmsk,
+            level_src,
             irq,
             fiq,
         } = self;
+        *level_src = 0;
         [
             *srcpnd, *intmod, *intmsk, *priority, *intpnd, *intoffset, *subsrcpnd, *intsubmsk,
         ] = d.u32s()?;

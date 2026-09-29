@@ -102,12 +102,40 @@
       書き出したスナップショットにはイメージ（Microsoft の配布物）の中身が含まれます。公開の場で共有しないでください。</p>
     <p class="note" id="storageInfo"></p>
   </section>
+  <section id="cardSection">
+    <h2>ストレージカード</h2>
+    <p class="note" id="cardState">-</p>
+    <div class="row">
+      <button id="cardInsert">挿す</button>
+      <button id="cardEject">抜く</button>
+      <button id="cardExport">イメージを書き出す</button>
+      <label class="button file">イメージを読み込む<input type="file" id="cardImportFile" hidden></label>
+    </div>
+    <div class="row">
+      <label>新しいカード <select id="cardSize"></select></label>
+      <button id="cardNew">作る</button>
+    </div>
+    <div id="cardFiles" hidden>
+      <div class="row">
+        <span id="cardPath" class="path"></span>
+        <label class="button file">ファイルを入れる<input type="file" id="cardAddFiles" multiple hidden></label>
+        <label class="button file">フォルダを入れる<input type="file" id="cardAddDir" webkitdirectory hidden></label>
+        <button id="cardMkdir">フォルダを作る</button>
+      </div>
+      <ul id="cardList" class="list compact"></ul>
+      <p class="note">ここにファイルをドラッグしても入れられます。</p>
+    </div>
+    <p class="note">WM5 からは「Storage Card」に見えます。中身の出し入れは、カードを<strong>抜いている間</strong>に
+      ここで行います。挿している間の中身はエミュレータの中にあり、保存（スナップショット）にも含まれます。
+      抜くとこの端末に書き戻します。</p>
+  </section>
   <section>
     <h2>操作の記録</h2>
     <div class="row">
       <button id="rec">記録開始</button>
       <button id="recScript" hidden>スクリプトを書き出す</button>
       <button id="recSnap" hidden>起点スナップショットを書き出す</button>
+      <button id="recCards" hidden>挿したカードのイメージを書き出す</button>
     </div>
     <p class="note">記録は起点のスナップショットと、絶対命令数の入力スクリプトの組です。
       書き出した 2 つをネイティブの CLI で再生すると同じ画面になります（手順はスクリプトの先頭のコメント）。</p>

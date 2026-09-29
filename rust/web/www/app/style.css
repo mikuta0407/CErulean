@@ -123,3 +123,7 @@ td { padding: 1px 8px 1px 0; }
 kbd { font: 11px ui-monospace, monospace; border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
 .note { font-size: 12px; color: var(--muted); margin: 8px 0 0; }
 #log, #uart { font: 11px/1.4 ui-monospace, monospace; white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow: auto; margin: 0; }
+
+/* ストレージカードの一覧 */
+#cardFiles.drop { outline: 2px dashed #6aa0ff; outline-offset: 4px; }
+.path { font-family: monospace; font-size: 0.85em; word-break: break-all; }

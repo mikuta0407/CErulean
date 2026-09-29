@@ -7,6 +7,8 @@ use crate::s3c2410::*;
 
 use super::kbd::KbdMcu;
 use super::{PCLK_HZ, PCLK_TICKS_NUM};
+use crate::pccard::{Card, CfCard, Pd6710};
+use crate::s3c2410::eint;
 
 /// バスに登録する MMIO デバイスの識別子（Go では bus.Device の値そのものを
 /// 登録していた。Rust ではデバイスをボードが持ち、バスには番号だけを置く）。
@@ -14,6 +16,10 @@ use super::{PCLK_HZ, PCLK_TICKS_NUM};
 pub enum Dev {
     /// SDRAM が実装されていないバンク窓（読み 0・書き無視）
     OpenBus,
+    /// バンク2（nGCS2）: PC カードコントローラ（ISA のメモリ空間と I/O 空間）
+    Bank2,
+    /// GPIO（値保持スタブ＋外部割り込み。StubId::Gpio のスタブを使う）
+    Gpio,
     Uart(u8),
     Intc,
     Timer,
@@ -58,6 +64,12 @@ pub struct Board {
     pub adc: Adc,
     pub spi: Spi,
     pub kbd: KbdMcu,
+    /// PC カードコントローラ（バンク2）とソケットのカード
+    pub pcic: Pd6710,
+    pub card: Option<CfCard>,
+    /// 外部割り込みのピンのレベル（ビット n = EINTn。部品の状態から決まる派生情報。
+    /// 保存しない）
+    pub(crate) eint_levels: u32,
     pub uart: [Uart; 3],
     pub dma: DmaStub,
     pub stubs: [Stub; NUM_STUBS],
@@ -92,6 +104,9 @@ impl Board {
             adc: Adc::new(),
             spi: Spi::new(),
             kbd: KbdMcu::default(),
+            pcic: Pd6710::new(),
+            card: None,
+            eint_levels: EINT_IDLE,
             // UART1 がカーネルデバッグシリアル（2026-09 に実測。ブートバナーが
             // UART1 の UTXH に書かれた）。TODO: UART0/2 の出力先はアプリの
             // シリアル対応時に決める。
@@ -117,7 +132,8 @@ impl Board {
                 stub(&[]),               // sdi
                 // GSTATUS1: チップ ID。BSP が SoC 判別に読む可能性がある。
                 // 0x32410000（User's Manual Rev 1.1 で確認済み）
-                stub(&[(0xB0, 0x32410000)]),
+                // EINTMASK のリセット値（データシート 9-26）
+                stub(&[(0xB0, 0x32410000), (eint::EINTMASK, eint::EINTMASK_RESET)]),
                 // IIS（オーディオ）: 値保持スタブだが、IISCON(0x00) の bit7
                 // （TX FIFO ready）は常に立てる。FIFO は無限シンク扱いで、オーディオ
                 // ドライバの送信 ready 待ちポーリングを通すため（2026-09 に実測）。
@@ -218,6 +234,138 @@ impl Board {
     }
 }
 
+// ---- PC カード（バンク2）と外部割り込みの配線 ----
+//
+// 観察（2026-09-29、pcc_smdk2410.dll の初期化。docs/storage-card-design.md）:
+//   - I/O 空間は PA 0x11000000 + ISA の I/O ポート、メモリ空間は PA 0x10000000 +
+//     ISA のメモリアドレス（コントローラのポート 0x3E0/0x3E1 と、属性メモリの CIS を
+//     この位置で読む）。
+//   - GPF3 を EINT3（立ち下がり・プルアップあり）、GPG0 を EINT8（High レベル・
+//     プルアップなし）に設定する。-INTR（管理割り込み。負論理）が EINT3、カードの
+//     IRQ（正論理）が EINT8 と判断した。
+// TODO: バンク2 のうち上の 2 つの範囲の外（0x10000000〜の 16MB と 0x11000000〜の
+// 64KB 以外）の配線は不明。オープンバスにしている。
+
+/// バンク2 内の I/O 空間の位置。
+const BANK2_IO: u32 = 0x0100_0000;
+/// PD6710 の -INTR がつながる外部割り込み（EINT3）。
+const EINT_PCIC_INTR: u32 = 3;
+/// PD6710 の IRQ ピンがつながる外部割り込み（EINT8）。
+const EINT_PCIC_IRQ: u32 = 8;
+/// ボードの部品が駆動する外部割り込みのピン（それ以外は s3c2410::eint が無視する）。
+const EINT_DRIVEN: u32 = 1 << EINT_PCIC_INTR | 1 << EINT_PCIC_IRQ;
+/// 部品が何も要求していないときのピンのレベル（-INTR は High）。
+const EINT_IDLE: u32 = 1 << EINT_PCIC_INTR;
+/// EINT8 につながる PD6710 の IRQ ピン（ビット n = IRQn）: IRQ3。
+/// 判断の根拠（2026-09-29 観察）: CIS の構成 2 の推奨は IRQ 14 だが、atadisk.dll の
+/// 構成で Card IRQ Select に 3 が書かれた（ソケットのサービスが IRQ3 だけを
+/// 使えるとしていると見られる）。管理割り込みは -INTR に向けられるので IRQ ピンは
+/// 使われていない。TODO: 他の IRQ ピンの配線は不明（つながっていないとしている）。
+const PCIC_IRQ_TO_EINT8: u16 = 1 << 3;
+
+impl Board {
+    /// 部品の状態から外部割り込みのピンのレベルを求める。
+    fn eint_pin_levels(&self) -> u32 {
+        let mut v = 0u32;
+        if !self.pcic.intr() {
+            v |= 1 << EINT_PCIC_INTR;
+        }
+        if self.pcic.irq_pins() & PCIC_IRQ_TO_EINT8 != 0 {
+            v |= 1 << EINT_PCIC_IRQ;
+        }
+        v
+    }
+
+    /// ピンのレベル・GPIO の設定の変化を INTC に反映する。GPIO の書き込みと、
+    /// ピンを駆動する部品の状態が変わり得る操作の後に呼ぶ。
+    pub(crate) fn update_eint(&mut self) {
+        let now = self.eint_pin_levels();
+        let prev = self.eint_levels;
+        self.eint_levels = now;
+        let gpio = &mut self.stubs[StubId::Gpio as usize];
+        let (edge, level) = eint::update(gpio, EINT_DRIVEN, prev, now);
+        self.intc.raise_mask(edge);
+        self.intc.set_level_sources(level);
+    }
+
+    /// スナップショットの読み込みの後: 派生情報（ピンのレベル・レベルのソース）を
+    /// 求め直す。エッジは起きない（前回のレベル = いまのレベル）。
+    pub(crate) fn restore_eint(&mut self) {
+        self.eint_levels = self.eint_pin_levels();
+        self.update_eint();
+    }
+
+    fn card_dyn(card: &mut Option<CfCard>) -> Option<&mut dyn Card> {
+        card.as_mut().map(|c| c as &mut dyn Card)
+    }
+
+    /// バンク2 の読み出し（16 ビットのバス。32 ビットのアクセスは 2 回に分かれる）。
+    fn bank2_read(&mut self, off: u32, size: u32) -> u32 {
+        let v = if size == 4 {
+            self.bank2_read16(off, true) as u32 | (self.bank2_read16(off + 2, true) as u32) << 16
+        } else {
+            self.bank2_read16(off, size == 2) as u32
+        };
+        self.update_eint();
+        v
+    }
+
+    fn bank2_read16(&mut self, off: u32, wide: bool) -> u16 {
+        let card = Self::card_dyn(&mut self.card);
+        let v = if off < 0x0100_0000 {
+            self.pcic.mem_read(card, off, wide)
+        } else if (BANK2_IO..BANK2_IO + 0x1_0000).contains(&off) {
+            self.pcic.io_read(card, (off - BANK2_IO) as u16, wide)
+        } else {
+            None
+        };
+        v.unwrap_or(0) // どの窓にも当たらなければオープンバス（読み 0）
+    }
+
+    fn bank2_write(&mut self, off: u32, size: u32, v: u32) {
+        if size == 4 {
+            self.bank2_write16(off, true, v as u16);
+            self.bank2_write16(off + 2, true, (v >> 16) as u16);
+        } else {
+            self.bank2_write16(off, size == 2, v as u16);
+        }
+        self.update_eint();
+    }
+
+    fn bank2_write16(&mut self, off: u32, wide: bool, v: u16) {
+        let card = Self::card_dyn(&mut self.card);
+        if off < 0x0100_0000 {
+            self.pcic.mem_write(card, off, wide, v);
+        } else if (BANK2_IO..BANK2_IO + 0x1_0000).contains(&off) {
+            self.pcic.io_write(card, (off - BANK2_IO) as u16, wide, v);
+        }
+    }
+
+    /// カードを挿す（既に挿さっていればエラー）。
+    pub(crate) fn insert_card(&mut self, card: CfCard) -> Result<(), String> {
+        if self.card.is_some() {
+            return Err("a card is already inserted".into());
+        }
+        self.card = Some(card);
+        self.pcic.set_inserted(true);
+        self.pcic.sync(Self::card_dyn(&mut self.card));
+        self.update_eint();
+        Ok(())
+    }
+
+    /// カードを抜く（電源を切ってから手放す）。
+    pub(crate) fn eject_card(&mut self) -> Option<CfCard> {
+        self.card.as_ref()?;
+        self.pcic.set_inserted(false);
+        if let Some(c) = self.card.as_mut() {
+            c.set_power(false);
+        }
+        self.pcic.sync(None);
+        self.update_eint();
+        self.card.take()
+    }
+}
+
 /// SPI1 のキーボード用マイコンと、EINT1 を上げる INTC の組（SPI の転送中に使う）。
 struct KbdPort<'a> {
     kbd: &'a mut KbdMcu,
@@ -241,6 +389,8 @@ impl Devices<Dev> for Board {
     fn read(&mut self, dev: Dev, off: u32, size: u32) -> u32 {
         match dev {
             Dev::OpenBus => 0,
+            Dev::Bank2 => self.bank2_read(off, size),
+            Dev::Gpio => self.stubs[StubId::Gpio as usize].read(off, size),
             Dev::Uart(n) => self.uart[n as usize].read(off, size),
             Dev::Intc => self.intc.read(off, size),
             Dev::Lcd => self.lcd.read(off, size),
@@ -266,6 +416,23 @@ impl Devices<Dev> for Board {
     fn write(&mut self, dev: Dev, off: u32, size: u32, v: u32) {
         match dev {
             Dev::OpenBus => {}
+            Dev::Bank2 => self.bank2_write(off, size, v),
+            Dev::Gpio => {
+                let gpio = &mut self.stubs[StubId::Gpio as usize];
+                if off & !3 == eint::EINTPEND {
+                    // 1 を書いたビットをクリアする（データシート 9-27）
+                    let cur = gpio.read(eint::EINTPEND, 4);
+                    let mask = match size {
+                        1 => (v & 0xFF) << ((off & 3) * 8),
+                        2 => (v & 0xFFFF) << ((off & 2) * 8),
+                        _ => v,
+                    };
+                    gpio.write(eint::EINTPEND, 4, cur & !mask);
+                } else {
+                    gpio.write(off, size, v);
+                }
+                self.update_eint();
+            }
             Dev::Uart(n) => self.uart[n as usize].write(off, size, v),
             Dev::Intc => self.intc.write(off, size, v),
             Dev::Lcd => self.lcd.write(off, size, v),

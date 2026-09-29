@@ -203,8 +203,30 @@ $R snapdump today.snap
 ```
 
 コマンドは `tap x y [押下時間]`・`down x y`・`move x y`・`up`・`key down|up 名前`・
-`press 名前 [押下時間]`・`shot ファイル`・`snap ファイル`・`quit`。書式の詳細は
-`rust/core/src/script.rs` の先頭コメントを参照。
+`press 名前 [押下時間]`・`card insert ファイル`・`card eject [ファイル]`・`shot ファイル`・
+`snap ファイル`・`quit`。書式の詳細は `rust/core/src/script.rs` の先頭コメントを参照。
+
+### ストレージカード
+
+PC カードのソケットに CompactFlash を挿すと、WM5 からは「Storage Card」に見えます
+（設計と根拠は `docs/storage-card-design.md`）。中身は MBR＋FAT のディスクイメージで、
+ホストからファイルを出し入れできます。
+
+```sh
+# ホストのフォルダの中身を入れた 64MB のカードを作る（8M〜512M）
+$R card new card.img --size 64M --from ~/wm5-files
+$R card ls card.img                       # 一覧（card ls card.img "My Photos" でフォルダの中）
+$R card put card.img photo.jpg --to "My Photos"   # ファイル・フォルダを入れる
+$R card get card.img "My Photos" out/     # 取り出す
+$R card rm card.img photo.jpg             # 消す
+
+# 起動時に挿し、止めたときに（ゲストが書いた内容を含む）イメージを書き出す
+$R run --snap-load today.snap --card card.img --card-out card-after.img
+```
+
+スクリプトでは `card insert card.img` で動作中に挿し（ホットプラグ）、`card eject out.img` で
+抜いて中身を書き出します。ブラウザ版はメニューの「ストレージカード」で、カードを作る・
+ファイルを入れる（抜いている間）・挿す・抜くができます。
 
 ## 開発
 

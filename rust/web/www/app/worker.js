@@ -11,6 +11,8 @@
 //   images/<sha256>.bin・.json   読み込んだイメージ（SHA-256 がキー）
 //   saves/<名前>.snap.gz・.json  自動保存（auto-0〜2 のリング）と手動保存
 //   rec/start.snap.gz・script.txt  最後の記録（起点スナップショットとスクリプト）
+//   rec/cerulean-card-*.img     記録中に挿したストレージカードのイメージ（再生に要る）
+//   cards/card.img・card.json   ストレージカードのイメージ（抜いている間の中身）
 // 書き込みは一時ファイルに書き終えてから名前を変える（書きかけを残さない。§7.3）。
 import init, * as wasm from "../pkg/cerulean_web.js";
 
@@ -282,6 +284,77 @@ async function autosave(reason) {
   }
 }
 
+// ---- ストレージカード ----
+//
+// カードは 1 枚（2026-09-29 ユーザー決定: 「抜く → イメージを編集 → 挿す」でよい）。
+// 抜いている間の中身は OPFS の cards/card.img にあり、ここで FAT のファイルを出し入れ
+// する（wasm の CardImage）。挿している間の中身はマシンの中（スナップショットにも
+// 入る）にあり、抜いたときに card.img に書き戻す。挿抜は記録される入力（emu 側）。
+
+const CARD_SIZES_MB = [16, 32, 64, 128, 256, 512];
+let card = null; // 編集中の wasm.CardImage（抜いている間だけ。card.img と同じ中身）
+let cardMeta = null; // { name, size, updated }
+let cardPath = ""; // 一覧を見ているフォルダ
+
+async function loadCard() {
+  if (card || cardMeta === false) return;
+  try {
+    const d = await dir("cards");
+    cardMeta = await readJson(d, "card.json");
+    const bytes = new Uint8Array(await (await (await d.getFileHandle("card.img")).getFile()).arrayBuffer());
+    if (bytes.length !== cardMeta.size) throw new Error("大きさが合いません");
+    card = new wasm.CardImage(bytes);
+  } catch (e) {
+    if (e.name !== "NotFoundError") log(`カードのイメージを読めません: ${e.message}`);
+    card?.free();
+    card = null;
+    cardMeta = false; // 無い（作るまで読みに行かない）
+  }
+}
+
+async function storeCard(bytes, name) {
+  const d = await dir("cards");
+  await writeAtomic(d, "card.img", bytes);
+  cardMeta = { name, size: bytes.length, updated: Date.now() };
+  await writeJson(d, "card.json", cardMeta);
+}
+
+// 編集した card を card.img に書き戻す。
+async function flushCard() {
+  await storeCard(card.bytes(), cardMeta.name);
+}
+
+const fatTime = (t) => {
+  const d = new Date(t);
+  return Int32Array.from([d.getFullYear(), d.getMonth() + 1, d.getDate(), d.getHours(), d.getMinutes(), d.getSeconds()]);
+};
+
+async function sendCard() {
+  const inserted = !!emu && emu.cardInserted();
+  if (!inserted) await loadCard();
+  const info = { inserted, sizes: CARD_SIZES_MB, path: cardPath };
+  if (cardMeta) info.meta = cardMeta;
+  if (!inserted && card) {
+    try {
+      info.entries = JSON.parse(card.list(cardPath));
+      info.free = card.freeBytes();
+    } catch (e) {
+      cardPath = "";
+      info.path = "";
+      info.entries = JSON.parse(card.list(""));
+      info.free = card.freeBytes();
+    }
+  }
+  post({ card: info });
+}
+
+// 編集は抜いている間だけ（挿している間の中身はゲストのもの）。
+function editableCard() {
+  if (emu?.cardInserted()) throw new Error("カードを抜いてから編集してください");
+  if (!card) throw new Error("カードがありません（先に作るか読み込んでください）");
+  return card;
+}
+
 // ---- ゲストの時計 ----
 
 function rtcNow() {
@@ -446,6 +519,14 @@ function start(e, id, name, turbo) {
   post({ booted: { imageId, name, steps: emu.steps().toString() } });
   sendFrame(true);
   schedule();
+  // スナップショットによってカードの有無が変わる（挿していれば中身はマシンの中）
+  if (emu.cardInserted()) {
+    card?.free();
+    card = null;
+  } else if (cardMeta === false) {
+    cardMeta = null; // 読み直す
+  }
+  enqueue(sendCard);
 }
 
 function bootImage(bytes, name, id, rtc) {
@@ -497,6 +578,7 @@ const handlers = {
     wasm.installPanicHook();
     post({ ready: true });
     await sendLists();
+    await sendCard();
   },
   async bootFile({ bytes, name, rtc }) {
     const id = await storeImage(bytes, name);
@@ -574,10 +656,102 @@ const handlers = {
     if (syncClock) setClockNow("読み込み");
     await handlers.save();
   },
+  // ---- ストレージカード ----
+  async cardInfo() {
+    await sendCard();
+  },
+  async cardNew({ mb }) {
+    if (emu?.cardInserted()) throw new Error("カードを抜いてから作り直してください");
+    const c = wasm.CardImage.format(mb, "STORAGECARD");
+    card?.free();
+    card = c;
+    cardPath = "";
+    await storeCard(card.bytes(), `カード ${mb}MB`);
+    log(`新しいカード（${mb}MB）を作った`);
+    await sendCard();
+  },
+  async cardImport({ bytes, name }) {
+    if (emu?.cardInserted()) throw new Error("カードを抜いてから読み込んでください");
+    const c = new wasm.CardImage(bytes); // FAT として開けるものだけ受け付ける
+    card?.free();
+    card = c;
+    cardPath = "";
+    await storeCard(bytes, name);
+    await sendCard();
+  },
+  async cardExport() {
+    let bytes;
+    if (emu?.cardInserted()) {
+      // 挿している間は今の中身（ゲストが書き込み中の途中の状態のこともある）
+      bytes = emu.cardDisk();
+    } else {
+      bytes = editableCard().bytes();
+    }
+    post({ download: { name: "cerulean-card.img", bytes } }, [bytes.buffer]);
+  },
+  async cardOpen({ path }) {
+    cardPath = path;
+    await sendCard();
+  },
+  // files: [{ path（cardPath からの相対。フォルダごとのときは「a/b.txt」）, bytes, mtime }]
+  async cardPut({ files }) {
+    const c = editableCard();
+    let n = 0;
+    for (const f of files) {
+      const p = cardPath ? `${cardPath}/${f.path}` : f.path;
+      c.write(p, f.bytes, fatTime(f.mtime));
+      n++;
+    }
+    await flushCard();
+    log(`カードに ${n} 個のファイルを入れた`);
+    await sendCard();
+  },
+  async cardGet({ name }) {
+    const c = editableCard();
+    const p = cardPath ? `${cardPath}/${name}` : name;
+    const bytes = c.read(p);
+    post({ download: { name, bytes } }, [bytes.buffer]);
+  },
+  async cardDelete({ name }) {
+    const c = editableCard();
+    c.remove(cardPath ? `${cardPath}/${name}` : name);
+    await flushCard();
+    await sendCard();
+  },
+  async cardMkdir({ name }) {
+    const c = editableCard();
+    c.mkdir(cardPath ? `${cardPath}/${name}` : name, fatTime(Date.now()));
+    await flushCard();
+    await sendCard();
+  },
+  async cardInsert() {
+    if (!emu || stopped) throw new Error("エミュレータが動いていません");
+    const c = editableCard();
+    const bytes = c.bytes();
+    // 記録中は再生に要るので、挿した時点のイメージを記録の置き場に残す
+    const name = `cerulean-card-${(await sha256(bytes)).slice(0, 12) || emu.steps()}.img`;
+    if (emu.recording()) await writeAtomic(await dir("rec"), name, bytes);
+    emu.cardInsert(bytes, name);
+    card.free();
+    card = null;
+    inputSinceSave = true;
+    log("カードを挿した");
+    await sendCard();
+  },
+  async cardEject() {
+    if (!emu || !emu.cardInserted()) return;
+    const bytes = emu.cardEject();
+    card = new wasm.CardImage(bytes);
+    await storeCard(bytes, cardMeta?.name ?? "カード");
+    inputSinceSave = true;
+    log("カードを抜いた（中身を保存した）");
+    await sendCard();
+  },
   async recordStart() {
     if (!emu || stopped || emu.recording()) return;
     const d = await dir("rec");
     // 起点のスナップショットと記録の開始を同じ命令境界にする
+    for await (const [name] of d.entries()) if (name.startsWith("cerulean-card-")) await d.removeEntry(name).catch(() => {});
     await saveState(d, "start", { kind: "rec" }, () => {
       emu.recordStart();
       recStartSteps = emu.steps();
@@ -593,7 +767,10 @@ const handlers = {
     const d = await dir("rec");
     const m = await readJson(d, "rec.json");
     if (what === "script") await sendFile(d, "script.txt", `${m.base}.txt`);
-    else await sendFile(d, "start.snap.gz", `${m.base}.snap.gz`);
+    else if (what === "cards") {
+      // スクリプトの card insert が参照するイメージ（記録中に挿したもの）
+      for await (const [name] of d.entries()) if (name.startsWith("cerulean-card-") && name.endsWith(".img")) await sendFile(d, name, name);
+    } else await sendFile(d, "start.snap.gz", `${m.base}.snap.gz`);
   },
   input({ t, x = 0, y = 0, key = "" }) {
     if (!emu || stopped) return;

@@ -14,6 +14,7 @@ pub mod emu;
 pub mod jit;
 pub mod loader;
 pub mod mmu;
+pub mod pccard;
 pub mod s3c2410;
 pub mod script;
 pub mod smdk2410;

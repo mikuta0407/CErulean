@@ -29,6 +29,8 @@
 //! key down <名前> / key up <名前>     キーの押下・解放
 //! press <名前> [押下時間]  key down → 押下時間後に key up（既定 100ms）
 //! rtc <YYYY-MM-DDTHH:MM:SS> RTC（ゲストの時計。ローカル時刻）をこの時刻に合わせる
+//! card insert <ファイル>   PC カードのソケットにストレージカード（ディスクイメージ）を挿す
+//! card eject [ファイル]    カードを抜く（ファイルを指定するとディスクイメージを書き出す）
 //! shot <ファイル>          画面を保存
 //! snap <ファイル>          スナップショットを保存
 //! quit                     実行を終了
@@ -50,6 +52,10 @@ pub enum Kind {
     /// RTC を合わせる（段階3。ブラウザ版が再開時にホストの時刻を渡す。記録される
     /// 入力なので、再生しても同じ命令境界で同じ時刻になる）
     Rtc,
+    /// ストレージカードを挿す・抜く（2026-09-29。ディスクイメージの読み書きを伴うので
+    /// shot/snap と同じく呼び出し側が適用する。path はイメージのファイル）
+    CardInsert,
+    CardEject,
     Shot,
     Snap,
     Quit,
@@ -64,6 +70,8 @@ impl fmt::Display for Kind {
             Kind::KeyDown => "key down",
             Kind::KeyUp => "key up",
             Kind::Rtc => "rtc",
+            Kind::CardInsert => "card insert",
+            Kind::CardEject => "card eject",
             Kind::Shot => "shot",
             Kind::Snap => "snap",
             Kind::Quit => "quit",
@@ -84,7 +92,7 @@ pub struct Event {
     pub key: String,
     /// Rtc の年月日時分秒
     pub rtc: [i64; 6],
-    /// Shot/Snap のファイル
+    /// Shot/Snap/CardInsert/CardEject のファイル
     pub path: String,
     /// 元の行番号（エラー表示用。0 は行なし）
     pub line: usize,
@@ -216,6 +224,20 @@ pub fn parse(src: &str, steps_per_second: u64) -> Result<Vec<Event>, Error> {
                 events.push(Event {
                     rtc,
                     ..ev(Kind::Rtc)
+                });
+            }
+            "card" => {
+                let (kind, ok) = match args {
+                    ["insert", _] => (Kind::CardInsert, true),
+                    ["eject"] | ["eject", _] => (Kind::CardEject, true),
+                    _ => (Kind::CardEject, false),
+                };
+                if !ok {
+                    return Err(errf("usage: card insert <file> | card eject [file]".into()));
+                }
+                events.push(Event {
+                    path: args.get(1).map(|s| s.to_string()).unwrap_or_default(),
+                    ..ev(kind)
                 });
             }
             cmd @ ("shot" | "snap") => {
@@ -419,9 +441,16 @@ pub fn format(header: &[String], events: &[Event]) -> Result<String, Error> {
                 check_word(&ev.key).map_err(|e| Error(format!("script: event {i}: key {e}")))?;
                 write!(b, " {}", ev.key).unwrap();
             }
-            Kind::Shot | Kind::Snap => {
+            Kind::Shot | Kind::Snap | Kind::CardInsert => {
                 check_word(&ev.path).map_err(|e| Error(format!("script: event {i}: path {e}")))?;
                 write!(b, " {}", ev.path).unwrap();
+            }
+            Kind::CardEject => {
+                if !ev.path.is_empty() {
+                    check_word(&ev.path)
+                        .map_err(|e| Error(format!("script: event {i}: path {e}")))?;
+                    write!(b, " {}", ev.path).unwrap();
+                }
             }
             Kind::Rtc => {
                 let [y, mo, d, h, mi, se] = ev.rtc;

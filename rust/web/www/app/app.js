@@ -84,6 +84,7 @@ function onWorker(d) {
     $("pause").disabled = false;
     $("menu").hidden = true;
     log(`起動: ${d.booted.name}（命令 ${BigInt(d.booted.steps).toLocaleString()}）`);
+    if (cardInfo) renderCard(cardInfo);
     // 保存を消されにくくする（§7.3。許可されるかはブラウザが決める）
     navigator.storage?.persist?.().catch(() => {});
   }
@@ -100,9 +101,11 @@ function onWorker(d) {
     $("recText").hidden = false;
     $("recScript").hidden = false;
     $("recSnap").hidden = false;
+    $("recCards").hidden = !/^@\d+i card insert /m.test(d.recorded.script);
     log(`記録を止めました: ${d.recorded.base}`);
   }
   if (d.download) download(d.download.bytes, d.download.name);
+  if (d.card) renderCard(d.card);
   if (d.error) {
     log("エラー: " + d.error);
     if (d.fatal) showStop(d.error, true);
@@ -316,6 +319,102 @@ $("saveNow").onclick = () => booted && send("save");
 $("rec").onclick = () => booted && send(recording ? "recordStop" : "recordStart");
 $("recScript").onclick = () => send("exportRecording", { what: "script" });
 $("recSnap").onclick = () => send("exportRecording", { what: "snapshot" });
+$("recCards").onclick = () => send("exportRecording", { what: "cards" });
+
+// ---- ストレージカード ----
+// 中身の出し入れは Worker（wasm の CardImage）が行う。ここは一覧の表示と操作だけ。
+let cardInfo = null;
+const fmtSize = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}MB` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}KB` : `${n}B`);
+
+function renderCard(c) {
+  cardInfo = c;
+  const sel = $("cardSize");
+  if (!sel.options.length) {
+    for (const mb of c.sizes) sel.add(new Option(`${mb}MB`, mb, false, mb === 64));
+  }
+  const has = !!c.meta;
+  $("cardState").textContent = c.inserted
+    ? `挿しています（${has ? c.meta.name : "カード"}）。中身はエミュレータの中にあります。`
+    : has
+      ? `抜いています: ${c.meta.name}（${fmtSize(c.meta.size)}・空き ${fmtSize(c.free ?? 0)}）`
+      : "カードがありません。「作る」で空のカードを作るか、イメージを読み込んでください。";
+  $("cardInsert").disabled = c.inserted || !has || !booted || stopped;
+  $("cardEject").disabled = !c.inserted;
+  $("cardExport").disabled = !has && !c.inserted;
+  $("cardNew").disabled = c.inserted;
+  $("cardImportFile").disabled = c.inserted;
+  $("cardFiles").hidden = c.inserted || !c.entries;
+  if (!c.entries) return;
+  $("cardPath").textContent = `Storage Card\\${c.path.replaceAll("/", "\\")}`;
+  const rows = [];
+  if (c.path) {
+    const up = c.path.split("/").slice(0, -1).join("/");
+    rows.push(item("..", "上のフォルダ", () => send("cardOpen", { path: up })));
+  }
+  for (const e of c.entries) {
+    const t = e.modified;
+    const when = `${t[0]}-${String(t[1]).padStart(2, "0")}-${String(t[2]).padStart(2, "0")} ${String(t[3]).padStart(2, "0")}:${String(t[4]).padStart(2, "0")}`;
+    const open = e.dir
+      ? () => send("cardOpen", { path: c.path ? `${c.path}/${e.name}` : e.name })
+      : () => send("cardGet", { name: e.name });
+    rows.push(
+      item(e.dir ? `📁 ${e.name}` : e.name, e.dir ? when : `${fmtSize(e.size)}・${when}`, open, [
+        smallButton("✕", "カードから消す", () => confirm(`${e.name} を消しますか？${e.dir ? "（中身ごと）" : ""}`) && send("cardDelete", { name: e.name })),
+      ]),
+    );
+  }
+  $("cardList").replaceChildren(...rows);
+}
+
+// files: FileList か File の配列。フォルダごとのときは webkitRelativePath を使う。
+async function putCardFiles(files) {
+  const list = [];
+  const transfer = [];
+  for (const f of files) {
+    const bytes = new Uint8Array(await f.arrayBuffer());
+    list.push({ path: f.webkitRelativePath || f.name, bytes, mtime: f.lastModified });
+    transfer.push(bytes.buffer);
+  }
+  if (list.length) send("cardPut", { files: list }, transfer);
+}
+$("cardNew").onclick = () => {
+  if (cardInfo?.meta && !confirm("今のカードの中身は消えます。新しいカードを作りますか？（必要なら先にイメージを書き出してください）")) return;
+  send("cardNew", { mb: +$("cardSize").value });
+};
+$("cardInsert").onclick = () => send("cardInsert");
+$("cardEject").onclick = () => send("cardEject");
+$("cardExport").onclick = () => send("cardExport");
+$("cardMkdir").onclick = () => {
+  const name = prompt("フォルダの名前");
+  if (name) send("cardMkdir", { name });
+};
+$("cardImportFile").addEventListener("change", async (e) => {
+  const f = e.target.files[0];
+  e.target.value = "";
+  if (!f) return;
+  if (cardInfo?.meta && !confirm("今のカードをこのイメージで置き換えますか？")) return;
+  const bytes = new Uint8Array(await f.arrayBuffer());
+  send("cardImport", { bytes, name: f.name }, [bytes.buffer]);
+});
+for (const id of ["cardAddFiles", "cardAddDir"]) {
+  $(id).addEventListener("change", async (e) => {
+    const files = [...e.target.files];
+    e.target.value = "";
+    await putCardFiles(files);
+  });
+}
+const cardDrop = $("cardFiles");
+cardDrop.addEventListener("dragover", (e) => {
+  e.preventDefault();
+  cardDrop.classList.add("drop");
+});
+cardDrop.addEventListener("dragleave", () => cardDrop.classList.remove("drop"));
+cardDrop.addEventListener("drop", async (e) => {
+  e.preventDefault();
+  cardDrop.classList.remove("drop");
+  // TODO: ドロップしたフォルダの中身（webkitGetAsEntry）は未対応（ファイルだけ入れる）
+  await putCardFiles([...e.dataTransfer.files].filter((f) => f.size > 0 || f.type));
+});
 
 // 非表示・ページを離れるときは止めて自動保存する（§7.4）
 document.addEventListener("visibilitychange", () => send("visibility", { hidden: document.hidden }));

@@ -34,6 +34,7 @@ name = "cerulean-cli"
 version = "0.1.0"
 dependencies = [
  "cerulean-core",
+ "cerulean-fat",
  "png",
  "sha2",
 ]
@@ -43,10 +44,15 @@ name = "cerulean-core"
 version = "0.1.0"
 
 [[package]]
+name = "cerulean-fat"
+version = "0.1.0"
+
+[[package]]
 name = "cerulean-web"
 version = "0.1.0"
 dependencies = [
  "cerulean-core",
+ "cerulean-fat",
  "wasm-bindgen",
 ]
 

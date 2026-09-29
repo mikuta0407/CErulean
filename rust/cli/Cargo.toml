@@ -12,5 +12,6 @@ path = "src/main.rs"
 
 [dependencies]
 cerulean-core.workspace = true
+cerulean-fat.workspace = true
 sha2.workspace = true
 png.workspace = true

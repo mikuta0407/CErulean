@@ -52,7 +52,7 @@ Go 版の設計の理由コメントは Rust のコードに移してある。�
   計測で効果が確かめられた場合だけにし、テストで守る。
 - **依存の追加はユーザーの承認を取る**（計画書 §8）。現在の依存: web の
   `wasm-bindgen`（=0.2.129、wasm-bindgen-cli と同じ版に固定）、CLI の `sha2`・`png`。
-  コアは依存なし。
+  コアは依存なし。ワークスペース内の自作クレート `cerulean-fat`（std のみ）を CLI・web が使う。
 - **版の固定**: `rust/rust-toolchain.toml`（1.98.1）と `rust/Cargo.lock` をコミット。
   wasm-bindgen を上げるときは wasm-bindgen-cli も同じ版を入れ直す。
 - **コミット前の確認**: `tools/check.sh`（fmt・clippy・テスト〔ネイティブと
@@ -110,6 +110,9 @@ mmu → bus::PhysMem、bus → bus::Devices（ボードが MMIO を振り分け�
   変換）、実行ループ（`run_until`）、仮想時間、入力 API、スナップショットのチャンクの並び。
 - `snapshot`（形式）・`script`（入力スクリプト）・`emu`（イベントを命令境界で適用・記録）・
   `loader`（B000FF・.nb0・.words）。
+- `pccard`: PC カードのコントローラ（`pd6710.rs`）とカード（`cf.rs`。CompactFlash の ATA）。
+  SoC に依らない部品で、バンク2 の配置と EINT への配線は smdk2410 の board.rs。
+  カードのイメージを外から読み書きするのは別クレート `rust/fat`（cerulean-fat。コアは使わない）。
 - `jit`: JIT-to-wasm（段階5。設計は `docs/stage5-design.md`）。ブロックの切り出しと
   IR → wasm の生成（`codegen.rs`）・自作のエンコーダ（`wasm.rs`）・管理（実行回数・
   無効化・上限）。読み込みと呼び出しは web の `JitHost` の実装（ネイティブにはホストが
@@ -214,7 +217,8 @@ mmu → bus::PhysMem、bus → bus::Devices（ボードが MMIO を振り分け�
   イメージから直接読まずに実行時トレース（-trace-from）で見る。
 - **PA 0x500F0000 台は Device Emulator 固有の準仮想デバイス**（S3C2410 にない）。
   +0x2080+n*0x20 は dmatrans.dll（DMA トランスポート、4 チャネル）、
-  +0x5000 は emulserv.dll（割り込みは GPF3=EINT3・High レベル）。どちらも
+  +0x5000 は emulserv.dll（割り込みは EINT11・High レベル。以前「EINT3」としていたのは
+  誤り。2026-09-29 に GPIO の監視で確認）。どちらも
   初期化の読み書きだけでブートは止めない（詳細は machine/smdk2410 のコメント）。
   DE 固有モジュールは他に DeviceEmulator_lcd.dll・vcefsd.dll（フォルダ共有）・
   serdma.dll・dmacnect.exe・EmulatorStub.exe がある。
@@ -254,6 +258,12 @@ mmu → bus::PhysMem、bus → bus::Devices（ボードが MMIO を振り分け�
   **ソフトキー（VK_F1/F2）は表に無い**。初期化時に 0xFF×10 と 3 バイトコマンド
   （1B A0 7B / 1B A1 7A）を送るが応答は読まない。
 - 電源ボタン pwrbtn2410.dll は GPF0（EINT0）を設定する（未実装）。
+- **PC カード（ストレージカード。2026-09-29）**: バンク2 に CL-PD6710（82365SL 互換）。
+  I/O は PA 0x11000000+ポート、メモリは PA 0x10000000+ISA アドレス。-INTR（管理割り込み）が
+  EINT3（立ち下がり）、カードの IRQ3 が EINT8（High レベル）。pcc_smdk2410.dll が約 4.4 億
+  命令目にプローブし（Chip Revision 0x82〜0x84 で有効）、atadisk.dll は I/O の範囲 2 個の
+  CIS の構成（プライマリ 1F0h/3F6h）を選ぶ。WM5 からは「Storage Card」。詳細・根拠は
+  docs/storage-card-design.md。外部割り込みは s3c2410/eint.rs（部品が駆動するピンだけ）。
 - **OAL のアイドルは割り込み待ちのスピン**: 0x800AFDE4〜 の
   `LDR r3,[r4]`（r4=0x814C8708）/ `CMP r3,#0` / `BEQ` の 3 命令で、割り込み
   ハンドラが RAM の変数を書くまで回る（直前に 0x800AFDDC で変数を 0 にし、

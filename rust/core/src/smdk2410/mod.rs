@@ -555,6 +555,25 @@ impl Machine {
         Ok(())
     }
 
+    /// PC カードのソケットに CompactFlash を挿す。disk はディスクイメージ（512 バイトの
+    /// 倍数）。既に挿さっていればエラー。挿抜はカード検出の割り込みになる（入力として
+    /// 記録すること）。
+    pub fn insert_card(&mut self, disk: Vec<u8>) -> Result<(), Error> {
+        let card = crate::pccard::CfCard::new(disk).map_err(Error)?;
+        self.sys.board.insert_card(card).map_err(Error)
+    }
+
+    /// カードを抜いて、ディスクイメージ（ゲストが書いた内容を含む）を返す。
+    /// 挿さっていなければ None。
+    pub fn eject_card(&mut self) -> Option<Vec<u8>> {
+        self.sys.board.eject_card().map(|c| c.into_disk())
+    }
+
+    /// 挿さっているカードのディスクイメージ（状態は変えない）。
+    pub fn card_disk(&self) -> Option<&[u8]> {
+        self.sys.board.card.as_ref().map(|c| c.disk())
+    }
+
     /// キーボードマイコンから送るバイト列を直接積む（調査用）。
     pub fn keyboard_raw(&mut self, bytes: &[u8]) {
         for &b in bytes {
@@ -584,12 +603,20 @@ impl Default for Machine {
 /// 物理メモリマップを登録する（Go の New のバス構成と同じアドレス・大きさ）。
 fn map(b: &mut Bus<Dev>) -> Result<(), crate::bus::MapError> {
     b.map_ram("sdram", SDRAM_BASE, SDRAM_SIZE)?;
-    // バンク0〜5（0x00000000〜0x30000000）: ROM/SROM 未実装。フラッシュ
-    // ドライバが NOR フラッシュの CFI/JEDEC プローブ（0xAAAA/0x5500 の
-    // 書き込み）を PA 0 に対して行うので、オープンバスで空振りさせる
-    // （Device Emulator 構成はフラッシュではなく RAMFMD を使う）。
+    // バンク0〜1・3〜5: ROM/SROM 未実装。フラッシュドライバが NOR フラッシュの
+    // CFI/JEDEC プローブ（0xAAAA/0x5500 の書き込み）を PA 0 に対して行うので、
+    // オープンバスで空振りさせる（Device Emulator 構成はフラッシュではなく
+    // RAMFMD を使う）。
     // TODO: バンク3 の Ethernet（CS8900 相当）等が必要になったら分割する。
-    b.map_mmio("bank0-5-empty", 0, SDRAM_BASE, Dev::OpenBus)?;
+    b.map_mmio("bank0-1-empty", 0, 0x10000000, Dev::OpenBus)?;
+    // バンク2: PC カードコントローラ（CL-PD6710 互換。board.rs の配線のコメント）
+    b.map_mmio("bank2-pcic", 0x10000000, 0x08000000, Dev::Bank2)?;
+    b.map_mmio(
+        "bank3-5-empty",
+        0x18000000,
+        SDRAM_BASE - 0x18000000,
+        Dev::OpenBus,
+    )?;
     // バンク7（0x38000000）: SDRAM 未実装。メモリサイズ検出が触るので
     // オープンバスとして応答だけする。
     // TODO: 実機の不定値は 0 とは限らない（直前のバス値が残る等）。検出が
@@ -632,10 +659,11 @@ fn map(b: &mut Bus<Dev>) -> Result<(), crate::bus::MapError> {
         ("iic", 0x54000000, StubId::Iic),
         ("usbdev", 0x52000000, StubId::UsbDev),
         ("sdi", 0x5A000000, StubId::Sdi),
-        ("gpio", 0x56000000, StubId::Gpio),
     ] {
         b.map_mmio(name, base, 0x1000, Dev::Stub(id))?;
     }
+    // GPIO: 値保持スタブ＋外部割り込み（EINTPEND・EINTMASK。s3c2410::eint）
+    b.map_mmio("gpio", 0x56000000, 0x1000, Dev::Gpio)?;
     // DMA コントローラ: 転送は即完了に見せる最小スタブ（s3c2410::DmaStub）。
     b.map_mmio("dma", 0x4B000000, 0x1000, Dev::Dma)?;
     // IIS（オーディオ）: 値保持スタブ＋ TX FIFO ready の常時ビット（board.rs）。

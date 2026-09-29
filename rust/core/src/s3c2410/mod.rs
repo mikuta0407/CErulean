@@ -12,6 +12,7 @@
 
 mod adc;
 mod dma;
+pub mod eint;
 mod intc;
 mod lcd;
 mod rtc;

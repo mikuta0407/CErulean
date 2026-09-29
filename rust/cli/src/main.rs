@@ -2,6 +2,7 @@
 //! フラグ名と出力の書式は Rust 版で決めている（Go 版との互換は要件ではない）。
 //! 一致確認の出力（--result・--trace-hash）の中身は testdata/golden/README.md が正。
 
+mod card;
 mod result;
 mod tools;
 
@@ -26,6 +27,7 @@ Usage:
   cerulean segspeed [--seg S] <snap> <script>  再生中の区間ごとの実時間比・アイドル割合
   cerulean ihist [--count N] <snap>  実行した ARM 命令の種類の分布
   cerulean genrate [--steps N] <image>  MMU の変換世代・コードページの頻度
+  cerulean card <new|ls|put|get|rm|mkdir> ...  ストレージカードのイメージを作る・中身を出し入れする
   cerulean run [options] <image>   イメージをリセットから実行する
   cerulean run --snap-load F [options] [image]
                                    スナップショットから再開する（image を渡すと照合する）
@@ -52,6 +54,9 @@ run options:
   --trace-hash-ram N    N 命令ごとに RAM の SHA-256 も加える
   --trace-hash-out F    --trace-hash の出力先（既定は標準エラー）
   --quiet-uart          UART1 の出力を標準出力に流さない
+  --card F              開始時に PC カードのソケットに CompactFlash を挿す（F はディスク
+                        イメージ。512 バイトの倍数）
+  --card-out F          停止時に挿さっているカードのディスクイメージを F に書く
 ";
 
 fn main() -> ExitCode {
@@ -59,6 +64,7 @@ fn main() -> ExitCode {
     let r = match args.first().map(String::as_str) {
         Some("info") => cmd_info(&args[1..]),
         Some("run") => cmd_run(&args[1..]),
+        Some("card") => card::cmd_card(&args[1..]),
         Some("snapdump") => cmd_snapdump(&args[1..]),
         Some("goldencmp") => tools::cmd_goldencmp(&args[1..]),
         Some("segspeed") => tools::cmd_segspeed(&args[1..]),
@@ -131,6 +137,8 @@ struct RunOpts {
     sample: u64,
     fb_out: Option<String>,
     fb_every: u64,
+    card: Option<String>,
+    card_out: Option<String>,
 }
 
 fn parse_u64(s: &str) -> Result<u64, String> {
@@ -196,6 +204,8 @@ fn parse_run_opts(args: &[String]) -> Result<RunOpts, String> {
             "--sample" => o.sample = parse_u64(&val()?)?,
             "--fb-out" => o.fb_out = Some(val()?),
             "--fb-every" => o.fb_every = parse_u64(&val()?)?,
+            "--card" => o.card = Some(val()?),
+            "--card-out" => o.card_out = Some(val()?),
             s if s.starts_with("--") => return Err(format!("unknown option {s}\n{USAGE}")),
             s => {
                 if image.replace(s.to_string()).is_some() {
@@ -355,6 +365,12 @@ fn cmd_run(args: &[String]) -> Result<ExitCode, String> {
             m.cpu.pc()
         );
     }
+    if let Some(path) = &o.card {
+        let disk = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+        m.insert_card(disk)
+            .map_err(|e| format!("--card {path}: {e}"))?;
+        eprintln!("cerulean: inserted card {path} at step {}", m.steps());
+    }
     m.cpu.set_history(o.history);
     // トレースはスキップした命令を表示できないので、アイドルスキップを切る
     // （監視中は MMU が RAM を直接持たないので元々スキップされない）。
@@ -437,6 +453,18 @@ fn cmd_run(args: &[String]) -> Result<ExitCode, String> {
             // TODO(段階1): 画面の保存（PNG）とスナップショット。
             Kind::Snap => save_snapshot(m, &ev.path, &image_id).map(|_| false),
             Kind::Shot => write_png(m, &ev.path).map(|_| false),
+            Kind::CardInsert => {
+                let disk = std::fs::read(&ev.path).map_err(|e| format!("{}: {e}", ev.path))?;
+                m.insert_card(disk).map_err(|e| e.to_string())?;
+                Ok(false)
+            }
+            Kind::CardEject => {
+                let disk = m.eject_card().ok_or("card eject: no card is inserted")?;
+                if !ev.path.is_empty() {
+                    std::fs::write(&ev.path, disk).map_err(|e| format!("{}: {e}", ev.path))?;
+                }
+                Ok(false)
+            }
             _ => emu::apply_input(m, ev),
         }
     };
@@ -558,6 +586,12 @@ fn cmd_run(args: &[String]) -> Result<ExitCode, String> {
         && let Err(e) = write_png(&mut m, f)
     {
         eprintln!("cerulean: {e}");
+    }
+    if let Some(f) = &o.card_out {
+        match m.card_disk() {
+            Some(d) => std::fs::write(f, d).map_err(|e| format!("{f}: {e}"))?,
+            None => eprintln!("cerulean: --card-out: no card is inserted"),
+        }
     }
     report(&mut m, &o, started, &stop);
     Ok(match stop {

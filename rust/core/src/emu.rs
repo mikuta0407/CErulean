@@ -128,6 +128,16 @@ impl Session {
         Ok(())
     }
 
+    /// 呼び出し側が今の命令境界で適用したイベント（カードの挿抜のように、ファイルの
+    /// 読み書きを伴うので apply_input で扱えないもの）を、記録中なら記録する。
+    pub fn record_applied(&mut self, m: &Machine, mut ev: Event) {
+        if self.recording {
+            ev.step = m.steps();
+            ev.line = 0;
+            self.record.push(ev);
+        }
+    }
+
     /// 記録を始める（それまでの記録は捨てる）。再生の起点になる状態
     /// （スナップショット）は呼び出し側が同じ命令境界で保存すること。
     pub fn start_recording(&mut self, m: &Machine) {

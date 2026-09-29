@@ -19,6 +19,10 @@ pub struct Intc {
     pub(crate) intoffset: u32,
     pub(crate) subsrcpnd: u32,
     pub(crate) intsubmsk: u32,
+    /// レベルで要求し続けているソース（外部割り込み。s3c2410::eint）。立っている間は
+    /// SRCPND をクリアしても立て直す。GPIO と部品の状態から決まる派生情報（保存しない。
+    /// 読み込み後にボードが求め直す）
+    pub(crate) level_src: u32,
     /// CPU の IRQ 線のレベル（最後の recompute の結果）
     pub(crate) irq: bool,
     /// CPU の FIQ 線のレベル
@@ -87,6 +91,7 @@ impl Intc {
             intoffset: 0,
             subsrcpnd: 0,
             intsubmsk: 0x7FF,
+            level_src: 0,
             irq: false,
             fiq: false,
         }
@@ -126,9 +131,18 @@ impl Intc {
         }
     }
 
+    /// レベルで要求し続けるソースの束を置き換える（外部割り込み）。
+    pub fn set_level_sources(&mut self, mask: u32) {
+        if mask != self.level_src {
+            self.level_src = mask;
+            self.recompute();
+        }
+    }
+
     /// サブソースの束をメインソースのビットに反映する。サブが立っている限り
     /// SRCPND 側は立て直される（クリアしてもサブが残っていれば再セット）。
     fn sub_to_src(&mut self) {
+        self.srcpnd |= self.level_src;
         let pend = self.subsrcpnd & !self.intsubmsk;
         if pend & 0x007 != 0 {
             self.srcpnd |= 1 << INT_UART0;
