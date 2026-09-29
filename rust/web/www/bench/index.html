@@ -18,29 +18,43 @@
 <p>WM5 のイメージ（PPC_USA.bin）を選ぶと、リセットから 12 億命令を走らせて速度と基準との一致を測り、
 スナップショットの保存・圧縮・OPFS の時間も測る（数十秒〜数分。イメージはこのページの外に送らない）。</p>
 <input type="file" id="image">
+<p><button id="probe">JIT 診断（イメージ不要・十数秒）</button>
+JS・小さな wasm・エミュレータ本体の速さを比べ、遅い原因を切り分ける。</p>
 <pre id="out"></pre>
 <script type="module">
 const out = document.getElementById("out");
 const print = (s) => { out.textContent += s + "\n"; };
-document.getElementById("image").onchange = async (ev) => {
-  const file = ev.target.files[0];
-  if (!file) return;
-  out.textContent = "";
-  const lines = (await (await fetch("/testdata/golden/expected/boot-1200M.jsonl")).text()).trim().split("\n");
-  const expected = JSON.parse(lines.at(-1));
-  const imageBytes = new Uint8Array(await file.arrayBuffer());
-  print(`${navigator.userAgent}\nimage ${file.name} ${imageBytes.length} bytes`);
+// 計測は Worker で行う（本番の構成と同じ。計画書 §3.4）。
+const startWorker = (msg, transfer) => {
   const worker = new Worker("worker.js", { type: "module" });
   worker.onmessage = ({ data }) => {
     if (data.log) print(data.log);
     if (data.error) print(`ERROR ${data.error}`);
     if (data.result) {
       print("\n結果（この JSON を報告に貼る）:\n" + JSON.stringify(data.result, null, 1));
-      out.className = data.result.match && data.result.snapRoundTrip ? "ok" : "ng";
+      out.className = data.result.match === false || data.result.snapRoundTrip === false ? "ng" : "ok";
     }
   };
   worker.onerror = (e) => print(`worker error: ${e.message}`);
-  worker.postMessage({ imageBytes, expected }, [imageBytes.buffer]);
+  worker.postMessage(msg, transfer);
+};
+document.getElementById("probe").onclick = async () => {
+  out.textContent = "";
+  out.className = "";
+  print(navigator.userAgent);
+  const synthetic = new Uint8Array(await (await fetch("/testdata/golden/synthetic/idle.words")).arrayBuffer());
+  startWorker({ probe: true, synthetic }, [synthetic.buffer]);
+};
+document.getElementById("image").onchange = async (ev) => {
+  const file = ev.target.files[0];
+  if (!file) return;
+  out.textContent = "";
+  out.className = "";
+  const lines = (await (await fetch("/testdata/golden/expected/boot-1200M.jsonl")).text()).trim().split("\n");
+  const expected = JSON.parse(lines.at(-1));
+  const imageBytes = new Uint8Array(await file.arrayBuffer());
+  print(`${navigator.userAgent}\nimage ${file.name} ${imageBytes.length} bytes`);
+  startWorker({ imageBytes, expected }, [imageBytes.buffer]);
 };
 </script>
 </body>

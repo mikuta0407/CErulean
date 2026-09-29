@@ -165,6 +165,12 @@ impl Emu {
         self.m.steps()
     }
 
+    /// アイドルスキップの有無（既定は有効。結果は同じ。計測・診断用）。
+    #[wasm_bindgen(js_name = setIdleSkip)]
+    pub fn set_idle_skip(&mut self, on: bool) {
+        self.m.set_idle_skip(on);
+    }
+
     /// アイドルスキップで飛ばした命令数の累計。
     #[wasm_bindgen(js_name = idleSkipped)]
     pub fn idle_skipped(&self) -> u64 {

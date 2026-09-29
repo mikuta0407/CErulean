@@ -1,12 +1,16 @@
 // 計測用の Worker（index.html から起動される。本体は bench-core.js）。
 import init, * as wasm from "../pkg/cerulean_web.js";
-import { runBench } from "./bench-core.js";
+import { runBench, runJitProbe } from "./bench-core.js";
 
-onmessage = async ({ data: { imageBytes, expected } }) => {
+onmessage = async ({ data: { imageBytes, expected, probe, synthetic } }) => {
   const log = (msg) => postMessage({ log: msg });
   try {
     await init();
     wasm.installPanicHook();
+    if (probe) {
+      postMessage({ result: await runJitProbe({ wasm, synthetic, log }) });
+      return;
+    }
     let opfs;
     try {
       opfs = await navigator.storage.getDirectory();

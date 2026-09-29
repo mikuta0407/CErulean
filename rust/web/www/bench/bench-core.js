@@ -148,3 +148,51 @@ export async function runBench({ wasm, imageBytes, expected, log, opfs }) {
   emu.free();
   return r;
 }
+
+// ---- JIT 診断（iPhone だけ遅い原因の切り分け。2026-09-29）----
+//
+// 同じ Worker で 3 つを測り、どれが遅いかで原因を見分ける:
+//   - 素の JS のループ: これも遅ければ、端末の設定（ロックダウンモード等）で JIT が
+//     全体に無効になっている。
+//   - 小さな wasm 関数のループ: JS は速くこれだけ遅ければ、wasm の JIT が無効。
+//   - エミュレータ本体（合成プログラムをアイドルスキップなしで回す）: 上の 2 つが速く
+//     これだけ遅ければ、巨大な実行ループ関数が最適化の対象から外れている等、
+//     エミュレータの関数に固有の原因。
+
+/// (param i32) (result i32): n から 1 まで数えながら足し上げる。手で組んだ wasm
+/// （local.get/i32.add/local.set/i32.sub/local.tee/br_if のループ）。
+const TINY_WASM = Uint8Array.from([
+  0x00, 0x61, 0x73, 0x6d, 0x01, 0, 0, 0, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f, 0x03, 0x02, 0x01, 0x00,
+  0x07, 0x05, 0x01, 0x01, 0x66, 0x00, 0x00, 0x0a, 0x1b, 0x01, 0x19, 0x01, 0x01, 0x7f, 0x03, 0x40, 0x20, 0x01,
+  0x20, 0x00, 0x6a, 0x21, 0x01, 0x20, 0x00, 0x41, 0x01, 0x6b, 0x22, 0x00, 0x0d, 0x00, 0x0b, 0x20, 0x01, 0x0b,
+]);
+
+export async function runJitProbe({ wasm, synthetic, log }) {
+  const r = { userAgent: typeof navigator !== "undefined" ? navigator.userAgent : "node" };
+  const N = 300_000_000;
+  let t = performance.now();
+  let sum = 0;
+  for (let i = N; i > 0; i--) sum = (sum + i) | 0;
+  r.jsLoopMs = performance.now() - t;
+  r.jsSum = sum;
+  log(`JS loop ${N / 1e6}M: ${r.jsLoopMs.toFixed(0)}ms`);
+
+  const { instance } = await WebAssembly.instantiate(TINY_WASM);
+  t = performance.now();
+  r.wasmSum = instance.exports.f(N);
+  r.wasmLoopMs = performance.now() - t;
+  log(`tiny wasm loop ${N / 1e6}M: ${r.wasmLoopMs.toFixed(0)}ms`);
+
+  // エミュレータ本体: タイマー割り込みを待つ合成プログラムを、アイドルスキップなしで
+  // 2000 万命令回す（全命令を実際に実行させる）。
+  const emu = new wasm.Emu();
+  emu.loadImage(synthetic, "idle.words", Int32Array.from([2006, 1, 2, 15, 4, 5]));
+  emu.setIdleSkip(false);
+  t = performance.now();
+  emu.run(20_000_000n);
+  r.emuMs = performance.now() - t;
+  r.emuMips = 20 / (r.emuMs / 1000);
+  emu.free();
+  log(`emulator (synthetic, no idle skip) 20M: ${r.emuMs.toFixed(0)}ms (${r.emuMips.toFixed(1)}M steps/s)`);
+  return r;
+}
