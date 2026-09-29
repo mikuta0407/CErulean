@@ -175,6 +175,60 @@ export async function runBench({ wasm, imageBytes, expected, log, opfs, jit = nu
   return r;
 }
 
+// ---- JIT の経過診断（Safari で JIT-to-wasm が遅い原因の切り分け。2026-09-29）----
+//
+// 1 つの Worker で順に、リセットから 3 億命令を 2500 万命令ずつ走らせる:
+//   A. JIT なし
+//   B. JIT のホストだけ有効（閾値を巨大にしてコンパイルしない。関数テーブルの準備だけ）
+//   C. JIT あり（閾値 64・32 ブロック）
+// 区切りごとに区間の速度と、素の JS のループ（3000 万回）の時間を出す。JS のループまで
+// 遅くなれば、そのプロセスの JIT 全体が効かなくなっている（エミュレータのコードの
+// 問題ではない）。どの段階・何個目のモジュールから遅くなるかを見る。
+
+const TRACE_STEPS = 300_000_000n;
+const TRACE_CHUNK = 25_000_000n;
+
+function jsLoopMs() {
+  const t = performance.now();
+  let sum = 0;
+  for (let i = 30_000_000; i > 0; i--) sum = (sum + i) | 0;
+  return [performance.now() - t, sum];
+}
+
+export async function runJitTrace({ wasm, imageBytes, log }) {
+  const r = { userAgent: typeof navigator !== "undefined" ? navigator.userAgent : "node", phases: [] };
+  for (const [name, jit] of [["A no-jit", null], ["B host-only", [1_000_000_000, 32]], ["C jit 64,32", [64, 32]]]) {
+    const emu = new wasm.Emu();
+    emu.loadImage(imageBytes, "PPC_USA.bin", Int32Array.from([2006, 1, 2, 15, 4, 5]));
+    if (jit) emu.setJit(true, jit[0], jit[1]);
+    const rows = [];
+    log(`== ${name}: JS loop ${jsLoopMs()[0].toFixed(0)}ms before`);
+    const t0 = performance.now();
+    for (let target = TRACE_CHUNK; target <= TRACE_STEPS; target += TRACE_CHUNK) {
+      const t = performance.now();
+      const st = emu.run(target);
+      if (st !== "ok") throw new Error(`stopped: ${emu.stopJson()}`);
+      const mips = Number(TRACE_CHUNK) / ((performance.now() - t) / 1000) / 1e6;
+      const [js] = jsLoopMs();
+      let msg = `${name} ${target / 1_000_000n}M: ${mips.toFixed(1)}M/s, JS ${js.toFixed(0)}ms`;
+      const row = { steps: Number(target), mips, jsMs: js };
+      if (jit) {
+        const s = JSON.parse(emu.jitStats());
+        msg += `, ${s.modules} modules ${s.pages} funcs ${(s.bytes / 1e6).toFixed(2)}MB, calls ${s.calls}`;
+        if (s.error) msg += ` ERROR ${s.error}`;
+        Object.assign(row, { modules: s.modules, funcs: s.pages, bytes: s.bytes, calls: s.calls });
+      }
+      log(msg);
+      rows.push(row);
+    }
+    const el = (performance.now() - t0) / 1000;
+    log(`== ${name}: ${(Number(TRACE_STEPS) / el / 1e6).toFixed(1)}M steps/s overall, JS loop ${jsLoopMs()[0].toFixed(0)}ms after`);
+    r.phases.push({ name, seconds: el, rows });
+    emu.free();
+  }
+  return r;
+}
+
 // ---- JIT 診断（iPhone だけ遅い原因の切り分け。2026-09-29）----
 //
 // 同じ Worker で 3 つを測り、どれが遅いかで原因を見分ける:

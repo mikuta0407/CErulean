@@ -19,6 +19,10 @@
 一致を測る（数十秒〜数分。イメージはこのページの外に送らない）。同じイメージでもう一度測るときは
 「同じイメージでもう一度」を押す（条件ごとに新しい Worker で走らせる）。</p>
 <p>
+<label>内容 <select id="mode">
+  <option value="bench">計測（基準との一致・速度）</option>
+  <option value="trace">JIT の経過診断（数分）</option>
+</select></label>
 <label>シナリオ <select id="scenario">
   <option value="boot-1200M">boot-1200M（起動 12 億命令）</option>
   <option value="boot-today">boot-today（Today まで 36 億命令）</option>
@@ -34,6 +38,10 @@
 Chrome はタスクマネージャ（Shift+Esc）の「メモリ使用量」の最大、Firefox は about:processes、
 Mac の Safari はアクティビティモニタの「Safari Web コンテンツ」（このページのプロセス）。
 iPhone は数値を見にくいので、タブが落ちて再読み込みされないかを見る。</p>
+<p>「JIT の経過診断」は、1 つの Worker で JIT なし → JIT のホストだけ（コンパイルしない）→
+JIT ありを順にリセットから 3 億命令ずつ走らせ、2500 万命令ごとの速度と素の JS の速さを出す
+（シナリオ・JIT の選択は使わない。Safari で JIT ありが遅い原因の切り分け。Safari を完全に
+終了して開き直した直後に行う）。</p>
 <input type="file" id="image"> <button id="again" disabled>同じイメージでもう一度</button>
 <p><button id="probe">JIT 診断（イメージ不要・十数秒）</button>
 JS・小さな wasm・エミュレータ本体の速さを比べ、遅い原因を切り分ける。</p>
@@ -77,6 +85,11 @@ const bench = async () => {
   const expected = JSON.parse(lines.at(-1));
   // Worker に移すので、毎回ファイルから読み直す。
   const imageBytes = new Uint8Array(await file.arrayBuffer());
+  if (document.getElementById("mode").value === "trace") {
+    print(`${navigator.userAgent}\nimage ${file.name} ${imageBytes.length} bytes, JIT trace`);
+    startWorker({ imageBytes, trace: true }, [imageBytes.buffer]);
+    return;
+  }
   print(`${navigator.userAgent}\nimage ${file.name} ${imageBytes.length} bytes, ${scenario}, jit ${jitSel}`);
   startWorker({ imageBytes, expected, jit, snapshot }, [imageBytes.buffer]);
 };
