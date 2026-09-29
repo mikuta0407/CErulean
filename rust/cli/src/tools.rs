@@ -405,3 +405,100 @@ mod tests {
         assert_eq!(d, ["k:   r1         00000007, want 00000000"]);
     }
 }
+
+// ---- blockstat ----
+
+/// blockstat [--steps N] <snapshot> [script]: 実行した命令列を動的な基本ブロック
+/// （PC が連続する命令の列）に区切り、長さの分布と、ブロック内の命令の性質
+/// （ロード/ストア・条件付き・PSR 操作）の割合を数える（段階4 の IR の設計の材料）。
+/// アイドルループ（0x800AF000 台）と Thumb は数えない。
+pub fn cmd_blockstat(args: &[String]) -> Result<ExitCode, String> {
+    let (mut steps, mut rest) = (100_000_000u64, vec![]);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--steps" => steps = parse_u64(it.next().ok_or("--steps needs a value")?)?,
+            s => rest.push(s.to_string()),
+        }
+    }
+    let (snap, script_path) = match rest.as_slice() {
+        [s] => (s.clone(), None),
+        [s, p] => (s.clone(), Some(p.clone())),
+        _ => return Err("usage: cerulean blockstat [--steps n] <snapshot> [script]".into()),
+    };
+    let mut m = load_snap(&snap)?;
+    let mut s = Session::new();
+    if let Some(p) = &script_path {
+        let src = std::fs::read_to_string(p).map_err(|e| format!("{p}: {e}"))?;
+        let start = m.steps();
+        let evs = script::parse(&src, INSTRUCTIONS_PER_SECOND).map_err(|e| e.to_string())?;
+        s.schedule(evs.into_iter().filter(|e| e.step >= start));
+    }
+    let mut apply = |m: &mut Machine, ev: &Event| -> Result<bool, String> {
+        match ev.kind {
+            Kind::Shot | Kind::Snap | Kind::Quit => Ok(false),
+            _ => emu::apply_input(m, ev),
+        }
+    };
+    let end = m.steps() + steps;
+    let mut hist = [0u64; 65]; // ブロック長（64 以上はまとめる）ごとの命令数
+    let (mut total, mut ldst, mut ldm, mut cond, mut psr, mut blocks) =
+        (0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
+    let (mut cur_len, mut next_pc) = (0usize, u32::MAX);
+    let flush = |len: &mut usize, hist: &mut [u64; 65], blocks: &mut u64| {
+        if *len > 0 {
+            hist[(*len).min(64)] += *len as u64;
+            *blocks += 1;
+            *len = 0;
+        }
+    };
+    while m.steps() < end {
+        let pc = m.cpu.pc();
+        let arm_code = !m.cpu.thumb() && pc >> 12 != 0x800AF;
+        if arm_code && let Some(w) = m.peek32(pc) {
+            if pc != next_pc {
+                flush(&mut cur_len, &mut hist, &mut blocks);
+            }
+            cur_len += 1;
+            next_pc = pc.wrapping_add(4);
+            total += 1;
+            match (w >> 25) & 7 {
+                2 | 3 => ldst += 1,
+                0 if w & 0x90 == 0x90 && (w >> 5) & 3 != 0 => ldst += 1,
+                4 => ldm += 1,
+                0 | 1 if (8..=11).contains(&((w >> 21) & 0xF)) && w & (1 << 20) == 0 => psr += 1,
+                _ => {}
+            }
+            if w >> 28 != 0xE {
+                cond += 1;
+            }
+        } else {
+            flush(&mut cur_len, &mut hist, &mut blocks);
+            next_pc = u32::MAX;
+        }
+        let next = m.steps() + 1;
+        s.run(&mut m, next, &mut apply).map_err(|e| e.to_string())?;
+        let _ = m.take_uart1();
+    }
+    flush(&mut cur_len, &mut hist, &mut blocks);
+    let pct = |n: u64| 100.0 * n as f64 / total.max(1) as f64;
+    println!(
+        "ARM instructions {total} in {blocks} dynamic blocks (avg {:.1})",
+        total as f64 / blocks.max(1) as f64
+    );
+    println!(
+        "load/store {:.1}%  ldm/stm {:.1}%  conditional {:.1}%  mrs/msr {:.1}%",
+        pct(ldst),
+        pct(ldm),
+        pct(cond),
+        pct(psr)
+    );
+    let mut acc = 0;
+    for (len, n) in hist.iter().enumerate().skip(1) {
+        acc += n;
+        if [1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 24, 32, 48, 64].contains(&len) {
+            println!("  blocks <= {len:2}: {:5.1}% of instructions", pct(acc));
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}

@@ -64,6 +64,7 @@ fn main() -> ExitCode {
         Some("segspeed") => tools::cmd_segspeed(&args[1..]),
         Some("ihist") => tools::cmd_ihist(&args[1..]),
         Some("genrate") => tools::cmd_genrate(&args[1..]),
+        Some("blockstat") => tools::cmd_blockstat(&args[1..]),
         _ => {
             eprint!("{USAGE}");
             return ExitCode::from(2);
