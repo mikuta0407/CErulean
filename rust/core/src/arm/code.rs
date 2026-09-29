@@ -134,8 +134,14 @@ impl<S> CodeCache<S> {
         decode: fn(u32) -> Instr<S>,
     ) -> Instr<S> {
         let p = &self.pages[self.cur as usize];
-        match p.arm[((pc >> 2) & 0x3FF) as usize] {
-            Some(i) => i,
+        match &p.arm[((pc >> 2) & 0x3FF) as usize] {
+            // フィールドごとに読む（16 バイトのまま写すとスタック経由の写しになり、
+            // 直後の 8 バイト読みがストアフォワーディングで詰まる。計測で確認）。
+            Some(i) => Instr {
+                exec: i.exec,
+                word: i.word,
+                imm: i.imm,
+            },
             None => self.decode_cached(pc, mem, decode),
         }
     }

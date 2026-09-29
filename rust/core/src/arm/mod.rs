@@ -225,6 +225,17 @@ pub trait System {
         Ok(decode_instr::<Self>(self.fetch32(pc)?))
     }
 
+    /// 実行中のページ（デコードキャッシュ）の pc の命令。pc がそのページにあり、
+    /// 変換も変わっていないときだけ Some（TLB もバスも触らないので、fetch_arm と
+    /// 同じ結果になる）。ブロック実行（Cpu::run_page）が使う。既定は None。
+    #[inline(always)]
+    fn cur_instr(&mut self, _pc: u32) -> Option<Instr<Self>>
+    where
+        Self: Sized,
+    {
+        None
+    }
+
     /// 状態を変えずに読める場合だけ 32 ビットを読む（アイドルループ検出用。
     /// Go の cpu.Prober）。Some を返すのは、同じアクセスを実際に行っても
     /// メモリ側の状態（ソフト TLB・フェッチ猶予・監視の記録など）が一切変わらない
@@ -297,7 +308,18 @@ impl std::error::Error for StopError {}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Exec {
     Mem(MemError),
-    Undef { reason: &'static str, arch: bool },
+    /// 未定義命令。静的な値への参照にして Exec を小さく保つ（ExecResult が
+    /// 16 バイトに収まるとレジスタで返り、命令ごとのメモリ経由の返却が消える。
+    /// 性能対策・計測で確認）。
+    Undef(&'static Undef),
+}
+
+/// 未定義命令の理由（Exec::Undef）。
+#[derive(Debug, PartialEq, Eq)]
+pub struct Undef {
+    pub reason: &'static str,
+    /// 実機でも未定義例外になる（ゲストに配送する）か
+    pub arch: bool,
 }
 
 impl From<MemError> for Exec {
@@ -309,12 +331,16 @@ impl From<MemError> for Exec {
 
 pub type ExecResult = Result<(), Exec>;
 
-pub(crate) fn unimpl(reason: &'static str) -> Exec {
-    Exec::Undef {
-        reason,
-        arch: false,
-    }
+/// エミュレータ未実装の命令（停止する）。理由は文字列リテラル。
+macro_rules! unimpl {
+    ($reason:literal) => {
+        Exec::Undef(&Undef {
+            reason: $reason,
+            arch: false,
+        })
+    };
 }
+pub(crate) use unimpl;
 
 /// ARM CPU の状態。
 ///
@@ -507,13 +533,13 @@ impl Cpu {
                 self.enter_exception(VEC_DABT, MODE_ABT, pc.wrapping_add(8), sys);
                 Ok(())
             }
-            Exec::Undef { arch: true, .. } => {
+            Exec::Undef(Undef { arch: true, .. }) => {
                 // 実機でも未定義例外になる命令: ゲストに配送する。
                 // LR = 未定義命令の次（ARM ARM A2.6.4）。
                 self.enter_exception(VEC_UNDEF, MODE_UND, pc.wrapping_add(instr_len), sys);
                 Ok(())
             }
-            Exec::Undef { reason, arch } => Err(StopError::Undefined(UndefinedError {
+            Exec::Undef(&Undef { reason, arch }) => Err(StopError::Undefined(UndefinedError {
                 pc,
                 word,
                 reason,
@@ -549,11 +575,57 @@ impl Cpu {
             if rc.n >= rc.budget {
                 return Ok(rc.n);
             }
+            // 履歴なし・ARM 状態・割り込みなしで、PC が実行中のページにあれば
+            // ページ内をまとめて実行する（結果は step_one の繰り返しと同じ）。
+            if !self.hist.enabled()
+                && self.cpsr & FLAG_T == 0
+                && !self.interrupt_pending(sys)
+                && let Some(ins) = sys.cur_instr(self.regs[15])
+            {
+                self.run_page(sys, ins)?;
+                continue;
+            }
             let r = self.step_one(sys);
             // n は命令を終えてから増やす（実行中の命令からデバイスが n を読むと、
             // 終えた命令数が返る）。
             sys.run_ctl().n += 1;
             r?;
+        }
+    }
+
+    /// 実行中のページの命令を続けて実行する（ブロック実行。性能対策）。
+    /// step_one のうち、ページ内では変わらない判定（履歴・ページの引き当て）を
+    /// 省いたもの。次の場合に戻り、run の遅い経路（step_one）に任せる:
+    /// 上限に達した・Thumb になった・割り込みを受け付ける・PC がページを出た
+    /// （分岐・ページ末尾）・変換やページの中身が変わった（MMU が code_cur_va を
+    /// 無効にする）・例外やエラー。
+    /// 呼び出し側は、最初の命令 ins について run の先頭の判定を済ませておくこと。
+    #[inline(always)]
+    fn run_page<S: System>(&mut self, sys: &mut S, mut ins: Instr<S>) -> Result<(), StopError> {
+        loop {
+            let pc = self.regs[15];
+            let word = ins.word;
+            self.regs[15] = pc.wrapping_add(4);
+            let cond = word >> 28;
+            if (cond == 0xE || COND_TABLE[(cond << 4 | self.cpsr >> 28) as usize])
+                && let Err(e) = (ins.exec)(self, sys, word, ins.imm)
+            {
+                let r = self.deliver_exec_error(e, pc, word, 4, sys);
+                sys.run_ctl().n += 1;
+                if r.is_err() {
+                    self.regs[15] = pc;
+                }
+                return r;
+            }
+            let rc = sys.run_ctl();
+            rc.n += 1;
+            if rc.n >= rc.budget || self.cpsr & FLAG_T != 0 || self.interrupt_pending(sys) {
+                return Ok(());
+            }
+            match sys.cur_instr(self.regs[15]) {
+                Some(i) => ins = i,
+                None => return Ok(()),
+            }
         }
     }
 

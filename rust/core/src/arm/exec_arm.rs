@@ -35,7 +35,7 @@ pub(crate) fn decode<S: System>(word: u32) -> ExecFn<S> {
         // ARMv4 では UNPREDICTABLE、v5 以降は BLX 等の拡張空間。
         // （実行ループの条件判定で NOP として飛ばされるのでここには来ない。cond_passed 参照）
         // TODO(v5TE): PXA27x 対応時に BLX(1) 等を実装する。
-        return |_, _, _, _| Err(unimpl("cond=1111 extension space (ARMv5+)"));
+        return |_, _, _, _| Err(unimpl!("cond=1111 extension space (ARMv5+)"));
     }
     match (word >> 25) & 7 {
         0 => {
@@ -67,7 +67,7 @@ pub(crate) fn decode<S: System>(word: u32) -> ExecFn<S> {
                 if op & 1 == 1 {
                     return exec_msr; // MSR 即値形式
                 }
-                return |_, _, _, _| Err(unimpl("undefined (MRS-like encoding with immediate)"));
+                return |_, _, _, _| Err(unimpl!("undefined (MRS-like encoding with immediate)"));
             }
             exec_data_proc
         }
@@ -79,10 +79,10 @@ pub(crate) fn decode<S: System>(word: u32) -> ExecFn<S> {
                 // （実機でも未定義例外）。WinCE はこの空間の命令をトラップとして
                 // 意図的に実行するので、例外として配送する。
                 return |_, _, _, _| {
-                    Err(Exec::Undef {
+                    Err(Exec::Undef(&Undef {
                         reason: "architecturally undefined space (011 with bit4)",
                         arch: true,
-                    })
+                    }))
                 };
             }
             exec_ldst
@@ -91,10 +91,10 @@ pub(crate) fn decode<S: System>(word: u32) -> ExecFn<S> {
         5 => exec_branch,
         // コプロセッサ LDC/STC: 対応コプロセッサがないので実機同様に未定義例外
         6 => |_, _, _, _| {
-            Err(Exec::Undef {
+            Err(Exec::Undef(&Undef {
                 reason: "LDC/STC (no coprocessor)",
                 arch: true,
-            })
+            }))
         },
         _ => {
             // 7: コプロセッサ演算・レジスタ転送、SWI
@@ -105,10 +105,10 @@ pub(crate) fn decode<S: System>(word: u32) -> ExecFn<S> {
                 return exec_mcr_mrc;
             }
             |_, _, _, _| {
-                Err(Exec::Undef {
+                Err(Exec::Undef(&Undef {
                     reason: "CDP (no coprocessor)",
                     arch: true,
-                })
+                }))
             }
         }
     }
@@ -449,7 +449,7 @@ fn exec_ldst_misc<S: System>(c: &mut Cpu, sys: &mut S, word: u32, _imm: u32) -> 
         if sh != 1 {
             // L=0 の SB/SH は v5TE では LDRD/STRD。
             // TODO(v5TE): PXA27x 対応時に実装する。
-            return Err(unimpl("LDRD/STRD (ARMv5TE) not implemented"));
+            return Err(unimpl!("LDRD/STRD (ARMv5TE) not implemented"));
         }
         // STRH。非アラインは UNPREDICTABLE なのでアラインして扱う。
         sys.write(addr & !1, 2, c.read_reg(rd) & 0xFFFF)?;
@@ -464,7 +464,7 @@ fn exec_ldst_misc<S: System>(c: &mut Cpu, sys: &mut S, word: u32, _imm: u32) -> 
         2 => sys.read(addr, 1)? as u8 as i8 as i32 as u32, // LDRSB（符号拡張）
         3 => sys.read(addr & !1, 2)? as u16 as i16 as i32 as u32, // LDRSH（符号拡張）
         // sh=00 はここに来ない（decode で乗算系に振り分け済み）
-        _ => return Err(unimpl("misc load/store with sh=00")),
+        _ => return Err(unimpl!("misc load/store with sh=00")),
     };
     if !pre || writeback {
         c.write_reg(rn, indexed);
@@ -568,7 +568,7 @@ fn exec_ldm_stm<S: System>(c: &mut Cpu, sys: &mut S, word: u32, _imm: u32) -> Ex
     let list = word & 0xFFFF;
     let n = list.count_ones();
     if n == 0 {
-        return Err(unimpl("LDM/STM with empty register list (UNPREDICTABLE)"));
+        return Err(unimpl!("LDM/STM with empty register list (UNPREDICTABLE)"));
     }
     let has_pc = list & (1 << 15) != 0;
 
@@ -577,7 +577,7 @@ fn exec_ldm_stm<S: System>(c: &mut Cpu, sys: &mut S, word: u32, _imm: u32) -> Ex
         // r8-r14 を読み書きする）。WinCE はスレッドのコンテキスト切替で使う。
         // ライトバックは UNPREDICTABLE（W=0 であるべき）なので止めて気づく。
         if writeback {
-            return Err(unimpl("LDM(2)/STM(2) with writeback (UNPREDICTABLE)"));
+            return Err(unimpl!("LDM(2)/STM(2) with writeback (UNPREDICTABLE)"));
         }
         return exec_ldm_stm_user(c, sys, word, load);
     }
@@ -745,7 +745,7 @@ fn exec_mul_long(c: &mut Cpu, word: u32) -> ExecResult {
 fn exec_swp<S: System>(c: &mut Cpu, sys: &mut S, word: u32) -> ExecResult {
     if word & (1 << 23) != 0 || word & (3 << 20) != 0 {
         // bit24=1 空間で SWP 以外のビットパターンは v4 では未定義。
-        return Err(unimpl("undefined encoding in swap space"));
+        return Err(unimpl!("undefined encoding in swap space"));
     }
     let addr = c.read_reg((word >> 16) & 0xF);
     let rd = (word >> 12) & 0xF;
@@ -770,14 +770,14 @@ fn exec_swp<S: System>(c: &mut Cpu, sys: &mut S, word: u32) -> ExecResult {
 fn exec_mrs<S: System>(c: &mut Cpu, _sys: &mut S, word: u32, _imm: u32) -> ExecResult {
     let rd = (word >> 12) & 0xF;
     if rd == 15 {
-        return Err(unimpl("MRS with Rd=PC (UNPREDICTABLE)"));
+        return Err(unimpl!("MRS with Rd=PC (UNPREDICTABLE)"));
     }
     if word & (1 << 22) != 0 {
         // R: SPSR
         let b = c.cur_bank();
         if b == BANK_USR {
             // usr/sys に SPSR はない（UNPREDICTABLE）。0 を返すより止めて気づけるように。
-            return Err(unimpl("MRS SPSR in usr/sys mode (no SPSR)"));
+            return Err(unimpl!("MRS SPSR in usr/sys mode (no SPSR)"));
         }
         c.regs[rd as usize] = c.spsr[b];
         return Ok(());
@@ -812,7 +812,7 @@ fn exec_msr<S: System>(c: &mut Cpu, sys: &mut S, word: u32, _imm: u32) -> ExecRe
         // R: SPSR へ
         let b = c.cur_bank();
         if b == BANK_USR {
-            return Err(unimpl("MSR SPSR in usr/sys mode (no SPSR)"));
+            return Err(unimpl!("MSR SPSR in usr/sys mode (no SPSR)"));
         }
         c.spsr[b] = (c.spsr[b] & !mask) | (val & mask);
         return Ok(());
@@ -825,7 +825,9 @@ fn exec_msr<S: System>(c: &mut Cpu, sys: &mut S, word: u32, _imm: u32) -> ExecRe
     let new_psr = (c.cpsr & !mask) | (val & mask);
     if bank_index(new_psr & 0x1F).is_none() {
         // 存在しないモード番号への切替は UNPREDICTABLE。黙って壊れるより停止。
-        return Err(unimpl("MSR writes an invalid mode to CPSR (UNPREDICTABLE)"));
+        return Err(unimpl!(
+            "MSR writes an invalid mode to CPSR (UNPREDICTABLE)"
+        ));
     }
     c.write_cpsr(new_psr, sys);
     Ok(())
@@ -877,10 +879,10 @@ fn exec_mcr_mrc<S: System>(c: &mut Cpu, sys: &mut S, word: u32, _imm: u32) -> Ex
     if cp_num != 15 {
         // ARM920T に CP15 以外のコプロセッサはなく、実機でも未定義命令例外
         // になる。WinCE は FPU 検出のため意図的に p10（VFP）等を叩く。
-        return Err(Exec::Undef {
+        return Err(Exec::Undef(&Undef {
             reason: "no such coprocessor (undefined exception on real HW)",
             arch: true,
-        });
+        }));
     }
     let opc1 = ((word >> 21) & 7) as u8;
     let crn = ((word >> 16) & 0xF) as u8;

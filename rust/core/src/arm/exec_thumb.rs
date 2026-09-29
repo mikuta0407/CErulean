@@ -314,7 +314,7 @@ impl Cpu {
         if (hw >> 9) & 3 == 2 {
             return self.thumb_push_pop(sys, hw); // Format 14: PUSH/POP
         }
-        Err(unimpl("unallocated Thumb encoding (misc 1011 space)"))
+        Err(unimpl!("unallocated Thumb encoding (misc 1011 space)"))
     }
 
     /// Format 14。PUSH = STMDB SP!、POP = LDMIA SP!。
@@ -325,7 +325,7 @@ impl Cpu {
         let r = hw & (1 << 8) != 0; // PUSH: LR / POP: PC を追加
         let n = list.count_ones() + r as u32;
         if n == 0 {
-            return Err(unimpl("PUSH/POP with empty list (UNPREDICTABLE)"));
+            return Err(unimpl!("PUSH/POP with empty list (UNPREDICTABLE)"));
         }
         let sp = self.regs[13];
         if pop {
@@ -386,10 +386,10 @@ impl Cpu {
             }
             // 1110 は未定義（ARM ARM A6.3.1）
             0xE => {
-                return Err(Exec::Undef {
+                return Err(Exec::Undef(&Undef {
                     reason: "Thumb B with cond=1110 (undefined)",
                     arch: true,
-                });
+                }));
             }
             _ => {}
         }
@@ -406,7 +406,7 @@ impl Cpu {
         let rn = ((hw >> 8) & 7) as usize;
         let list = hw & 0xFF;
         if list == 0 {
-            return Err(unimpl("Thumb LDM/STM with empty list (UNPREDICTABLE)"));
+            return Err(unimpl!("Thumb LDM/STM with empty list (UNPREDICTABLE)"));
         }
         let load = hw & (1 << 11) != 0;
         let base = self.regs[rn];
@@ -465,7 +465,7 @@ impl Cpu {
             }
             // 01: BLX サフィックス（ARMv5）
             // TODO(v5TE): PXA27x 対応時に BLX を実装する。
-            _ => Err(unimpl("BLX suffix (ARMv5) not implemented")),
+            _ => Err(unimpl!("BLX suffix (ARMv5) not implemented")),
         }
     }
 }

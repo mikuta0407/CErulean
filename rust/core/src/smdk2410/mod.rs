@@ -226,6 +226,18 @@ impl System for Sys {
         Ok(decode_instr::<Sys>(self.fetch32(pc)?))
     }
     #[inline(always)]
+    fn cur_instr(&mut self, pc: u32) -> Option<Instr<Self>> {
+        let Sys { mmu, bus, code, .. } = self;
+        if pc & !0xFFF != mmu.code_cur_va {
+            return None;
+        }
+        let mut cm = CodeMem {
+            mmu,
+            arena: bus.arena(),
+        };
+        Some(code.cur_instr(pc, &mut cm, decode_instr::<Sys>))
+    }
+    #[inline(always)]
     fn ram_run(&mut self, va: u32, nbytes: u32, write: bool) -> Option<RamOff> {
         self.mmu.ram_run(va, nbytes, write)
     }

@@ -380,32 +380,6 @@ pub fn cmd_genrate(args: &[String]) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn json_fields() {
-        let l = r#"{"format":1,"event":"stop","steps":12,"stop":{"kind":"quit"},"cpu":"ab","screen_w":0}"#;
-        assert_eq!(json_field(l, "format"), Some("1"));
-        assert_eq!(json_field(l, "event"), Some("stop"));
-        assert_eq!(json_field(l, "steps"), Some("12"));
-        assert_eq!(json_field(l, "stop"), Some(r#"{"kind":"quit"}"#));
-        assert_eq!(json_field(l, "screen_w"), Some("0"));
-        assert_eq!(json_field(l, "nope"), None);
-    }
-
-    #[test]
-    fn cpu_diff_names_registers() {
-        let mut a = vec![0u8; 212];
-        let e = a.clone();
-        a[12 + 4] = 7; // r1
-        let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
-        let d = cpu_diff("k", &hex(&e), &hex(&a));
-        assert_eq!(d, ["k:   r1         00000007, want 00000000"]);
-    }
-}
-
 // ---- blockstat ----
 
 /// blockstat [--steps N] <snapshot> [script]: 実行した命令列を動的な基本ブロック
@@ -501,4 +475,30 @@ pub fn cmd_blockstat(args: &[String]) -> Result<ExitCode, String> {
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_fields() {
+        let l = r#"{"format":1,"event":"stop","steps":12,"stop":{"kind":"quit"},"cpu":"ab","screen_w":0}"#;
+        assert_eq!(json_field(l, "format"), Some("1"));
+        assert_eq!(json_field(l, "event"), Some("stop"));
+        assert_eq!(json_field(l, "steps"), Some("12"));
+        assert_eq!(json_field(l, "stop"), Some(r#"{"kind":"quit"}"#));
+        assert_eq!(json_field(l, "screen_w"), Some("0"));
+        assert_eq!(json_field(l, "nope"), None);
+    }
+
+    #[test]
+    fn cpu_diff_names_registers() {
+        let mut a = vec![0u8; 212];
+        let e = a.clone();
+        a[12 + 4] = 7; // r1
+        let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+        let d = cpu_diff("k", &hex(&e), &hex(&a));
+        assert_eq!(d, ["k:   r1         00000007, want 00000000"]);
+    }
 }
