@@ -296,13 +296,16 @@ fn class(w: u32) -> String {
     }
 }
 
-/// ihist [--count N] [--max-steps N] [--skip-page P] <snapshot>: スナップショットから
+/// ihist [--count N] [--max-steps N] [--skip-page P] [--pairs] <snapshot>: スナップショットから
 /// 1 命令ずつ実行し、実行した ARM 命令の種類の分布を数える（特化・高速化の対象を
 /// 選ぶための調査用）。指定の 4KB ページ（既定は OAL のアイドルループの 0x800AF）と
 /// Thumb 命令は数えない。命令語は表示用の読み出し（TLB を埋めない）で読む。
+/// --pairs は、直前の命令の次のアドレスで続けて実行した 2 命令の組を数える
+/// （スーパー命令の候補を選ぶ用）。
 pub fn cmd_ihist(args: &[String]) -> Result<ExitCode, String> {
     let (mut count, mut max_steps, mut skip_page, mut snap) =
         (20_000_000u64, 300_000_000u64, 0x800AFu64, None);
+    let mut pairs = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut val = || {
@@ -314,6 +317,7 @@ pub fn cmd_ihist(args: &[String]) -> Result<ExitCode, String> {
             "--count" => count = val()?,
             "--max-steps" => max_steps = val()?,
             "--skip-page" => skip_page = val()?,
+            "--pairs" => pairs = true,
             s => snap = Some(s.to_string()),
         }
     }
@@ -323,14 +327,29 @@ pub fn cmd_ihist(args: &[String]) -> Result<ExitCode, String> {
     let mut cnt = std::collections::BTreeMap::<String, u64>::new();
     let mut total = 0;
     let end = m.steps() + max_steps;
+    // 直前に数えた命令（次のアドレス, 種類）
+    let mut prev: Option<(u32, String)> = None;
     while m.steps() < end && total < count {
         let pc = m.cpu.pc();
         if !m.cpu.thumb()
             && (skip_page == 0 || (pc >> 12) as u64 != skip_page)
             && let Some(w) = m.peek32(pc)
         {
-            *cnt.entry(class(w)).or_default() += 1;
-            total += 1;
+            let c = class(w);
+            if !pairs {
+                *cnt.entry(c).or_default() += 1;
+                total += 1;
+            } else {
+                if let Some((next, p)) = &prev
+                    && *next == pc
+                {
+                    *cnt.entry(format!("{p} ; {c}")).or_default() += 1;
+                }
+                total += 1;
+                prev = Some((pc.wrapping_add(4), c));
+            }
+        } else {
+            prev = None;
         }
         m.step().map_err(|e| e.to_string())?;
         let _ = m.take_uart1();
