@@ -256,6 +256,9 @@ $R goldencmp testdata/golden/expected/boot-1200M.jsonl r.jsonl
 
 ### 調査・計測の道具
 
+ゲストのドライバの調査用のスクリプト（`tools/re/`: ROM のモジュール一覧・PC のサンプリングの
+モジュール別の時系列・PC カードの監視ログの整形）の使い方は `docs/network-kickoff.md` の「調べ方のメモ」。
+
 | 道具 | 用途 |
 |---|---|
 | `tools/bench/bench.sh` | 基準のリビジョン（既定 HEAD）と作業ツリーの速度を交互に計測 |
