@@ -783,6 +783,10 @@ Worker → メイン:
     gzip（CompressionStream）で 24.7MB、圧縮 1.4 秒・展開 1.1 秒。
   - 各ブラウザ（Chrome/Firefox/Safari・iOS Safari）の値は計測ページ
     （`rust/web/www/bench/`）でユーザーに測ってもらう。
+  - Firefox 155（Mac。開発機とは別の機械、2026-09-29）: 基準と完全一致、boot-1200M
+    91.2M 命令/秒（13.2 秒。実時間の約 0.67 倍）、デコード済み 1,185 ページ。
+    スナップショット保存 412ms・読み込み 433ms、gzip 圧縮 596ms（24.7MB）・展開 202ms、
+    往復一致。OPFS は未計測（LAN の IP の http で開いたため安全なコンテキストでない）。
 
 ### 段階3: ブラウザ版の最小製品（MVP）
 
