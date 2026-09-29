@@ -68,7 +68,12 @@ Rust 移行（2026-09〜）: コアを Rust に移し、最初はブラウザ（
       Go と一致し、Go の高速化（デコードキャッシュ・特化・アイドルスキップ等）と
       新しいスナップショット形式も移した。速度は Go と同等（実処理の区間で約 5% 速い）。
       基準を Rust 版に切り替え、Go 版を削除した（最後の Go 版のコミットは 039ccb4）
-- [ ] 段階2〜5: wasm での計測、ブラウザ版、インタプリタの高速化、JIT-to-wasm
+- [x] 段階2: wasm で動かして計測（Node・Firefox・Chrome/Edge・Safari・iPhone で全基準
+      シナリオ一致。起動の区間でブラウザ 84〜133M 命令/秒）
+- [x] 段階4（4-1・4-2 で区切り）: ページ内のブロック実行、8 バイトの IR と特化の拡大。
+      起動の区間でネイティブ 81→約 100M、Node の wasm 47→70M 命令/秒
+- [ ] 段階5: JIT-to-wasm（次。開始用プロンプトは `docs/stage5-kickoff.md`）
+- [ ] 段階3: ブラウザ版の最小製品
 
 ## テスト用イメージの入手
 
@@ -185,7 +190,7 @@ $R goldencmp testdata/golden/expected/boot-1200M.jsonl r.jsonl
 |---|---|
 | `tools/bench/bench.sh` | 基準のリビジョン（既定 HEAD）と作業ツリーの速度を交互に計測 |
 | `$R segspeed <snap> <script>` | スクリプト再生中の仮想 0.25 秒ごとの実時間比・アイドル割合 |
-| `$R ihist <snap>` | 実行した ARM 命令の種類の分布 |
+| `$R ihist [--pairs] <snap>` | 実行した ARM 命令の種類（--pairs は連続 2 命令の組）の分布 |
 | `$R genrate <image>` | MMU の変換世代・コードページの印付けの頻度・デコード済みページ数 |
 | `$R goldencmp <a.jsonl> <b.jsonl>` | 一致確認の結果の比較（レジスタ単位で差を表示） |
 | `$R snapdump <snap> [snap2]` | スナップショットのチャンクの一覧・比較 |
