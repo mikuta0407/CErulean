@@ -2,14 +2,14 @@
 // （tools/web-bench.mjs）の両方から使うので、Web 標準の API だけを使う
 // （crypto.subtle・CompressionStream・performance）。
 //
-// 1. リセットから boot-1200M（12 億命令）を走らせ、命令/秒を測り、終わりの CPU 状態・
-//    RAM・UART1・画面のハッシュを基準（testdata/golden/expected/boot-1200M.jsonl の
-//    stop の行）と比べる。
+// 1. リセットから boot-1200M（12 億命令）か boot-today（36 億命令）を走らせ、命令/秒を
+//    測り、終わりの CPU 状態・RAM・UART1・画面のハッシュを基準
+//    （testdata/golden/expected/<シナリオ>.jsonl の stop の行）と比べる。JIT（段階5）の
+//    有無・閾値を選べる。JIT ありなら生成量などの統計も結果に入れる。
 // 2. スナップショットの保存（無圧縮）・gzip 圧縮・展開・読み込みの時間と大きさを測り、
 //    読み込んだ状態が元と同じかを確かめる（自動保存の頻度と圧縮方式の判断材料。§4.3・§7.3）。
 // 3. 渡されれば OPFS への書き込み・読み出しの時間を測る（ブラウザの Worker だけ）。
 
-const STEPS = 1_200_000_000n;
 const CHUNK = 50_000_000n;
 
 const hex = (b) => Array.from(new Uint8Array(b), (x) => x.toString(16).padStart(2, "0")).join("");
@@ -74,26 +74,48 @@ async function pipe(bytes, stream) {
 
 /// wasm は web クレートの wasm-bindgen の出力（--target web）。imageBytes は PPC_USA.bin、
 /// expected は基準の stop の行（JSON を解釈したもの）。log は進み具合の表示。
-/// opfs は Worker の OPFS のディレクトリ（なければ省略）。
-export async function runBench({ wasm, imageBytes, expected, log, opfs }) {
+/// opfs は Worker の OPFS のディレクトリ（なければ省略）。steps は走らせる命令数
+/// （基準の stop の行の steps と同じにする）。jit は [閾値, まとめる数]（null なら JIT
+/// なし）。snapshot が false ならスナップショット・OPFS の計測を省く。
+export async function runBench({ wasm, imageBytes, expected, log, opfs, jit = null, snapshot = true }) {
+  const steps = BigInt(expected.steps);
   const r = { userAgent: typeof navigator !== "undefined" ? navigator.userAgent : "node" };
+  r.steps = expected.steps;
+  r.jit = jit ? jit.join(",") : "off";
   const emu = new wasm.Emu();
   emu.loadImage(imageBytes, "PPC_USA.bin", Int32Array.from([2006, 1, 2, 15, 4, 5]));
+  if (jit) emu.setJit(true, jit[0], jit[1]);
   const uart = [];
   const t0 = performance.now();
-  for (let target = CHUNK; target <= STEPS; target += CHUNK) {
+  let t1 = t0;
+  for (let target = CHUNK; target <= steps; target += CHUNK) {
     const st = emu.run(target);
     uart.push(emu.takeUart());
     if (st !== "ok") throw new Error(`stopped: ${emu.stopJson()}`);
     if (target % 200_000_000n === 0n) {
-      const el = (performance.now() - t0) / 1000;
-      log(`${target / 1_000_000n}M steps, ${(Number(target) / el / 1e6).toFixed(1)}M steps/s`);
+      const now = performance.now();
+      const el = (now - t0) / 1000;
+      let msg = `${target / 1_000_000n}M steps, ${(Number(target) / el / 1e6).toFixed(1)}M steps/s` +
+        ` (last 200M: ${(200 / ((now - t1) / 1000)).toFixed(1)}M/s)`;
+      t1 = now;
+      if (jit) {
+        const js = JSON.parse(emu.jitStats());
+        msg += `, jit ${(js.bytes / 1e6).toFixed(1)}MB ${js.pages} funcs ${js.modules} modules`;
+        if (js.error) msg += ` ERROR ${js.error}`;
+      }
+      log(msg);
     }
   }
   const el = (performance.now() - t0) / 1000;
   r.bootSeconds = el;
-  r.mips = Number(STEPS) / el / 1e6;
+  r.mips = Number(steps) / el / 1e6;
   r.codePages = emu.codePages();
+  if (jit) {
+    const js = JSON.parse(emu.jitStats());
+    // 生成コードで実行した命令の割合（アイドルスキップで飛ばした分を除いた実行命令のうち）
+    r.jitExecutedRatio = js.executed / (Number(steps) - Number(emu.idleSkipped()));
+    r.jitStats = js;
+  }
 
   const dump = emu.cpuDump();
   const screen = emu.frame();
@@ -106,7 +128,11 @@ export async function runBench({ wasm, imageBytes, expected, log, opfs }) {
     screen_sha256: screen.length ? await sha256(screen) : "",
   };
   r.match = Object.keys(r.got).every((k) => r.got[k] === expected[k]);
-  log(`boot-1200M: ${r.mips.toFixed(1)}M steps/s, match=${r.match}`);
+  log(`${steps / 1_000_000n}M: ${r.mips.toFixed(1)}M steps/s, ${el.toFixed(1)}s, match=${r.match}`);
+  if (!snapshot) {
+    emu.free();
+    return r;
+  }
 
   // スナップショット（無圧縮 → gzip → 展開 → 読み込み）。
   let t = performance.now();

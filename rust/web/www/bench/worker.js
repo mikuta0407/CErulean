@@ -2,7 +2,7 @@
 import init, * as wasm from "../pkg/cerulean_web.js";
 import { runBench, runJitProbe } from "./bench-core.js";
 
-onmessage = async ({ data: { imageBytes, expected, probe, synthetic } }) => {
+onmessage = async ({ data: { imageBytes, expected, probe, synthetic, jit, snapshot } }) => {
   const log = (msg) => postMessage({ log: msg });
   try {
     await init();
@@ -12,12 +12,14 @@ onmessage = async ({ data: { imageBytes, expected, probe, synthetic } }) => {
       return;
     }
     let opfs;
-    try {
-      opfs = await navigator.storage.getDirectory();
-    } catch (e) {
-      log(`OPFS unavailable: ${e}`);
+    if (snapshot) {
+      try {
+        opfs = await navigator.storage.getDirectory();
+      } catch (e) {
+        log(`OPFS unavailable: ${e}`);
+      }
     }
-    const result = await runBench({ wasm, imageBytes, expected, log, opfs });
+    const result = await runBench({ wasm, imageBytes, expected, log, opfs, jit, snapshot });
     postMessage({ result });
   } catch (e) {
     // wasm の panic は RuntimeError（trap）になる。インスタンスは以後使えない。

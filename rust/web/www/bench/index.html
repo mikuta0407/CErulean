@@ -12,12 +12,29 @@
 </style>
 </head>
 <body>
-<h1>CErulean wasm 計測（段階2）</h1>
+<h1>CErulean wasm 計測（段階2・段階5）</h1>
 <p><code>tools/web-build.sh</code> で wasm をビルドし、<code>tools/serve-bench.py</code> で配信して
 <code>http://localhost:8000/rust/web/www/bench/</code> を開く（キャッシュを無効にして配信する）。</p>
-<p>WM5 のイメージ（PPC_USA.bin）を選ぶと、リセットから 12 億命令を走らせて速度と基準との一致を測り、
-スナップショットの保存・圧縮・OPFS の時間も測る（数十秒〜数分。イメージはこのページの外に送らない）。</p>
-<input type="file" id="image">
+<p>条件を選んでから WM5 のイメージ（PPC_USA.bin）を選ぶと、リセットから走らせて速度と基準との
+一致を測る（数十秒〜数分。イメージはこのページの外に送らない）。同じイメージでもう一度測るときは
+「同じイメージでもう一度」を押す（条件ごとに新しい Worker で走らせる）。</p>
+<p>
+<label>シナリオ <select id="scenario">
+  <option value="boot-1200M">boot-1200M（起動 12 億命令）</option>
+  <option value="boot-today">boot-today（Today まで 36 億命令）</option>
+</select></label>
+<label>JIT <select id="jit">
+  <option value="off">なし</option>
+  <option value="64,32" selected>あり（閾値 64・32 ブロック）</option>
+  <option value="1,1">あり（閾値 1・1 ブロックずつ）</option>
+</select></label>
+<label><input type="checkbox" id="snapshot"> スナップショット・OPFS も測る</label>
+</p>
+<p>メモリ（JIT で増える分は V8 等の最適化コンパイルの一時的な作業領域）はブラウザの道具で見る:
+Chrome はタスクマネージャ（Shift+Esc）の「メモリ使用量」の最大、Firefox は about:processes、
+Mac の Safari はアクティビティモニタの「Safari Web コンテンツ」（このページのプロセス）。
+iPhone は数値を見にくいので、タブが落ちて再読み込みされないかを見る。</p>
+<input type="file" id="image"> <button id="again" disabled>同じイメージでもう一度</button>
 <p><button id="probe">JIT 診断（イメージ不要・十数秒）</button>
 JS・小さな wasm・エミュレータ本体の速さを比べ、遅い原因を切り分ける。</p>
 <pre id="out"></pre>
@@ -25,8 +42,11 @@ JS・小さな wasm・エミュレータ本体の速さを比べ、遅い原因�
 const out = document.getElementById("out");
 const print = (s) => { out.textContent += s + "\n"; };
 // 計測は Worker で行う（本番の構成と同じ。計画書 §3.4）。
+let worker = null;
 const startWorker = (msg, transfer) => {
-  const worker = new Worker("worker.js", { type: "module" });
+  // 前の計測の Worker は止める（生成コード・メモリを持ち越さない）。
+  worker?.terminate();
+  worker = new Worker("worker.js", { type: "module" });
   worker.onmessage = ({ data }) => {
     if (data.log) print(data.log);
     if (data.error) print(`ERROR ${data.error}`);
@@ -45,17 +65,27 @@ document.getElementById("probe").onclick = async () => {
   const synthetic = new Uint8Array(await (await fetch("/testdata/golden/synthetic/idle.words")).arrayBuffer());
   startWorker({ probe: true, synthetic }, [synthetic.buffer]);
 };
-document.getElementById("image").onchange = async (ev) => {
-  const file = ev.target.files[0];
-  if (!file) return;
+let file = null;
+const bench = async () => {
   out.textContent = "";
   out.className = "";
-  const lines = (await (await fetch("/testdata/golden/expected/boot-1200M.jsonl")).text()).trim().split("\n");
+  const scenario = document.getElementById("scenario").value;
+  const jitSel = document.getElementById("jit").value;
+  const jit = jitSel === "off" ? null : jitSel.split(",").map(Number);
+  const snapshot = document.getElementById("snapshot").checked;
+  const lines = (await (await fetch(`/testdata/golden/expected/${scenario}.jsonl`)).text()).trim().split("\n");
   const expected = JSON.parse(lines.at(-1));
+  // Worker に移すので、毎回ファイルから読み直す。
   const imageBytes = new Uint8Array(await file.arrayBuffer());
-  print(`${navigator.userAgent}\nimage ${file.name} ${imageBytes.length} bytes`);
-  startWorker({ imageBytes, expected }, [imageBytes.buffer]);
+  print(`${navigator.userAgent}\nimage ${file.name} ${imageBytes.length} bytes, ${scenario}, jit ${jitSel}`);
+  startWorker({ imageBytes, expected, jit, snapshot }, [imageBytes.buffer]);
 };
+document.getElementById("image").onchange = (ev) => {
+  file = ev.target.files[0];
+  document.getElementById("again").disabled = !file;
+  if (file) bench();
+};
+document.getElementById("again").onclick = () => file && bench();
 </script>
 </body>
 </html>
