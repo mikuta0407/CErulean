@@ -462,6 +462,11 @@ pub(crate) fn supported(i: &crate::arm::Instr) -> bool {
     codegen::supported(i)
 }
 
+/// 命令語（ARM 状態）が JIT の対象か（調査用。CLI の ihist --unjit が使う）。
+pub fn supported_word(word: u32) -> bool {
+    codegen::supported(&crate::arm::decode_instr(word))
+}
+
 /// enter の結果。
 pub(crate) enum Action {
     Ran(JitRun),

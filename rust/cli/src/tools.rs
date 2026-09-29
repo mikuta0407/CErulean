@@ -301,11 +301,12 @@ fn class(w: u32) -> String {
 /// 選ぶための調査用）。指定の 4KB ページ（既定は OAL のアイドルループの 0x800AF）と
 /// Thumb 命令は数えない。命令語は表示用の読み出し（TLB を埋めない）で読む。
 /// --pairs は、直前の命令の次のアドレスで続けて実行した 2 命令の組を数える
-/// （スーパー命令の候補を選ぶ用）。
+/// （スーパー命令の候補を選ぶ用）。--unjit は JIT-to-wasm の対象外の命令（と Thumb）だけを
+/// 数え、全命令に対する割合を出す（段階5 で対象を広げる候補を選ぶ用）。
 pub fn cmd_ihist(args: &[String]) -> Result<ExitCode, String> {
     let (mut count, mut max_steps, mut skip_page, mut snap) =
         (20_000_000u64, 300_000_000u64, 0x800AFu64, None);
-    let mut pairs = false;
+    let (mut pairs, mut unjit) = (false, false);
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut val = || {
@@ -318,6 +319,7 @@ pub fn cmd_ihist(args: &[String]) -> Result<ExitCode, String> {
             "--max-steps" => max_steps = val()?,
             "--skip-page" => skip_page = val()?,
             "--pairs" => pairs = true,
+            "--unjit" => unjit = true,
             s => snap = Some(s.to_string()),
         }
     }
@@ -331,7 +333,20 @@ pub fn cmd_ihist(args: &[String]) -> Result<ExitCode, String> {
     let mut prev: Option<(u32, String)> = None;
     while m.steps() < end && total < count {
         let pc = m.cpu.pc();
-        if !m.cpu.thumb()
+        if unjit && (skip_page == 0 || (pc >> 12) as u64 != skip_page) {
+            total += 1;
+            let c = if m.cpu.thumb() {
+                Some("thumb".to_string())
+            } else {
+                m.peek32(pc)
+                    .filter(|&w| !cerulean_core::jit::supported_word(w))
+                    .map(class)
+            };
+            if let Some(c) = c {
+                *cnt.entry(c).or_default() += 1;
+            }
+        } else if !unjit
+            && !m.cpu.thumb()
             && (skip_page == 0 || (pc >> 12) as u64 != skip_page)
             && let Some(w) = m.peek32(pc)
         {
