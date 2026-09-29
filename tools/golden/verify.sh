@@ -5,7 +5,8 @@
 # （cerulean goldencmp）。名前を省略すると全シナリオ。実イメージのシナリオは
 # CERULEAN_IMAGE が無ければ飛ばす。出力は tmp/golden-out/。1 つでも食い違えば終了コード 1。
 # CERULEAN_BIN で別のビルドを、GOLDEN_RUNNER=wasm で wasm（Node）を指定できる
-# （wasm は tools/web-build.sh でビルドし直してから走らせる）。
+# （wasm は tools/web-build.sh でビルドし直してから走らせる）。wasm では CERULEAN_JIT=1
+# （または「閾値,まとめる数」）で JIT を有効にできる（tools/golden/run-wasm.mjs）。
 #
 # 食い違ったときの調べ方（計画書 §5.3）: 基準のビルドと調べるビルドで同じシナリオを
 # --trace-hash 付きで走らせ（run.sh の追加の引数）、最初に食い違った行から区間を

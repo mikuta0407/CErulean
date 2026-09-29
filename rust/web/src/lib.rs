@@ -10,6 +10,7 @@
 
 use cerulean_core::arm::StopError;
 use cerulean_core::emu::{self, RunError, Session};
+use cerulean_core::jit::{self, JitHost};
 use cerulean_core::script::{self, Event, Kind};
 use cerulean_core::smdk2410::{INSTRUCTIONS_PER_SECOND, Machine, SDRAM_BASE};
 use wasm_bindgen::prelude::*;
@@ -33,6 +34,70 @@ pub fn install_panic_hook() {
 extern "C" {
     #[wasm_bindgen(js_namespace = console, js_name = error)]
     fn web_sys_console_error(s: &str);
+}
+
+// ---- JIT のホスト（段階5。docs/stage5-design.md §2）----
+//
+// 生成したモジュールは本体の線形メモリを import し、関数は JS の配列に並べて番号で
+// 呼ぶ（5-1 は JS の中継。関数テーブルでの呼び出しは計測してから）。
+// `new WebAssembly.Module`（同期）は Chrome のメインスレッドでは 4KB までだが、
+// エミュレータは Worker（と Node）で動かす。
+#[wasm_bindgen(inline_js = r#"
+let mem = null;
+const fns = [];
+export function jit_init(m) { mem = m; }
+export function jit_load(bytes, n) {
+  const inst = new WebAssembly.Instance(new WebAssembly.Module(bytes), { e: { m: mem } });
+  const base = fns.length;
+  for (let i = 0; i < n; i++) fns.push(inst.exports[String(i)]);
+  return base;
+}
+export function jit_call(id, ctx) { return fns[id](ctx); }
+export function jit_release_all() { fns.length = 0; }
+"#)]
+extern "C" {
+    fn jit_init(mem: JsValue);
+    #[wasm_bindgen(catch)]
+    fn jit_load(bytes: &[u8], n: u32) -> Result<u32, JsValue>;
+    fn jit_call(id: u32, ctx: u32) -> u32;
+    fn jit_release_all();
+}
+
+/// JS の WebAssembly で生成コードを動かすホスト。
+struct WebJitHost;
+
+impl WebJitHost {
+    fn boxed() -> Box<dyn JitHost> {
+        jit_init(wasm_bindgen::memory());
+        Box::new(WebJitHost)
+    }
+}
+
+impl JitHost for WebJitHost {
+    fn load(&mut self, wasm: &[u8], nfuncs: u32) -> Result<u32, String> {
+        jit_load(wasm, nfuncs).map_err(|e| format!("{e:?}"))
+    }
+    fn call(&mut self, func: u32, ctx: u32) -> u32 {
+        // 生成コードは ctx が指すアドレス（コアが呼ぶ直前に作ったもの）を通して
+        // CPU の状態・RAM を書き換える（jit/mod.rs の Jit::call）。
+        jit_call(func, ctx)
+    }
+    fn release_all(&mut self) {
+        jit_release_all();
+    }
+}
+
+/// JIT とインタプリタの差分テスト（jit::selftest。Node の rust/web/tests/jit-diff.mjs が
+/// 呼ぶ）。成功なら要約、食い違ったら "FAIL: 説明" を返す。
+#[wasm_bindgen(js_name = jitSelfTest)]
+pub fn jit_self_test(seed: u64, cases: u32, steps: u64) -> String {
+    match jit::selftest::run(seed, cases, steps, &mut WebJitHost::boxed) {
+        Ok(r) => format!(
+            "cases {} steps {} jit-executed {} blocks {} side-exits {}",
+            r.cases, r.total, r.jit_executed, r.blocks, r.side_exits
+        ),
+        Err(e) => format!("FAIL: {e}"),
+    }
 }
 
 /// 1 台のマシンと予定したイベント列。
@@ -169,6 +234,30 @@ impl Emu {
     #[wasm_bindgen(js_name = setIdleSkip)]
     pub fn set_idle_skip(&mut self, on: bool) {
         self.m.set_idle_skip(on);
+    }
+
+    /// JIT の有無（既定は無効）。threshold はブロックの先頭として何回入ったら
+    /// コンパイルするか、batch は何ブロックを 1 モジュールにまとめるか。
+    /// どの値でもゲストの状態は同じ（段階5）。
+    #[wasm_bindgen(js_name = setJit)]
+    pub fn set_jit(&mut self, on: bool, threshold: u32, batch: u32) {
+        let host = on.then(WebJitHost::boxed);
+        self.m.set_jit(host, threshold, batch);
+    }
+
+    /// JIT の計測値（JSON）。無効にした理由があれば error に入る。
+    #[wasm_bindgen(js_name = jitStats)]
+    pub fn jit_stats(&self) -> String {
+        let j = self.m.jit();
+        let s = j.stats();
+        let err = j
+            .error()
+            .map(|e| format!(r#","error":{:?}"#, e))
+            .unwrap_or_default();
+        format!(
+            r#"{{"blocks":{},"modules":{},"bytes":{},"calls":{},"executed":{},"side_exits":{},"flushes":{}{err}}}"#,
+            s.blocks, s.modules, s.bytes, s.calls, s.executed, s.side_exits, s.flushes
+        )
     }
 
     /// アイドルスキップで飛ばした命令数の累計。

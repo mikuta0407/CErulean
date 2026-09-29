@@ -41,6 +41,10 @@ impl Machine {
                 self.try_skip_idle(limit);
             }
         }
+        // 区切りでコンパイル待ちを片付ける（batch に満たないまま残さないため）。
+        if self.sys.jit.pending() {
+            self.sys.jit_compile();
+        }
         Ok(())
     }
 

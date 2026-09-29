@@ -5,6 +5,8 @@
 // リセットから走らせ、結果の JSON Lines（testdata/golden/README.md）を書く。
 // ネイティブの CLI の --result と同じ値になるはず（計画書 §9 段階2）。
 // 実イメージのシナリオは環境変数 CERULEAN_IMAGE が必要。
+// CERULEAN_JIT=1（または「閾値,まとめる数」。例 1,1）で JIT を有効にする（段階5。
+// どの値でも結果は同じになるはず）。
 import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -54,6 +56,11 @@ const checkpoints = (def.checkpoints || "").split(/\s+/).filter(Boolean).map(Big
 web.installPanicHook();
 const emu = new web.Emu();
 emu.loadImage(imageData, image, rtc);
+const jitEnv = process.env.CERULEAN_JIT;
+if (jitEnv && jitEnv !== "0") {
+  const [threshold, batch] = jitEnv === "1" ? [64, 32] : jitEnv.split(",").map(Number);
+  emu.setJit(true, threshold, batch);
+}
 if (def.script) emu.scheduleScript(readFileSync(`${gdir}/scenarios/${def.script}`, "utf8"));
 
 const uart = createHash("sha256");
@@ -99,3 +106,4 @@ console.error(
     `idle-skipped ${((100 * Number(emu.idleSkipped())) / Math.max(n, 1)).toFixed(1)}%, ` +
     `code pages ${emu.codePages()})`,
 );
+if (jitEnv && jitEnv !== "0") console.error(`run-wasm: ${name}: jit ${emu.jitStats()}`);

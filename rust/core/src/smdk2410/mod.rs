@@ -15,9 +15,12 @@ mod tests;
 
 use std::fmt;
 
-use crate::arm::{CodeCache, CodeMemory, Cpu, Instr, RunCtl, StopError, System, decode_instr};
+use crate::arm::{
+    CodeCache, CodeMemory, Cpu, Instr, JitRun, RunCtl, StopError, System, decode_instr,
+};
 use crate::bus::{Bus, BusPhys, RamOff};
 use crate::cpu::{Abort, MemError};
+use crate::jit::{Action, Jit, JitHost};
 use crate::loader::Image;
 use crate::mmu::Mmu;
 use crate::s3c2410::{Frame, FrameError, LcdConfig};
@@ -112,6 +115,26 @@ pub struct Sys {
     pub board: Board,
     /// デコードキャッシュ（派生情報。arm の code.rs）
     pub code: CodeCache,
+    /// JIT（派生情報。jit/mod.rs。ホストがなければ無効）
+    pub jit: Jit,
+}
+
+impl Sys {
+    /// JIT のコンパイル待ちをコンパイルする。
+    fn jit_compile(&mut self) {
+        let Sys {
+            mmu,
+            bus,
+            code,
+            jit,
+            ..
+        } = self;
+        let mut cm = CodeMem {
+            mmu,
+            arena: bus.arena(),
+        };
+        jit.compile(code, &mut cm);
+    }
 }
 
 /// デコードキャッシュから見た MMU とメモリ（arm::CodeMemory）。
@@ -257,6 +280,26 @@ impl System for Sys {
         } = self;
         mmu.probe32(va, fetch, &mut BusPhys { bus, devs: board })
     }
+    #[inline(always)]
+    fn jit_on(&self) -> bool {
+        self.jit.enabled()
+    }
+    fn jit_run(&mut self, cpu: &mut Cpu) -> JitRun {
+        let Sys {
+            mmu,
+            bus,
+            board,
+            code,
+            jit,
+        } = self;
+        match jit.enter(cpu, mmu, bus.arena_mut(), &mut board.run, code) {
+            Action::Ran(r) => r,
+            Action::Compile => {
+                self.jit_compile();
+                JitRun::No
+            }
+        }
+    }
 }
 
 /// SMDK2410 相当のマシン。
@@ -286,6 +329,7 @@ impl Machine {
                 bus: b,
                 board: Board::new(),
                 code: CodeCache::new(),
+                jit: Jit::new(),
             },
             entry_pa: 0,
             idle_skip: true,
@@ -342,6 +386,7 @@ impl Machine {
     /// CPU をリセットし、エントリポイント（物理アドレス）から開始する。
     /// MMU は無効の状態で始まる。
     pub fn reset(&mut self) {
+        self.sys.jit.flush(&mut self.sys.code);
         self.sys.code.reset();
         self.sys.mmu.reset_code();
         self.cpu.reset(self.entry_pa, &mut self.sys);
@@ -358,6 +403,19 @@ impl Machine {
     /// 1 命令ぶん進める。
     pub fn step(&mut self) -> Result<(), StopError> {
         self.run_until(self.steps() + 1)
+    }
+
+    /// JIT のホストを設定する（None で無効 = インタプリタのみ）。threshold は
+    /// ブロックの先頭として何回入ったらコンパイルするか、batch は何ブロックを
+    /// 1 モジュールにまとめるか。どの値でもゲストの状態は同じ（計測・試験用）。
+    pub fn set_jit(&mut self, host: Option<Box<dyn JitHost>>, threshold: u32, batch: u32) {
+        self.sys.jit.flush(&mut self.sys.code);
+        self.sys.jit.set_host(host, threshold, batch);
+    }
+
+    /// JIT の計測値・無効にした理由。
+    pub fn jit(&self) -> &Jit {
+        &self.sys.jit
     }
 
     /// UART1（カーネルデバッグシリアル）が送信したバイトを取り出す。

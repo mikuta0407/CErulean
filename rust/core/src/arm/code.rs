@@ -56,6 +56,11 @@ struct CodePage {
     marked: bool,
 }
 
+/// JIT の枠（命令ごと。値の意味は jit/mod.rs）。CodePage と別の表に置くのは、
+/// インタプリタが毎命令引く CodePage を小さく保つため（wasm で JIT なしの速度が
+/// 変わらないように）。
+type JitSlots = Option<Box<[u32; 1024]>>;
+
 /// 仮想ページ → デコード済みページの対応（世代つき）。関数呼び出しなどで
 /// ページをまたぐたびに TLB とマップを引かないためのもの。同じ世代の間は、
 /// その仮想ページの TLB エントリが残っている（CPU が覚えたエントリの詰め替えで
@@ -75,6 +80,8 @@ pub struct CodeCache {
     /// 物理ページ番号 → pages の添字
     index: HashMap<u32, u32>,
     pages: Vec<CodePage>,
+    /// pages と同じ添字の JIT の枠（JIT を使うページだけ作る）
+    jit: Vec<JitSlots>,
     /// 実行中のページ（pages の添字）
     cur: u32,
     vpages: [VpageEnt; 1 << VPAGE_BITS],
@@ -91,6 +98,7 @@ impl CodeCache {
         CodeCache {
             index: HashMap::new(),
             pages: vec![],
+            jit: vec![],
             cur: 0,
             vpages: [VpageEnt {
                 va: 1,
@@ -120,14 +128,15 @@ impl CodeCache {
     /// PC が別のページに移った（または世代が変わった）ときに、そのページの
     /// キャッシュを引き当てて命令を返す。キャッシュできなければ None（呼び出し側が
     /// 通常のフェッチをする。TLB ミスならそこで TLB が埋まる）。
+    // wasm では実行ループに展開する（JIT を足す前の wasm のビルドと同じ形。展開
+    // されないと JIT なしで約 1 割遅かった。2026-09-29、Node で計測）。
+    #[cfg_attr(target_arch = "wasm32", inline(always))]
     pub fn enter(&mut self, pc: u32, mem: &mut impl CodeMemory) -> Option<Instr> {
-        // コードページへの書き込みがあったページのデコード結果を捨てる。
+        // コードページへの書き込みがあったページのデコード結果（と JIT の枠）を捨てる。
+        // drain_invalidated と同じ処理だが、ここは実行ループに展開されるように
+        // 関数呼び出しにしない（wasm で呼び出しにすると JIT なしの速度が落ちた）。
         while let Some(pa) = mem.take_code_invalidated() {
-            if let Some(&i) = self.index.get(&(pa >> 12)) {
-                let p = &mut self.pages[i as usize];
-                p.arm.fill(None);
-                p.marked = false;
-            }
+            self.invalidate(pa);
         }
         let va = pc & !0xFFF;
         let generation = mem.code_gen();
@@ -149,6 +158,7 @@ impl CodeCache {
                         arm: Box::new([None; 1024]),
                         marked: false,
                     });
+                    self.jit.push(None);
                     self.index.insert(pa >> 12, i);
                     i
                 }
@@ -168,15 +178,79 @@ impl CodeCache {
 
     /// 実行中のページの pc の命令をデコードして表に入れる。
     fn decode_cached(&mut self, pc: u32, mem: &mut impl CodeMemory) -> Instr {
-        let p = &mut self.pages[self.cur as usize];
+        self.decode_at(self.cur, (pc >> 2) & 0x3FF, mem)
+    }
+
+    /// ページ page の命令番号 idx をデコードして表に入れる。
+    fn decode_at(&mut self, page: u32, idx: u32, mem: &mut impl CodeMemory) -> Instr {
+        let p = &mut self.pages[page as usize];
         if !p.marked {
             // 表に載せる前に書き込み検出を有効にする。
             mem.mark_code(p.pa);
             p.marked = true;
         }
-        let i = decode_instr(mem.ram_word(p.ram + (pc & 0xFFC)));
-        p.arm[((pc >> 2) & 0x3FF) as usize] = Some(i);
+        let i = decode_instr(mem.ram_word(p.ram + idx * 4));
+        p.arm[idx as usize] = Some(i);
         i
+    }
+
+    /// コードページへの書き込みがあったページのデコード結果（と JIT の枠）を捨てる。
+    pub fn drain_invalidated(&mut self, mem: &mut impl CodeMemory) {
+        while let Some(pa) = mem.take_code_invalidated() {
+            self.invalidate(pa);
+        }
+    }
+
+    /// 物理ページ pa のデコード結果と JIT の枠を捨てる（書き込みは稀なので呼び出しでよい）。
+    #[inline(never)]
+    fn invalidate(&mut self, pa: u32) {
+        if let Some(&i) = self.index.get(&(pa >> 12)) {
+            let p = &mut self.pages[i as usize];
+            p.arm.fill(None);
+            p.marked = false;
+            if let Some(s) = &mut self.jit[i as usize] {
+                s.fill(0);
+            }
+        }
+    }
+
+    // ---- JIT の支援（jit/mod.rs）----
+
+    /// 実行中のページの添字。
+    pub fn cur_page(&self) -> u32 {
+        self.cur
+    }
+
+    /// 実行中のページの pc の JIT の枠（呼び出し側が PC が実行中のページにあることを
+    /// 確かめた後）。
+    #[inline(always)]
+    pub fn jit_slot(&mut self, pc: u32) -> &mut u32 {
+        let s = &mut self.jit[self.cur as usize];
+        &mut s.get_or_insert_with(|| Box::new([0; 1024]))[((pc >> 2) & 0x3FF) as usize]
+    }
+
+    /// ページ page の命令番号 idx の JIT の枠（なければ 0）。
+    pub fn slot(&self, page: u32, idx: u32) -> u32 {
+        self.jit[page as usize]
+            .as_ref()
+            .map_or(0, |s| s[idx as usize])
+    }
+
+    pub fn set_slot(&mut self, page: u32, idx: u32, v: u32) {
+        self.jit[page as usize].get_or_insert_with(|| Box::new([0; 1024]))[idx as usize] = v;
+    }
+
+    /// ページ page の命令番号 idx の命令（未デコードならデコードする）。
+    pub fn instr_at(&mut self, page: u32, idx: u32, mem: &mut impl CodeMemory) -> Instr {
+        match self.pages[page as usize].arm[idx as usize] {
+            Some(i) => i,
+            None => self.decode_at(page, idx, mem),
+        }
+    }
+
+    /// JIT の枠をすべて捨てる。
+    pub fn clear_jit(&mut self) {
+        self.jit.iter_mut().for_each(|s| *s = None);
     }
 
     /// デコード済みのページ数（計測用。wasm のメモリ予算の検討に使う）。

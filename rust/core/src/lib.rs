@@ -11,6 +11,7 @@ pub mod arm;
 pub mod bus;
 pub mod cpu;
 pub mod emu;
+pub mod jit;
 pub mod loader;
 pub mod mmu;
 pub mod s3c2410;

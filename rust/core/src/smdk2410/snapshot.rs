@@ -58,6 +58,7 @@ impl Machine {
             bus,
             board,
             code: _,
+            jit: _,
         } = sys;
         let super::Board {
             intc,
@@ -193,6 +194,7 @@ impl Machine {
         b.update_deadline();
         self.entry_pa = entry_pa;
         self.poll = None;
+        self.sys.jit.flush(&mut self.sys.code);
         self.sys.code.reset();
         Ok(s.header.image_id.clone())
     }

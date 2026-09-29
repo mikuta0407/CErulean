@@ -78,7 +78,7 @@ const ARM920_CACHE_TYPE: u32 = 0x0D172172;
 pub const TLB_BITS: u32 = 10;
 pub const TLB_SIZE: usize = 1 << TLB_BITS;
 /// tag の有効ビット（MVA>>12 は 20 ビットなので衝突しない）。
-const TLB_VALID: u32 = 1 << 31;
+pub(crate) const TLB_VALID: u32 = 1 << 31;
 
 // 権限ビット（TlbEntry::perm）。特権/ユーザー × 読み/書き の 4 通りを
 // フィル時にまとめて計算しておき、モード切替で TLB を捨てずに済ませる。
@@ -210,6 +210,12 @@ impl Mmu {
         };
         m.update_perm_mask();
         m
+    }
+
+    /// 現在の特権状態で見る TLB の権限ビット（読み・書き）。JIT の生成コードが
+    /// ソフト TLB を引くときに使う（jit/codegen.rs）。
+    pub(crate) fn jit_perms(&self) -> (u8, u8) {
+        (self.perm_r, self.perm_w)
     }
 
     /// MMU（CP15 c1 の M ビット）が有効化されているか。

@@ -182,6 +182,17 @@ impl RunCtl {
     }
 }
 
+/// [`System::jit_run`] の結果。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JitRun {
+    /// 生成コードを実行しなかった（インタプリタが続ける）
+    No,
+    /// 生成コードを実行した（RunCtl::n は実行した分だけ進んでいる）。resume なら
+    /// 次の命令（生成コードが扱えなかった命令、または上限が足りず実行しなかった
+    /// 命令）を必ずインタプリタで実行する。
+    Ran { resume: bool },
+}
+
 /// CPU から見たシステム（メモリ・CP15・割り込み線・実行の上限）。machine の
 /// sys が実装する。Go の cpu.Memory・arm.Coprocessor・SetIRQ/SetFIQ の組。
 pub trait System {
@@ -249,6 +260,18 @@ pub trait System {
     /// ram_run（write=true）が返した範囲にワードを書く。
     fn set_ram_word(&mut self, _off: RamOff, _v: u32) {
         unreachable!("set_ram_word without ram_run")
+    }
+
+    /// JIT（段階5。jit/mod.rs）が有効か。run の入口で 1 回だけ見る。既定は無効。
+    #[inline(always)]
+    fn jit_on(&self) -> bool {
+        false
+    }
+
+    /// ブロックの先頭（PC が実行中のページにあり、run_page に入れる条件を満たす）で
+    /// 呼ぶ。コンパイル済みのブロックなら実行する。
+    fn jit_run(&mut self, _cpu: &mut Cpu) -> JitRun {
+        JitRun::No
     }
 }
 
@@ -560,6 +583,20 @@ impl Cpu {
     /// 必要があるとき（仮想時間の同期）は sys の RunCtl::n を読む。
     pub fn run<S: System>(&mut self, sys: &mut S, budget: u64) -> Result<u64, StopError> {
         *sys.run_ctl() = RunCtl { n: 0, budget };
+        // JIT の有無で実行ループを分ける（JIT なしの経路は JIT を足す前と同じコード）。
+        if sys.jit_on() {
+            self.run_loop::<S, true>(sys)
+        } else {
+            self.run_loop::<S, false>(sys)
+        }
+    }
+
+    // wasm では実行ループを run とも run_until とも別の関数に保つ（呼び出し側に
+    // 展開されると 1〜4 割遅くなった）。ネイティブは展開した方が速い（約 4%）。
+    // どちらも 2026-09-29 の計測（Node・この開発機）。
+    #[cfg_attr(target_arch = "wasm32", inline(never))]
+    #[cfg_attr(not(target_arch = "wasm32"), inline(always))]
+    fn run_loop<S: System, const JIT: bool>(&mut self, sys: &mut S) -> Result<u64, StopError> {
         loop {
             let rc = *sys.run_ctl();
             if rc.n >= rc.budget {
@@ -572,7 +609,11 @@ impl Cpu {
                 && !self.interrupt_pending(sys)
                 && let Some(ins) = sys.cur_instr(self.regs[15])
             {
-                self.run_page(sys, ins)?;
+                if JIT {
+                    self.run_page_jit(sys, ins)?;
+                } else {
+                    self.run_page(sys, ins)?;
+                }
                 continue;
             }
             let r = self.step_one(sys);
@@ -611,6 +652,51 @@ impl Cpu {
             if rc.n >= rc.budget || self.cpsr & FLAG_T != 0 || self.interrupt_pending(sys) {
                 return Ok(());
             }
+            match sys.cur_instr(self.regs[15]) {
+                Some(i) => ins = i,
+                None => return Ok(()),
+            }
+        }
+    }
+
+    /// run_page の JIT あり版。ブロックの先頭（ページに入った直後と、直前の命令が
+    /// PC を書いた後）で sys.jit_run を呼び、コンパイル済みならその生成コードを
+    /// 実行する。生成コードの後も run_page と同じ条件で続けるか戻るかを決める。
+    #[inline(always)]
+    fn run_page_jit<S: System>(&mut self, sys: &mut S, mut ins: Instr) -> Result<(), StopError> {
+        let mut block_start = true;
+        loop {
+            if block_start && let JitRun::Ran { resume } = sys.jit_run(self) {
+                let rc = sys.run_ctl();
+                if rc.n >= rc.budget || self.cpsr & FLAG_T != 0 || self.interrupt_pending(sys) {
+                    return Ok(());
+                }
+                match sys.cur_instr(self.regs[15]) {
+                    Some(i) => ins = i,
+                    None => return Ok(()),
+                }
+                block_start = !resume;
+                continue;
+            }
+            let pc = self.regs[15];
+            self.regs[15] = pc.wrapping_add(4);
+            let cond = ins.cond as u32;
+            if (cond == 0xE || COND_TABLE[(cond << 4 | self.cpsr >> 28) as usize])
+                && let Err(e) = ir::exec(self, sys, ins)
+            {
+                let r = self.deliver_exec_error(e, pc, ins.word(), 4, sys);
+                sys.run_ctl().n += 1;
+                if r.is_err() {
+                    self.regs[15] = pc;
+                }
+                return r;
+            }
+            let rc = sys.run_ctl();
+            rc.n += 1;
+            if rc.n >= rc.budget || self.cpsr & FLAG_T != 0 || self.interrupt_pending(sys) {
+                return Ok(());
+            }
+            block_start = self.regs[15] != pc.wrapping_add(4);
             match sys.cur_instr(self.regs[15]) {
                 Some(i) => ins = i,
                 None => return Ok(()),
