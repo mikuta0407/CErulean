@@ -29,6 +29,7 @@ Usage:
   cerulean goldencmp <want> <got>  一致確認の結果（--result の JSON Lines）を比べる
   cerulean segspeed [--seg S] <snap> <script>  再生中の区間ごとの実時間比・アイドル割合
   cerulean ihist [--count N] <snap>  実行した ARM 命令の種類の分布
+  cerulean disasm <snap> <va> <count>  スナップショットの時点の仮想アドレスを逆アセンブルする
   cerulean genrate [--steps N] <image>  MMU の変換世代・コードページの頻度
   cerulean card <new|ls|put|get|rm|mkdir> ...  ストレージカードのイメージを作る・中身を出し入れする
   cerulean relay [--listen A] [--token T]  ブラウザ版のネットワークの中継サーバー
@@ -61,6 +62,8 @@ run options:
   --card F              開始時に PC カードのソケットに CompactFlash を挿す（F はディスク
                         イメージ。512 バイトの倍数）
   --card-out F          停止時に挿さっているカードのディスクイメージを F に書く
+  --ram-preload PA:F    リセットの前に F の中身を物理アドレス PA の RAM に置く（調査用）
+  --ram-dump PA:N:F     止めたときに物理アドレス PA から N バイトの RAM を F に書く（調査用）
   --nic                 開始時に PC カードのソケットにイーサネットカード（NE2000 互換）を挿す
   --net-pcap F          イーサネットカードが送受信したフレームを pcap で F に書く
   --net                 イーサネットカードを OS のソケットで外へつなぐ（NAT。実時間に合わせて
@@ -84,6 +87,7 @@ fn main() -> ExitCode {
         Some("goldencmp") => tools::cmd_goldencmp(&args[1..]),
         Some("segspeed") => tools::cmd_segspeed(&args[1..]),
         Some("ihist") => tools::cmd_ihist(&args[1..]),
+        Some("disasm") => tools::cmd_disasm(&args[1..]),
         Some("genrate") => tools::cmd_genrate(&args[1..]),
         Some("blockstat") => tools::cmd_blockstat(&args[1..]),
         _ => {
@@ -160,6 +164,8 @@ struct RunOpts {
     net_record: Option<String>,
     net_verbose: bool,
     net_ca: Option<String>,
+    ram_preload: Vec<(u32, String)>,
+    ram_dump: Vec<(u32, u32, String)>,
 }
 
 fn parse_u64(s: &str) -> Result<u64, String> {
@@ -233,6 +239,20 @@ fn parse_run_opts(args: &[String]) -> Result<RunOpts, String> {
             "--net-record" => o.net_record = Some(val()?),
             "--net-verbose" => o.net_verbose = true,
             "--net-ca" => o.net_ca = Some(val()?),
+            "--ram-preload" => {
+                let v = val()?;
+                let (a, f) = v.split_once(':').ok_or("--ram-preload: want PA:FILE")?;
+                o.ram_preload.push((parse_u64(a)? as u32, f.to_string()));
+            }
+            "--ram-dump" => {
+                let v = val()?;
+                let p: Vec<&str> = v.splitn(3, ':').collect();
+                let [a, n, f] = p[..] else {
+                    return Err("--ram-dump: want PA:LEN:FILE".into());
+                };
+                o.ram_dump
+                    .push((parse_u64(a)? as u32, parse_u64(n)? as u32, f.to_string()));
+            }
             s if s.starts_with("--") => return Err(format!("unknown option {s}\n{USAGE}")),
             s => {
                 if image.replace(s.to_string()).is_some() {
@@ -384,6 +404,11 @@ fn cmd_run(args: &[String]) -> Result<ExitCode, String> {
     } else {
         let img = read_image(&o.image)?;
         m.load_image(&img).map_err(|e| e.to_string())?;
+        for (pa, f) in &o.ram_preload {
+            let data = std::fs::read(f).map_err(|e| format!("{f}: {e}"))?;
+            m.poke_ram(*pa, &data)
+                .map_err(|e| format!("--ram-preload {f}: {e}"))?;
+        }
         let t = o.rtc.unwrap_or_else(host_now_utc);
         m.set_rtc(t[0], t[1], t[2], t[3], t[4], t[5]);
         m.reset();
@@ -686,6 +711,12 @@ fn cmd_run(args: &[String]) -> Result<ExitCode, String> {
         && let Err(e) = write_png(&mut m, f)
     {
         eprintln!("cerulean: {e}");
+    }
+    for (pa, n, f) in &o.ram_dump {
+        let data = m
+            .peek_ram(*pa, *n)
+            .ok_or_else(|| format!("--ram-dump: {pa:08X}+{n:X} is not RAM"))?;
+        std::fs::write(f, data).map_err(|e| format!("{f}: {e}"))?;
     }
     if let Some(f) = &o.card_out {
         match m.card_disk() {

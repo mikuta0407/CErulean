@@ -383,6 +383,27 @@ impl Machine {
         Ok(())
     }
 
+    /// 物理アドレス pa の RAM に data を書く（調査用。リセットの前に使う）。
+    pub fn poke_ram(&mut self, pa: u32, data: &[u8]) -> Result<(), Error> {
+        let (ram, off) = self
+            .sys
+            .bus
+            .ram_mut(pa)
+            .ok_or_else(|| Error(format!("{pa:08X} is not RAM")))?;
+        let dst = ram
+            .get_mut(off as usize..off as usize + data.len())
+            .ok_or_else(|| Error("does not fit in RAM".into()))?;
+        dst.copy_from_slice(data);
+        Ok(())
+    }
+
+    /// 物理アドレス pa から n バイトの RAM の写し（調査用）。
+    pub fn peek_ram(&self, pa: u32, n: u32) -> Option<Vec<u8>> {
+        let (ram, off) = self.sys.bus.ram(pa)?;
+        ram.get(off as usize..off as usize + n as usize)
+            .map(|s| s.to_vec())
+    }
+
     /// RTC の現在時刻を年月日時分秒で設定する（reset の前か、実行の合間の命令境界で
     /// 呼ぶ）。壁時計の値がそのまま RTC に入る。ホストの時計を読むのは呼び出し側の
     /// 責務で、コアは渡された時刻からの仮想時間で決定論的に進める。1 秒未満の端数は
@@ -667,10 +688,12 @@ impl Default for Machine {
 /// 物理メモリマップを登録する（Go の New のバス構成と同じアドレス・大きさ）。
 fn map(b: &mut Bus<Dev>) -> Result<(), crate::bus::MapError> {
     b.map_ram("sdram", SDRAM_BASE, SDRAM_SIZE)?;
-    // バンク0〜1・3〜5: ROM/SROM 未実装。フラッシュドライバが NOR フラッシュの
-    // CFI/JEDEC プローブ（0xAAAA/0x5500 の書き込み）を PA 0 に対して行うので、
-    // オープンバスで空振りさせる（Device Emulator 構成はフラッシュではなく
-    // RAMFMD を使う）。
+    // バンク0〜1・3〜5: ROM/SROM 未実装。フラッシュドライバ（amdnord.dll）が NOR フラッシュの
+    // 自動選択（0xAAAA/0x5554 の書き込み）を PA 0 に対して行うので、オープンバスで空振りさせる
+    // （Device Emulator 構成はフラッシュではなく RAMFMD を使う）。
+    // 2026-09-30 の調査: Am29LV800BB の ID を返すとドライバは 64KB × 510 ブロックと決め打ちで
+    // 消去を始め、その番地は 16MB で折り返す。実在のチップの構成と合わないので載せない
+    // （docs/storage-persistence.md）。
     // TODO: バンク3 の Ethernet（CS8900 相当）等が必要になったら分割する。
     b.map_mmio("bank0-1-empty", 0, 0x10000000, Dev::OpenBus)?;
     // バンク2: PC カードコントローラ（CL-PD6710 互換。board.rs の配線のコメント）
