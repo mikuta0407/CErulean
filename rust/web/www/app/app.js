@@ -9,14 +9,30 @@ const ctx = canvas.getContext("2d");
 try {
   $("clockSync").checked = localStorage.getItem("cerulean-clock-sync") !== "0";
 } catch {}
-// ネットワークの設定も端末ごと（既定はオフ）。
+// ネットワークの設定も端末ごと（既定はオフ）。中継サーバーの URL の既定は、このページを
+// 配信しているサイトの /relay（`cerulean serve --with-relay` が置く）。
+const defaultRelay = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/relay`;
 try {
   const n = JSON.parse(localStorage.getItem("cerulean-net") ?? "{}");
   $("netOn").checked = !!n.on;
-  $("netUrl").value = n.url ?? "ws://127.0.0.1:8765/";
+  $("netUrl").value = n.url || defaultRelay;
   $("netToken").value = n.token ?? "";
 } catch {
-  $("netUrl").value = "ws://127.0.0.1:8765/";
+  $("netUrl").value = defaultRelay;
+}
+// `cerulean serve --with-relay` が表示する URL の #relay-token=… でトークンを入れる
+// （入れたら URL から消す。オンにするのはユーザー）
+{
+  const m = /(?:^#|&)relay-token=([^&]+)/.exec(location.hash);
+  if (m) {
+    $("netToken").value = decodeURIComponent(m[1]);
+    if (!$("netUrl").value) $("netUrl").value = defaultRelay;
+    try {
+      const n = JSON.parse(localStorage.getItem("cerulean-net") ?? "{}");
+      localStorage.setItem("cerulean-net", JSON.stringify({ ...n, url: $("netUrl").value, token: $("netToken").value }));
+    } catch {}
+    history.replaceState(null, "", location.pathname + location.search);
+  }
 }
 
 let worker = null;

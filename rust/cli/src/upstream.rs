@@ -101,15 +101,18 @@ impl Upstream {
 }
 
 /// host:port へつなぐスレッドを起こす。credit は最初に読んでよいバイト数（None = 無制限）。
+/// allow_private が false なら、私的・ループバック等のアドレス（is_public でないもの）には
+/// つながない（中継サーバーが家の LAN への踏み台にならないように）。
 pub fn spawn(
     host: String,
     port: u16,
     tls: bool,
     credit: Option<usize>,
+    allow_private: bool,
     mut on_event: impl FnMut(Event) + Send + 'static,
 ) {
     std::thread::spawn(move || {
-        let Some(up) = connect(&host, port, tls, credit) else {
+        let Some(up) = connect(&host, port, tls, credit, allow_private) else {
             on_event(Event::Connected(None));
             return;
         };
@@ -118,11 +121,44 @@ pub fn spawn(
     });
 }
 
-fn connect(host: &str, port: u16, tls: bool, credit: Option<usize>) -> Option<Upstream> {
+/// インターネットの公開のアドレスか（RFC 1918 の私的・ループバック・リンクローカル・
+/// CGN の共有 100.64/10・0/8・マルチキャスト・予約 240/4・ブロードキャストでない）。
+pub fn is_public(ip: std::net::Ipv4Addr) -> bool {
+    let o = ip.octets();
+    !(ip.is_private()
+        || ip.is_loopback()
+        || ip.is_link_local()
+        || ip.is_multicast()
+        || ip.is_broadcast()
+        || ip.is_unspecified()
+        || o[0] == 0
+        || o[0] >= 240
+        || (o[0] == 100 && (64..128).contains(&o[1])))
+}
+
+fn connect(
+    host: &str,
+    port: u16,
+    tls: bool,
+    credit: Option<usize>,
+    allow_private: bool,
+) -> Option<Upstream> {
     let addrs: Vec<_> = (host, port)
         .to_socket_addrs()
         .map(|a| a.filter(|a| a.is_ipv4()).collect())
         .unwrap_or_default();
+    let n = addrs.len();
+    let addrs: Vec<_> = addrs
+        .into_iter()
+        .filter(|a| match a.ip() {
+            std::net::IpAddr::V4(v) => allow_private || is_public(v),
+            _ => false,
+        })
+        .collect();
+    if addrs.is_empty() && n > 0 {
+        eprintln!("cerulean: {host}:{port}: refused (private address; --allow-private to permit)");
+        return None;
+    }
     let mut sock = addrs
         .iter()
         .find_map(|a| TcpStream::connect_timeout(a, CONNECT_TIMEOUT).ok())?;
@@ -235,6 +271,31 @@ fn read_loop(up: &Upstream, on_event: &mut impl FnMut(Event)) {
         if eof {
             on_event(Event::Eof);
             return;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_public;
+
+    #[test]
+    fn public_addresses() {
+        for a in ["93.184.216.34", "8.8.8.8", "100.63.0.1", "172.32.0.1"] {
+            assert!(is_public(a.parse().unwrap()), "{a}");
+        }
+        for a in [
+            "10.0.0.1",
+            "172.16.0.1",
+            "192.168.1.11",
+            "127.0.0.1",
+            "169.254.1.1",
+            "100.64.0.1",
+            "0.1.2.3",
+            "224.0.0.1",
+            "255.255.255.255",
+        ] {
+            assert!(!is_public(a.parse().unwrap()), "{a}");
         }
     }
 }

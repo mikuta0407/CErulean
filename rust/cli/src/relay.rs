@@ -9,9 +9,11 @@
 //! 一次資料: RFC 6455（WebSocket）、RFC 3174（SHA-1）、RFC 4648（Base64）。
 //!
 //! 安全: 開いたプロキシにならないよう、接続の最初にトークンを確かめる（一致しなければ
-//! 切る）。トークンを指定しなければ起動時に乱数で作って表示する。既定は 127.0.0.1 で
+//! 切る）。トークンを指定しなければ起動時に乱数で作って表示する。既定では私的アドレス
+//! （LAN・localhost 等）へは中継しない（--allow-private で許す）。既定は 127.0.0.1 で
 //! 待ち受ける（他の端末から使うときは --listen で変え、TLS は前段のリバースプロキシで
-//! 付ける。https のページからは wss:// でないとつなげない）。
+//! 付ける。https のページからは wss:// でないとつなげない）。`cerulean serve --with-relay`
+//! はアプリの配信と同じポートの /relay でこれを動かす（serve.rs）。
 //!
 //! 中継の約束（WebSocket のバイナリメッセージ。整数はリトルエンディアン）:
 //! ```text
@@ -40,9 +42,18 @@ use std::time::Duration;
 
 use crate::upstream::{self, Event, Upstream};
 
-const USAGE: &str = "usage: cerulean relay [--listen ADDR:PORT] [--token TOKEN]
-  --listen A   待ち受けるアドレス（既定 127.0.0.1:8765）
-  --token T    接続に要るトークン（省くと起動時に乱数で作って表示する）";
+const USAGE: &str =
+    "usage: cerulean relay [--listen ADDR:PORT | --port N] [--token TOKEN] [--allow-private]
+  --listen A       待ち受けるアドレス（既定 127.0.0.1:8765）
+  --port N         待ち受けるポート（アドレスは 127.0.0.1）
+  --token T        接続に要るトークン（省くと起動時に乱数で作って表示する）
+  --allow-private  私的アドレス（LAN・localhost 等）への接続も中継する（既定は断る）";
+
+/// 中継の設定。
+pub struct RelayOpts {
+    pub token: String,
+    pub allow_private: bool,
+}
 
 /// 中継の約束の版（2: CONNECT に TLS のフラグを足した。2026-09-30）。
 const PROTOCOL_VERSION: u16 = 2;
@@ -57,6 +68,7 @@ const MAX_STREAMS: usize = 256;
 pub fn cmd_relay(args: &[String]) -> Result<std::process::ExitCode, String> {
     let mut listen = "127.0.0.1:8765".to_string();
     let mut token = None;
+    let mut allow_private = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut val = || {
@@ -66,31 +78,44 @@ pub fn cmd_relay(args: &[String]) -> Result<std::process::ExitCode, String> {
         };
         match a.as_str() {
             "--listen" => listen = val()?,
+            "--port" => listen = format!("127.0.0.1:{}", val()?),
             "--token" => token = Some(val()?),
+            "--allow-private" => allow_private = true,
             _ => return Err(USAGE.into()),
         }
     }
-    let token = match token {
-        Some(t) if !t.is_empty() => t,
-        Some(_) => return Err("--token must not be empty".into()),
-        None => random_token(),
-    };
+    let opts = Arc::new(RelayOpts {
+        token: token_or_random(token)?,
+        allow_private,
+    });
     let l = TcpListener::bind(&listen).map_err(|e| format!("{listen}: {e}"))?;
     eprintln!("cerulean relay: listening on ws://{listen}/");
-    eprintln!("cerulean relay: token {token}");
-    let token = Arc::new(token);
+    eprintln!("cerulean relay: token {}", opts.token);
+    if allow_private {
+        eprintln!("cerulean relay: private addresses are allowed (--allow-private)");
+    }
     for s in l.incoming() {
-        let Ok(s) = s else { continue };
-        let token = token.clone();
+        let Ok(mut s) = s else { continue };
+        let opts = opts.clone();
         std::thread::spawn(move || {
             let peer = s.peer_addr().map(|a| a.to_string()).unwrap_or_default();
-            match client(s, &token) {
+            let r = read_head(&mut s).and_then(|head| serve_ws(s, &head, &opts));
+            match r {
                 Ok(()) => eprintln!("cerulean relay: {peer}: closed"),
                 Err(e) => eprintln!("cerulean relay: {peer}: {e}"),
             }
         });
     }
     Ok(std::process::ExitCode::SUCCESS)
+}
+
+/// 指定のトークン（空は不可）か、なければ乱数で作ったもの。
+pub fn token_or_random(token: Option<String>) -> Result<String, String> {
+    match token {
+        Some(t) if !t.is_empty() => Ok(t),
+        Some(_) => Err("--token must not be empty".into()),
+        None => Ok(random_token()),
+    }
 }
 
 /// 乱数のトークン（std の HashMap の乱数の種を使う。暗号用の乱数源ではないが、
@@ -146,8 +171,8 @@ impl WsOut {
     }
 }
 
-/// HTTP のアップグレード（RFC 6455 4.2）。
-fn handshake(s: &mut TcpStream) -> Result<(), String> {
+/// HTTP の要求の頭（空行まで）を読む。
+pub fn read_head(s: &mut TcpStream) -> Result<String, String> {
     let mut req = Vec::new();
     let mut b = [0u8; 1];
     while !req.ends_with(b"\r\n\r\n") {
@@ -155,11 +180,24 @@ fn handshake(s: &mut TcpStream) -> Result<(), String> {
             return Err("request header too large".into());
         }
         if s.read(&mut b).map_err(|e| e.to_string())? == 0 {
-            return Err("closed during handshake".into());
+            return Err("closed before the request header".into());
         }
         req.push(b[0]);
     }
-    let text = String::from_utf8_lossy(&req);
+    Ok(String::from_utf8_lossy(&req).into_owned())
+}
+
+/// 要求の頭が WebSocket へのアップグレードか。
+pub fn is_websocket(head: &str) -> bool {
+    head.split("\r\n").skip(1).any(|l| {
+        l.split_once(':').is_some_and(|(k, v)| {
+            k.trim().eq_ignore_ascii_case("upgrade") && v.trim().eq_ignore_ascii_case("websocket")
+        })
+    })
+}
+
+/// HTTP のアップグレード（RFC 6455 4.2）。
+fn handshake(s: &mut TcpStream, text: &str) -> Result<(), String> {
     let mut key = None;
     let mut upgrade = false;
     for line in text.split("\r\n").skip(1) {
@@ -242,9 +280,12 @@ fn read_message(s: &mut TcpStream, out: &WsOut) -> Result<Option<Vec<u8>>, Strin
 
 // ---- 多重化 ----
 
-fn client(mut s: TcpStream, token: &str) -> Result<(), String> {
+/// 読んだ要求の頭で WebSocket に切り替え、中継する（接続が閉じるまで戻らない）。
+pub fn serve_ws(mut s: TcpStream, head: &str, opts: &RelayOpts) -> Result<(), String> {
+    let token = opts.token.as_str();
+    let allow_private = opts.allow_private;
     let _ = s.set_nodelay(true);
-    handshake(&mut s)?;
+    handshake(&mut s, head)?;
     let out = WsOut(Arc::new(Mutex::new(
         s.try_clone().map_err(|e| e.to_string())?,
     )));
@@ -301,35 +342,42 @@ fn client(mut s: TcpStream, token: &str) -> Result<(), String> {
                     let host = String::from_utf8_lossy(&body[3..]).to_string();
                     let (out, streams) = (out.clone(), streams.clone());
                     let what = format!("#{id} {host}:{port}{}", if tls { " (tls)" } else { "" });
-                    upstream::spawn(host, port, tls, Some(INITIAL_CREDIT), move |ev| match ev {
-                        Event::Connected(up) => {
-                            let ok = up.is_some();
-                            eprintln!(
-                                "cerulean relay: {what} {}",
-                                if ok { "connected" } else { "failed" }
-                            );
-                            let mut st = streams.lock().unwrap_or_else(|e| e.into_inner());
-                            match (st.get_mut(&id), up) {
-                                (Some(slot), Some(up)) => *slot = Some(up),
-                                // 待つ間に捨てられた
-                                (None, Some(up)) => up.close(),
-                                _ => {
-                                    st.remove(&id);
+                    upstream::spawn(
+                        host,
+                        port,
+                        tls,
+                        Some(INITIAL_CREDIT),
+                        allow_private,
+                        move |ev| match ev {
+                            Event::Connected(up) => {
+                                let ok = up.is_some();
+                                eprintln!(
+                                    "cerulean relay: {what} {}",
+                                    if ok { "connected" } else { "failed" }
+                                );
+                                let mut st = streams.lock().unwrap_or_else(|e| e.into_inner());
+                                match (st.get_mut(&id), up) {
+                                    (Some(slot), Some(up)) => *slot = Some(up),
+                                    // 待つ間に捨てられた
+                                    (None, Some(up)) => up.close(),
+                                    _ => {
+                                        st.remove(&id);
+                                    }
                                 }
+                                drop(st);
+                                let _ = out.msg(0x82, id, &[ok as u8]);
                             }
-                            drop(st);
-                            let _ = out.msg(0x82, id, &[ok as u8]);
-                        }
-                        Event::Data(d) => {
-                            let _ = out.msg(0x83, id, &d);
-                        }
-                        Event::Eof => {
-                            let _ = out.msg(0x84, id, &[]);
-                        }
-                        Event::Reset => {
-                            let _ = out.msg(0x85, id, &[]);
-                        }
-                    });
+                            Event::Data(d) => {
+                                let _ = out.msg(0x83, id, &d);
+                            }
+                            Event::Eof => {
+                                let _ = out.msg(0x84, id, &[]);
+                            }
+                            Event::Reset => {
+                                let _ = out.msg(0x85, id, &[]);
+                            }
+                        },
+                    );
                 }
                 0x03 => {
                     if let Some(up) = get(id)

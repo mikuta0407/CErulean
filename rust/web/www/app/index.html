@@ -136,7 +136,7 @@
       <label><input type="checkbox" id="netOn"> オン（イーサネットカードを挿す）</label>
     </div>
     <div class="row">
-      <label>中継サーバー <input type="url" id="netUrl" placeholder="ws://127.0.0.1:8765/" size="28" spellcheck="false"></label>
+      <label>中継サーバー <input type="url" id="netUrl" placeholder="wss://（このサイト）/relay" size="28" spellcheck="false"></label>
     </div>
     <div class="row">
       <label>トークン <input type="password" id="netToken" size="28" autocomplete="off" spellcheck="false"></label>
@@ -144,7 +144,8 @@
     <p class="note" id="netState">オフ</p>
     <p class="note">オンにしたときだけ、ここで指定した中継サーバーと WebSocket で通信し、WM5 の通信
       （TCP のバイト列と接続先の名前）を中継させます。オフの間、このサイトは外部と通信しません。
-      中継サーバーは <code>cerulean relay</code>（ネイティブの CLI）で起動し、表示されたトークンを入れます。
+      中継サーバーは <code>cerulean serve --with-relay</code>（このサイトの <code>/relay</code>）か
+      <code>cerulean relay</code>（ネイティブの CLI）で起動し、表示されたトークンを入れます。
       https のページからは <code>wss://</code> の中継サーバー（または自分の端末の <code>ws://127.0.0.1</code>）にしかつなげません。</p>
     <p class="note"><strong>HTTPS</strong>: WM5 の IE Mobile は古い TLS しか話せないので、エミュレータの中で TLS を
       受けて、外へは中継サーバーが今の TLS でつなぎ直します。最初に一度、WM5 の IE で <code>http://10.0.2.2/</code> を開き、

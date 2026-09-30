@@ -1,14 +1,18 @@
 // app-net.mjs: ブラウザ版のネットワーク（中継サーバー経由）を Chrome で通しで確かめる
 // （docs/network-design.md）。
 //
-//   tools/web-build.sh && tools/serve-bench.py &
+//   tools/web-build.sh && (cd rust && cargo build --release)
 //   node tools/browser/app-net.mjs <イメージ> <スナップショット> <出力ディレクトリ> [--headed]
+//
+// アプリと中継サーバーは `cerulean serve --with-relay` で配信する（中継の URL はアプリの既定の
+// 「同じサイトの /relay」、トークンは表示された URL の #relay-token= で入る）。
 //
 // スナップショットは JPN 版（PPC_JPN.bin）の Today で、WM5 の「ネットワークカードの接続先」を
 // 「インターネット設定」にしたもの（座標は JPN 版の画面）。インターネットに出られること。
 //
-//  1. cerulean relay をトークン付きで起動し、スナップショットを読み込む
-//  2. メニューで中継サーバーの URL・トークンを入れてオンにし、中継につながること
+//  1. cerulean serve --with-relay をトークン付きで起動し、#relay-token= 付きの URL を開いて
+//     スナップショットを読み込む
+//  2. メニューでオンにするだけで（URL・トークンは既定と URL から）中継につながること
 //  3. 記録しながら Internet Explorer で http://example.com/ を開き、中継が接続を
 //     中継したこと。続けて http://10.0.2.2/ から CA を入れて https://example.com/ を開き、
 //     中継が TLS でつないだこと
@@ -24,7 +28,6 @@ import { appHelpers, echoConsole, launchChrome, openPage, sleep } from "./cdp.mj
 const args = process.argv.slice(2);
 const [image, snap, outArg] = args.filter((a) => !a.startsWith("--"));
 const headed = args.includes("--headed");
-const url = process.env.APP_URL ?? "http://localhost:8000/rust/web/www/app/";
 if (!image || !snap || !outArg) {
   console.error("usage: app-net.mjs <image> <snapshot> <outdir> [--headed]");
   process.exit(2);
@@ -38,6 +41,7 @@ const root = resolve(import.meta.dirname, "../..");
 const cli = resolve(root, "rust/target/release/cerulean");
 const TOKEN = "app-net-test-token";
 const RELAY = "127.0.0.1:18765";
+const url = `http://${RELAY}/app/#relay-token=${TOKEN}`;
 
 const check = (cond, msg) => {
   if (!cond) throw new Error("FAILED: " + msg);
@@ -45,7 +49,8 @@ const check = (cond, msg) => {
 };
 
 let relayLog = "";
-const relay = spawn(cli, ["relay", "--listen", RELAY, "--token", TOKEN], { stdio: ["ignore", "ignore", "pipe"] });
+const relay = spawn(cli, ["serve", "--listen", RELAY, "--with-relay", "--token", TOKEN], { stdio: ["ignore", "ignore", "pipe"] });
+await sleep(1000);
 relay.stderr.on("data", (d) => {
   relayLog += d;
   process.stdout.write("relay: " + d);
@@ -81,9 +86,9 @@ try {
   // 2. ネットワークをオンにする
   await h.click("menuBtn");
   await sleep(500);
+  const cfg = await p.eval(`[document.getElementById("netUrl").value, document.getElementById("netToken").value, location.hash]`);
+  check(cfg[0] === `ws://${RELAY}/relay` && cfg[1] === TOKEN && cfg[2] === "", `既定の中継 URL と #relay-token= のトークン: ${cfg[0]}`);
   await p.eval(`(() => {
-    document.getElementById("netUrl").value = "ws://${RELAY}/";
-    document.getElementById("netToken").value = ${JSON.stringify(TOKEN)};
     const on = document.getElementById("netOn");
     on.checked = true;
     on.dispatchEvent(new Event("change"));

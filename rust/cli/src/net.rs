@@ -173,7 +173,7 @@ impl DirectNet {
                         },
                     );
                     let tx = self.tx.clone();
-                    upstream::spawn(host, port, tls, None, move |ev| {
+                    upstream::spawn(host, port, tls, None, true, move |ev| {
                         let _ = tx.send(match ev {
                             Event::Connected(u) => HostEvent::Connected(id, u),
                             Event::Data(d) => HostEvent::Data(id, d),

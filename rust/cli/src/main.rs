@@ -6,6 +6,7 @@ mod card;
 mod net;
 mod relay;
 mod result;
+mod serve;
 mod share;
 mod tools;
 mod upstream;
@@ -33,7 +34,9 @@ Usage:
   cerulean disasm <snap> <va> <count>  スナップショットの時点の仮想アドレスを逆アセンブルする
   cerulean genrate [--steps N] <image>  MMU の変換世代・コードページの頻度
   cerulean card <new|ls|put|get|rm|mkdir> ...  ストレージカードのイメージを作る・中身を出し入れする
-  cerulean relay [--listen A] [--token T]  ブラウザ版のネットワークの中継サーバー
+  cerulean serve [--port N | --listen A] [--with-relay [--token T] [--allow-private]]
+                                   ブラウザ版を配信する（--with-relay で /relay に中継サーバーも）
+  cerulean relay [--listen A] [--token T] [--allow-private]  ブラウザ版のネットワークの中継サーバー
   cerulean run [options] <image>   イメージをリセットから実行する
   cerulean run --snap-load F [options] [image]
                                    スナップショットから再開する（image を渡すと照合する）
@@ -87,6 +90,7 @@ fn main() -> ExitCode {
         Some("run") => cmd_run(&args[1..]),
         Some("card") => card::cmd_card(&args[1..]),
         Some("relay") => relay::cmd_relay(&args[1..]),
+        Some("serve") => serve::cmd_serve(&args[1..]),
         Some("snapdump") => cmd_snapdump(&args[1..]),
         Some("goldencmp") => tools::cmd_goldencmp(&args[1..]),
         Some("segspeed") => tools::cmd_segspeed(&args[1..]),

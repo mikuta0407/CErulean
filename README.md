@@ -115,10 +115,30 @@ cd ../.. && rust/target/release/cerulean info tmp/images/PPC_USA.bin
 ## ブラウザ版（段階3・作業中）
 
 ```sh
-tools/web-build.sh          # wasm をビルドして rust/web/www/pkg に置く
-tools/serve-bench.py 8000   # 配信（キャッシュ無効）
-# http://localhost:8000/rust/web/www/app/ を開き、PPC_USA.bin を選ぶ
+tools/web-build.sh                         # wasm をビルドして rust/web/www/pkg に置く
+(cd rust && cargo build --release)         # CLI（cerulean）
+rust/target/release/cerulean serve         # 配信（http://127.0.0.1:8000/app/ を開き、PPC_USA.bin を選ぶ）
+rust/target/release/cerulean serve --with-relay   # ネットワークの中継サーバーも同じポートの /relay に置く
 ```
+
+`cerulean serve` は `rust/web/www`（アプリと wasm）を配信する小さな Web サーバー（キャッシュ無効）。
+`--port N`（127.0.0.1）・`--listen 0.0.0.0:8000`（他の端末から）・`--root DIR`。`--with-relay` を付けると
+中継サーバーも動き、起動時に表示される `…/app/#relay-token=…` を開くとトークンが入る（中継の URL は
+既定で「このサイトの /relay」なので、メニューでネットワークをオンにするだけ）。中継は既定で私的
+アドレス（LAN・localhost 等）へはつながない（`--allow-private` で許す）。`--token` で固定できる。
+
+公開する（TLS はリバースプロキシで付ける）例。Caddy は WebSocket もそのまま通すので、全部を 1 つの
+ポートに流すだけでよい:
+
+```
+cerulean.example.net {
+    reverse_proxy 192.168.1.11:8000     # cerulean serve --listen 0.0.0.0:8000 --with-relay --token 長いトークン
+}
+```
+
+https のページでは OPFS・SubtleCrypto が使え、中継には自動で `wss://…/relay` でつなぐ。公開するときは
+トークンを長くし、必要なら `/relay` を IP で絞る（Caddy の `remote_ip`）。計測ページ（bench）は今までどおり
+`tools/serve-bench.py 8000`（`http://localhost:8000/rust/web/www/app/` でもアプリが開ける）。
 
 イメージを選ぶと Today まで最高速で起動し（Chrome の JIT ありで数十秒）、着いたら自動で
 保存して、以後は等速で動く。画面のタップ（マウス・タッチ）、画面の下（横向きでは右）の
@@ -255,12 +275,13 @@ $R run --snap-load today.snap --nic --net --net-ca ca.bin --net-record net.txt -
 # 記録の再生（ネットワークなしで同じ状態になる）
 $R run --snap-load today.snap --nic --script ops.txt --script net.txt
 
-# ブラウザ版の中継サーバー（トークンを省くと乱数で作って表示する）
+# ブラウザ版の中継サーバーだけを動かす（トークンを省くと乱数で作って表示する。
+# アプリの配信と一緒なら cerulean serve --with-relay）
 $R relay --listen 127.0.0.1:8765
 ```
 
-ブラウザ版はメニューの「ネットワーク（中継サーバー経由）」で中継サーバーの URL
-（`ws://127.0.0.1:8765/`）とトークンを入れてオンにします。オンにしたときだけ、その中継
+ブラウザ版はメニューの「ネットワーク（中継サーバー経由）」で中継サーバーの URL（既定は配信元の
+`/relay`。`cerulean relay` を別に動かすなら `ws://127.0.0.1:8765/`）とトークンを入れてオンにします。オンにしたときだけ、その中継
 サーバーとだけ通信します（オフの間、サイトは外部と通信しません）。https で配信したページ
 からは `wss://` の中継サーバー（TLS は前段のリバースプロキシで付ける）か、自分の端末の
 `ws://127.0.0.1` にしかつなげません。オンの間にストレージカードを挿すと、PC カードのソケットを

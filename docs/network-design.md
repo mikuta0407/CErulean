@@ -102,8 +102,10 @@ CIS の書式はストレージカードと同じく SanDisk の Table 6-1 の�
 - **CLI**: `--nic`・`--net`（OS のソケットで直接。実時間に合わせて進める）・
   `--net-record F`（受け取ったフレームのスクリプト）・`--net-pcap F`（送受信の pcap。時刻は
   仮想時間）・`--net-verbose`。`--script` は複数指定できる（再生は元のスクリプトと記録を並べる）。
-- **中継サーバー**: `cerulean relay [--listen A] [--token T]`（rust/cli/src/relay.rs。約束は
-  その先頭のコメント）。WebSocket 1 本に接続を多重化し、接続ごとに CREDIT（ブラウザが受け
+- **中継サーバー**: `cerulean relay [--listen A] [--token T] [--allow-private]`、またはアプリの
+  配信と同じポートの `/relay`（`cerulean serve --with-relay`。rust/cli/src/serve.rs）。約束は
+  relay.rs の先頭のコメント。既定では私的アドレス（LAN・localhost・CGN 等）への接続を断る
+  （2026-09-30 追加。家の LAN への踏み台にならないように）。WebSocket 1 本に接続を多重化し、接続ごとに CREDIT（ブラウザが受け
   取れる量）の範囲で読む。
 - **ブラウザ版**: メニューの「ネットワーク（中継サーバー経由）」。Worker が WebSocket を持ち、
   run の合間（10ms ごと）に wasm の `netStep` でスタックを進める。中継が切れたら 5 秒ごとに
