@@ -800,9 +800,11 @@ function start(e, id, name, turbo) {
   });
 }
 
-function bootImage(bytes, name, id, rtc) {
+// screen: ゲストに渡す画面の大きさ [幅, 高さ]（null なら渡さない = 240×320）
+function bootImage(bytes, name, id, rtc, screen) {
   const e = new wasm.Emu();
   try {
+    if (screen) e.setScreen(screen[0], screen[1]);
     e.loadImage(bytes, name, Int32Array.from(rtc));
   } catch (err) {
     e.free();
@@ -851,14 +853,14 @@ const handlers = {
     await sendLists();
     await sendCard();
   },
-  async bootFile({ bytes, name, rtc }) {
+  async bootFile({ bytes, name, rtc, screen }) {
     const id = await storeImage(bytes, name);
-    bootImage(bytes, name, id, rtc);
+    bootImage(bytes, name, id, rtc, screen);
     await sendLists();
   },
-  async bootStored({ id, rtc }) {
+  async bootStored({ id, rtc, screen }) {
     const { bytes, name } = await loadStoredImage(id);
-    bootImage(bytes, name, id, rtc);
+    bootImage(bytes, name, id, rtc, screen);
   },
   async deleteImage({ id }) {
     const d = await dir("images");

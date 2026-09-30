@@ -117,6 +117,8 @@ Windows Mobile 6 Professional の日本語版（「Windows Mobile 6 Localized Em
 228MB）は archive.org にある。中の `PPC_JPN.bin`（96MB のフラッシュのイメージ。B000FF 形式では
 ない）をそのまま渡す（`cerulean run tmp/images/wm6/PPC_JPN.bin`・ブラウザ版で選ぶ）。
 設計・確認済みの事実は `docs/wm6-design.md`。
+VGA（480×640）のイメージ（WM5 JPN の `PPC_JPN_VGA.bin`、WM6 の `PPC_JPN_GSM_VGA_VR.BIN` など）は
+`--screen 480x640` を付ける（ブラウザ版は起動画面の「画面」。「自動」なら名前から選ぶ）。
 
 ```sh
 mkdir -p tmp/images/wm6 && cd tmp/images/wm6

@@ -1,0 +1,9 @@
+# WM6 の JPN 版の電話つき VGA（Professional Images の msi の PPC_JPN_GSM_VGA_VR.BIN。フラッシュの
+# イメージ）を 480x640 で: リセットから Today（約 34 億命令）→ Start → 設定。
+image=$CERULEAN_IMAGE_WM6_VGA
+image_sha256=e1c89816e6d90732cf1a872a569526c1a3239e99c2fb0ac8c5cdcd83ef9adfef
+screen=480x640
+rtc=2007-01-02T12:00:00
+max_steps=4100000000
+script=wm6-vga-settings.script
+checkpoints=1200000000 2400000000 3400000000 3700000000

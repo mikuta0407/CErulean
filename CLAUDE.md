@@ -62,7 +62,8 @@ Go 版の設計の理由コメントは Rust のコードに移してある。�
   wasm32-wasip1〕、web の wasm ビルドと Node での読み込み。CERULEAN_IMAGE があれば
   実イメージのテストも）。CI は置かない。コアの動作に関わる変更では加えて
   `CERULEAN_IMAGE=tmp/images/PPC_USA.bin tools/golden/verify.sh`（全基準シナリオ、約 4 分。
-  `CERULEAN_IMAGE_WM6=tmp/images/wm6/PPC_JPN.bin` を足すと WM6 のシナリオも走る。+約 40 秒）。
+  `CERULEAN_IMAGE_WM6=tmp/images/wm6/PPC_JPN.bin`・`CERULEAN_IMAGE_WM6_VGA=tmp/images/wm6/PPC_JPN_GSM_VGA.bin`
+  を足すと WM6 のシナリオも走る。各 +約 40 秒）。
 - 手元のツール（2026-09 導入）: rustup（~/.cargo。ターゲット wasm32-unknown-unknown・
   wasm32-wasip1）、wasm-bindgen-cli（`cargo install --locked`）、Node.js 24 LTS
   （~/.local/node）。いずれも ~/.local/bin にリンクしてある。/tmp は tmpfs で小さいので、
@@ -349,6 +350,10 @@ mmu → bus::PhysMem、bus → bus::Devices（ボードが MMIO を振り分け�
   約 30 億命令で日本語の Today。タッチ・キーは WM5 と同じ。Today・設定までフラッシュへの
   書き込み・消去はない。ストレージカード（「メモリ カード」）・フォルダ共有・ネットワーク・音も
   動く。WM6 の vcefsd.dll は一覧の前に共有の根「\」を名前で引く（deshare.rs で答える）。
+- **画面の大きさ（VGA。2026-09-30）**: Device Emulator は起動前に PA 0x30020044 に署名 0xDE12DE34・
+  幅・高さ・色数（u16×3）を置き、OAL が LCD をその大きさにする（なければ 240×320）。
+  `Machine::set_display`・CLI `--screen`・ブラウザ版の起動画面で指定する。タッチの換算は LCD の
+  大きさから（touch.dll は幅・高さ×4 を変数に持つ）。詳細は docs/wm6-design.md。
 
 ## 今後の計画（2026-09 時点。後回しと判断したもの）
 

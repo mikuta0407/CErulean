@@ -82,22 +82,23 @@ fn load_image_out_of_range() {
 
 /// touch.dll の座標変換（0x0153170C）をトレースした命令列どおりに再現したもの
 /// （定数の逆数掛け・算術シフト・負の補正・クリップ）。
-fn driver_x4(d1: u32) -> i32 {
+/// w4・h4 は画面の幅・高さの 4 倍（ドライバの変数。QVGA で 960・1280）。
+fn driver_x4(d1: u32, w4: i32) -> i32 {
     let r3 = (d1 & 0x3FF) as i32 - 0x55;
-    let r4 = r3.wrapping_mul(960);
+    let r4 = r3.wrapping_mul(w4);
     let hi = ((r4 as i64 * 0x094F2095i64) >> 32) as i32;
     let mut v = hi >> 5;
     v += ((v as u32) >> 31) as i32;
-    clamp(v, 960)
+    clamp(v, w4)
 }
 
-fn driver_y4(d0: u32) -> i32 {
+fn driver_y4(d0: u32, h4: i32) -> i32 {
     let inv = (0x3FF - (d0 & 0x3FF)) as i32;
-    let lr = (inv - 0x69).wrapping_mul(1280);
+    let lr = (inv - 0x69).wrapping_mul(h4);
     let hi = ((lr as i64 * 0x2572FB07i64) >> 32) as i32;
     let mut v = hi >> 7;
     v += ((v as u32) >> 31) as i32;
-    clamp(v, 1280)
+    clamp(v, h4)
 }
 
 fn clamp(v: i32, n: i32) -> i32 {
@@ -105,18 +106,28 @@ fn clamp(v: i32, n: i32) -> i32 {
 }
 
 /// 全ピクセルについて、touch_to_raw の生値をドライバの式に通すと同じ
-/// ピクセル（1/4 単位の座標 ÷4）に戻ること。
+/// ピクセル（1/4 単位の座標 ÷4）に戻ること（QVGA・VGA・正方形）。
 #[test]
 fn touch_to_raw_round_trip() {
-    for x in 0..TOUCH_SCREEN_W {
-        for y in 0..TOUCH_SCREEN_H {
-            let (xp, yp) = touch_to_raw(x, y);
-            assert!(xp <= 1023 && yp <= 1023);
-            assert_eq!(
-                (driver_x4(yp) / 4, driver_y4(xp) / 4),
-                (x as i32, y as i32),
-                "({x},{y})"
-            );
+    for (w, h) in [
+        (TOUCH_SCREEN_W, TOUCH_SCREEN_H),
+        (480, 640),
+        (240, 240),
+        (480, 480),
+    ] {
+        for x in 0..w {
+            for y in 0..h {
+                let (xp, yp) = touch_to_raw(x, y, w, h);
+                assert!(xp <= 1023 && yp <= 1023);
+                assert_eq!(
+                    (
+                        driver_x4(yp, 4 * w as i32) / 4,
+                        driver_y4(xp, 4 * h as i32) / 4
+                    ),
+                    (x as i32, y as i32),
+                    "{w}x{h} ({x},{y})"
+                );
+            }
         }
     }
 }
@@ -130,7 +141,7 @@ fn touch_to_raw_corners() {
         (0, 319, 1023 - 105 - 874, 85 + 2), // 左下: XP 小
         (120, 160, 1023 - 105 - 439, 85 + 442),
     ] {
-        assert_eq!(touch_to_raw(x, y), (xp, yp), "({x},{y})");
+        assert_eq!(touch_to_raw(x, y, 240, 320), (xp, yp), "({x},{y})");
     }
 }
 
@@ -141,6 +152,30 @@ fn touch_range() {
         assert!(m.touch_down(x, y).is_err(), "({x},{y})");
     }
     m.touch_down(239, 319).unwrap();
+}
+
+/// 画面の大きさ: set_display は Device Emulator と同じ形で BSP の引数の領域に置き、
+/// タッチの範囲はゲストが LCD に設定した大きさに従う。
+#[test]
+fn display_args_and_touch_size() {
+    let mut m = Machine::new();
+    assert!(m.set_display(1024, 1024).is_err(), "frame buffer over 1MB");
+    assert!(m.set_display(8, 640).is_err());
+    m.set_display(480, 640).unwrap();
+    assert_eq!(
+        m.peek_ram(0x3002_0044, 10).unwrap(),
+        [0x34, 0xDE, 0x12, 0xDE, 0xE0, 0x01, 0x80, 0x02, 0x10, 0x00]
+    );
+    // LCD の設定の前は 240×320
+    assert_eq!(m.touch_screen_size(), (240, 320));
+    assert!(m.touch_down(479, 639).is_err());
+    // OAL と同じ設定（TFT・16bpp・ENVID、LINEVAL=639、HOZVAL=479）
+    bus_w(&mut m, 0x4D00_0004, 4, 639 << 14);
+    bus_w(&mut m, 0x4D00_0008, 4, 479 << 8);
+    bus_w(&mut m, 0x4D00_0000, 4, 0x6F9);
+    assert_eq!(m.touch_screen_size(), (480, 640));
+    m.touch_down(479, 639).unwrap();
+    assert!(m.touch_down(480, 0).is_err());
 }
 
 // ---- キーボード用マイコン（Go の kbd_test）----

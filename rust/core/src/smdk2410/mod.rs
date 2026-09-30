@@ -85,21 +85,43 @@ pub const INSTRUCTIONS_PER_SECOND: u64 = PCLK_HZ as u64 * 8 / PCLK_TICKS_NUM;
 // Y 測定値（ADCDAT1）、画面 Y は X 測定値（ADCDAT0）の反転から求まる。
 // 割り算は定数の逆数掛け（smull）で、0 方向への切り捨て。
 // ここではその逆変換として、ピクセル中心（4x+2）に対応する生値を返す。
+//
+// 960・1280 は画面の幅・高さの 4 倍で、ドライバは変数に持つ（2026-09-30 に WM6 の
+// touch.dll で確認: 幅×4・高さ×4 を読んでから掛ける）。VGA（480×640）のイメージでは
+// 1920・2560 になるので、画面の大きさ（LCD の設定）から求める。
 pub const TOUCH_SCREEN_W: u32 = 240;
 pub const TOUCH_SCREEN_H: u32 = 320;
 const TOUCH_D1_OFFSET: u32 = 85; // ADCDAT1 のオフセット（画面 X 用）
-const TOUCH_D1_SPAN: u32 = 880; // ADCDAT1 の範囲（960 に対応）
+const TOUCH_D1_SPAN: u32 = 880; // ADCDAT1 の範囲（幅×4 に対応）
 const TOUCH_D0_OFFSET: u32 = 105; // 1023−ADCDAT0 のオフセット（画面 Y 用）
-const TOUCH_D0_SPAN: u32 = 875; // 同範囲（1280 に対応）
+const TOUCH_D0_SPAN: u32 = 875; // 同範囲（高さ×4 に対応）
 
 /// 画面ピクセル (x, y) を ADCDAT0（XPDATA）・ADCDAT1（YPDATA）に入る生値へ
 /// 変換する（Go と同じ整数演算。ゲストが読む値なので丸めまで同じにする）。
-pub(crate) fn touch_to_raw(x: u32, y: u32) -> (u32, u32) {
+/// (w, h) は画面の大きさ。
+pub(crate) fn touch_to_raw(x: u32, y: u32, w: u32, h: u32) -> (u32, u32) {
     let (x4, y4) = (4 * x + 2, 4 * y + 2);
-    let yp = TOUCH_D1_OFFSET + (x4 * TOUCH_D1_SPAN + 960 / 2) / 960;
-    let inv = TOUCH_D0_OFFSET + (y4 * TOUCH_D0_SPAN + 1280 / 2) / 1280;
+    let (w4, h4) = (4 * w, 4 * h);
+    let yp = TOUCH_D1_OFFSET + (x4 * TOUCH_D1_SPAN + w4 / 2) / w4;
+    let inv = TOUCH_D0_OFFSET + (y4 * TOUCH_D0_SPAN + h4 / 2) / h4;
     (1023 - inv, yp)
 }
+
+// 画面の大きさ（Device Emulator がスキンの displayWidth/displayHeight から渡す構成）。
+//
+// 根拠（2026-09-30。WM5 JPN の PPC_JPN_VGA.bin の OAL、VA 0x800AF89C〜 の逆アセンブル）:
+// OAL は LCD を設定する前に PA 0x30020000（BSP の引数の領域）の +0x44 を読み、署名
+// 0xDE12DE34 なら +0x48 を幅、+0x4A を高さ、+0x4C を色数（16・24・32）として使い
+// （「Using emulator-specified video parameters」と出す）、なければ 240×320・16 ビット。
+// WM6 の IPL は引数の領域の署名（+0 の 'ARGS'）がないと初期化し直すが、+0x44〜 は
+// 残り、同じく使われる（WM6 の電話つき VGA 版で確認）。ホストが起動前に置く値なので、
+// 指定がなければ何も置かない（既定の 240×320。WM5 の QVGA の動作を変えない）。
+const DISPLAY_ARGS_PA: u32 = 0x30020044;
+const DISPLAY_ARGS_SIG: u32 = 0xDE12DE34;
+/// フレームバッファ（PA 0x33F00000。OAL が固定で使う）から SDRAM の 64MB の末尾まで。
+const FB_BYTES: u32 = 0x0010_0000;
+/// 画面の大きさの上限（LCDCON3 の HOZVAL が 11 ビット、LCDCON2 の LINEVAL が 10 ビット）。
+pub const MAX_SCREEN: (u32, u32) = (2048, 1024);
 
 /// 抜いたカード。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -639,19 +661,42 @@ impl Machine {
     // UI やスクリプト再生は命令の合間にこれらを呼ぶ。決定論性は「どの命令数の
     // 時点で呼んだか」で決まるので、再現が必要な呼び出し側は steps() を基準にする。
 
-    /// タッチ座標の範囲（= LCD の解像度）。
+    /// 画面の大きさを Device Emulator と同じ形でゲストに渡す（load_image の後・reset の前に
+    /// 呼ぶ。上の DISPLAY_ARGS_PA のコメント）。色数は 16 ビットだけ。呼ばなければ 240×320。
+    pub fn set_display(&mut self, width: u32, height: u32) -> Result<(), Error> {
+        // フレームバッファは 1MB に収まること。
+        if !(16..=MAX_SCREEN.0).contains(&width)
+            || !(16..=MAX_SCREEN.1).contains(&height)
+            || width * height * 2 > FB_BYTES
+        {
+            return Err(Error(format!("unsupported screen size {width}x{height}")));
+        }
+        let mut b = Vec::with_capacity(10);
+        b.extend_from_slice(&DISPLAY_ARGS_SIG.to_le_bytes());
+        b.extend_from_slice(&(width as u16).to_le_bytes());
+        b.extend_from_slice(&(height as u16).to_le_bytes());
+        b.extend_from_slice(&16u16.to_le_bytes());
+        self.poke_ram(DISPLAY_ARGS_PA, &b)
+    }
+
+    /// タッチ座標の範囲（= 画面の大きさ。ゲストが LCD に設定した大きさで、設定の前は
+    /// 240×320）。
     pub fn touch_screen_size(&self) -> (u32, u32) {
-        (TOUCH_SCREEN_W, TOUCH_SCREEN_H)
+        let c = self.sys.board.lcd.config();
+        if c.enabled && c.width > 0 && c.height > 0 {
+            (c.width, c.height)
+        } else {
+            (TOUCH_SCREEN_W, TOUCH_SCREEN_H)
+        }
     }
 
     /// ペンを画面座標 (x, y) に下ろす（下ろしたまま動かすのも同じ）。
     pub fn touch_down(&mut self, x: i64, y: i64) -> Result<(), Error> {
-        if x < 0 || y < 0 || x >= TOUCH_SCREEN_W as i64 || y >= TOUCH_SCREEN_H as i64 {
-            return Err(Error(format!(
-                "touch position ({x},{y}) outside {TOUCH_SCREEN_W}x{TOUCH_SCREEN_H}"
-            )));
+        let (w, h) = self.touch_screen_size();
+        if x < 0 || y < 0 || x >= w as i64 || y >= h as i64 {
+            return Err(Error(format!("touch position ({x},{y}) outside {w}x{h}")));
         }
-        let (xp, yp) = touch_to_raw(x as u32, y as u32);
+        let (xp, yp) = touch_to_raw(x as u32, y as u32, w, h);
         self.touch_raw(true, xp, yp);
         Ok(())
     }

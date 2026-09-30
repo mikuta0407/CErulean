@@ -223,7 +223,7 @@ function drawBoot() {
   ctx.fillText("CErulean", w / 2, h * 0.3);
   ctx.fillStyle = "#fff";
   ctx.font = "bold 17px sans-serif";
-  ctx.fillText("Windows Mobile 5.0", w / 2, h * 0.3 + 26);
+  ctx.fillText("Windows Mobile", w / 2, h * 0.3 + 26);
   ctx.fillStyle = "#b8c4d6";
   ctx.font = "11px sans-serif";
   ctx.fillText("起動しています…", w / 2, h * 0.3 + 46);
@@ -381,6 +381,29 @@ function rtcNow() {
   return [d.getFullYear(), d.getMonth() + 1, d.getDate(), d.getHours(), d.getMinutes(), d.getSeconds()];
 }
 
+// イメージから起動するときにゲストへ渡す画面の大きさ（[幅, 高さ]。null なら渡さない =
+// 240×320）。画面の大きさは Device Emulator ではスキンの設定で、イメージの中には無いので
+// 選んでもらう。「自動」はイメージの名前（SDK の命名: *_VGA*・*SQUARE*）から決める。
+function screenFor(name) {
+  const v = $("screenSize").value;
+  if (v !== "auto") {
+    const [w, h] = v.split("x").map(Number);
+    return w === 240 && h === 320 ? null : [w, h];
+  }
+  const vga = /vga/i.test(name) && !/qvga/i.test(name);
+  const square = /square/i.test(name);
+  if (vga) return square ? [480, 480] : [480, 640];
+  return square ? [240, 240] : null;
+}
+try {
+  $("screenSize").value = localStorage.getItem("cerulean-screen") ?? "auto";
+} catch {}
+$("screenSize").onchange = () => {
+  try {
+    localStorage.setItem("cerulean-screen", $("screenSize").value);
+  } catch {}
+};
+
 const fmtSteps = (s) => `${(Number(s) / 1e9).toFixed(2)}G 命令`;
 const fmtDate = (t) => new Date(t).toLocaleString();
 
@@ -421,7 +444,7 @@ function renderLists(estimate) {
   const il = $("imageList");
   il.replaceChildren(
     ...images.map((im) =>
-      item(`${im.name} から起動`, `${(im.size / 1e6).toFixed(1)}MB・${im.id.slice(0, 12)}…`, () => send("bootStored", { id: im.id, rtc: rtcNow() }), [
+      item(`${im.name} から起動`, `${(im.size / 1e6).toFixed(1)}MB・${im.id.slice(0, 12)}…`, () => send("bootStored", { id: im.id, rtc: rtcNow(), screen: screenFor(im.name) }), [
         smallButton("✕", "この端末から消す", () => confirm(`${im.name} をこの端末から消しますか？`) && send("deleteImage", { id: im.id })),
       ]),
     ),
@@ -449,7 +472,7 @@ $("imageFile").addEventListener("change", async (e) => {
   e.target.value = "";
   if (!f) return;
   const bytes = new Uint8Array(await f.arrayBuffer());
-  send("bootFile", { bytes, name: f.name, rtc: rtcNow() }, [bytes.buffer]);
+  send("bootFile", { bytes, name: f.name, rtc: rtcNow(), screen: screenFor(f.name) }, [bytes.buffer]);
 });
 for (const id of ["snapFile", "snapFile2"]) {
   $(id).addEventListener("change", async (e) => {

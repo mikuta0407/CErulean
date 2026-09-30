@@ -16,7 +16,7 @@ use std::fmt;
 
 use crate::arm::StopError;
 use crate::script::{Event, Kind};
-use crate::smdk2410::{KEY_SCAN_CODES, Machine};
+use crate::smdk2410::{KEY_SCAN_CODES, MAX_SCREEN, Machine};
 
 /// 予定・記録したイベント列と、次に適用する位置。
 #[derive(Clone, Debug, Default)]
@@ -210,13 +210,15 @@ pub fn apply_input(m: &mut Machine, ev: &Event) -> Result<bool, String> {
 
 /// 実行前にマシン依存の妥当性（座標範囲・キー名）を検査する
 /// （長い実行の途中でスクリプトの誤りに気づくのを避けるため）。
-pub fn validate(m: &Machine, ev: &Event) -> Result<(), String> {
+pub fn validate(_m: &Machine, ev: &Event) -> Result<(), String> {
     match ev.kind {
+        // 画面の大きさはゲストが LCD を設定するまで決まらない（VGA のイメージ）ので、ここでは
+        // どの大きさでもあり得ない座標だけを断る。範囲は適用の時点で touch_down が確かめる。
         Kind::TouchDown | Kind::TouchMove => {
-            let (w, h) = m.touch_screen_size();
+            let (w, h) = MAX_SCREEN;
             if ev.x < 0 || ev.y < 0 || ev.x >= w as i64 || ev.y >= h as i64 {
                 return Err(format!(
-                    "{}: ({},{}) outside the {w}x{h} screen",
+                    "{}: ({},{}) outside any screen (up to {w}x{h})",
                     ev.kind, ev.x, ev.y
                 ));
             }

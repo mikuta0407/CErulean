@@ -7,8 +7,8 @@
 # CLI は $CERULEAN_BIN（既定: rust/target/release/cerulean。無ければビルド）。
 # GOLDEN_RUNNER=wasm なら web クレートの wasm を Node で走らせる（run-wasm.mjs）。
 #
-# 実イメージのシナリオは環境変数 CERULEAN_IMAGE（PPC_USA.bin のパス）が必要。
-# WM6 のシナリオ（wm6-*）は CERULEAN_IMAGE_WM6（WM6 の JPN 版（Professional Images の msi）の PPC_JPN.bin）。
+# 実イメージのシナリオは image=$<環境変数名> で、その環境変数にイメージのパスが要る
+# （CERULEAN_IMAGE = PPC_USA.bin など。一覧は testdata/golden/README.md）。
 # UART1 の出力は <出力>.uart に、CLI の標準エラーは <出力>.err に書く。
 set -euo pipefail
 if [ $# -lt 2 ]; then
@@ -23,30 +23,25 @@ def=$gdir/scenarios/$name.scenario
 [ -f "$def" ] || { echo "run.sh: no scenario $def" >&2; exit 2; }
 
 # シナリオの定義（キー=値）を読む。
-image='' image_sha256='' rtc='' max_steps='' script='' checkpoints=''
+image='' image_sha256='' rtc='' max_steps='' script='' checkpoints='' screen=''
 while IFS= read -r line || [ -n "$line" ]; do
   line=${line%%#*}
   [[ $line =~ ^[[:space:]]*$ ]] && continue
   k=${line%%=*} v=${line#*=}
   v=$(echo "$v" | sed 's/[[:space:]]*$//')
   case $k in
-    image|image_sha256|rtc|max_steps|script|checkpoints) printf -v "$k" '%s' "$v" ;;
+    image|image_sha256|rtc|max_steps|script|checkpoints|screen) printf -v "$k" '%s' "$v" ;;
     *) echo "run.sh: $def: unknown key $k" >&2; exit 2 ;;
   esac
 done < "$def"
 
-if [ "$image" = '$CERULEAN_IMAGE' ]; then
-  if [ -z "${CERULEAN_IMAGE:-}" ]; then
-    echo "run.sh: $name needs CERULEAN_IMAGE (path to PPC_USA.bin)" >&2
+if [[ $image =~ ^\$([A-Z0-9_]+)$ ]]; then
+  var=${BASH_REMATCH[1]}
+  if [ -z "${!var:-}" ]; then
+    echo "run.sh: $name needs $var (path to the image; see testdata/golden/README.md)" >&2
     exit 3
   fi
-  image=$CERULEAN_IMAGE
-elif [ "$image" = '$CERULEAN_IMAGE_WM6' ]; then
-  if [ -z "${CERULEAN_IMAGE_WM6:-}" ]; then
-    echo "run.sh: $name needs CERULEAN_IMAGE_WM6 (path to the WM6 Professional JPN PPC_JPN.bin)" >&2
-    exit 3
-  fi
-  image=$CERULEAN_IMAGE_WM6
+  image=${!var}
 else
   image=$gdir/$image
 fi
@@ -73,6 +68,7 @@ if [ ! -x "$bin" ]; then
 fi
 args=(run --history 0 --quiet-uart --rtc "$rtc" --max-steps "$max_steps" --result "$out")
 [ -n "$script" ] && args+=(--script "$gdir/scenarios/$script")
+[ -n "$screen" ] && args+=(--screen "$screen")
 for c in $checkpoints; do args+=(--checkpoint "$c"); done
 "$bin" "${args[@]}" "$@" "$image" > "$out.uart" 2> "$out.err" || {
   echo "run.sh: $name: exited with $? (see $out.err)" >&2

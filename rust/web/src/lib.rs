@@ -218,6 +218,8 @@ pub struct Emu {
     frame_h: u32,
     /// 最後に takeAudio で取り出した音のサンプリング周波数（Hz。0 = まだない）
     audio_rate: u32,
+    /// 次の loadImage でゲストに渡す画面の大きさ（setScreen）
+    screen: Option<(u32, u32)>,
 }
 
 impl Default for Emu {
@@ -239,7 +241,26 @@ impl Emu {
             frame_w: 0,
             frame_h: 0,
             audio_rate: 0,
+            screen: None,
         }
+    }
+
+    /// 次の loadImage でゲストに渡す画面の大きさ（VGA のイメージ用。0 なら渡さない =
+    /// 240×320）。
+    #[wasm_bindgen(js_name = setScreen)]
+    pub fn set_screen(&mut self, width: u32, height: u32) {
+        self.screen = (width != 0 && height != 0).then_some((width, height));
+    }
+
+    /// タッチ座標の範囲（= 画面の大きさ。ゲストが LCD に設定した大きさ）。
+    #[wasm_bindgen(js_name = screenWidth)]
+    pub fn screen_width(&self) -> u32 {
+        self.m.touch_screen_size().0
+    }
+
+    #[wasm_bindgen(js_name = screenHeight)]
+    pub fn screen_height(&self) -> u32 {
+        self.m.touch_screen_size().1
     }
 
     /// イメージを読み込んでリセットする。rtc はローカル時刻の年月日時分秒
@@ -254,6 +275,11 @@ impl Emu {
         self.m
             .load_image(&img)
             .map_err(|e| JsError::new(&e.to_string()))?;
+        if let Some((w, h)) = self.screen {
+            self.m
+                .set_display(w, h)
+                .map_err(|e| JsError::new(&e.to_string()))?;
+        }
         self.m.set_rtc(
             *y as i64, *mo as i64, *d as i64, *h as i64, *mi as i64, *s as i64,
         );

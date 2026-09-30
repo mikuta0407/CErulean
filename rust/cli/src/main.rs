@@ -45,6 +45,8 @@ Usage:
 run options:
   --rtc YYYY-MM-DDTHH:MM:SS  RTC の初期時刻（年月日時分秒をそのまま使う。
                              既定はホストの現在時刻の UTC。TODO: ローカル時刻）
+  --screen WxH          画面の大きさ（例 480x640。VGA のイメージ用。Device Emulator と同じく
+                        起動前にゲストに渡す。既定は渡さない = 240x320）
   --max-steps N         N 命令で止める（0 = 無制限）
   --script F            入力スクリプト（書式は script モジュールのコメント。複数可）
   --history N           停止時に直前 N 命令の PC を表示する（既定 16、0 = 無効）
@@ -179,6 +181,17 @@ struct RunOpts {
     share: Option<String>,
     share_out: Option<String>,
     ram_dump: Vec<(u32, u32, String)>,
+    screen: Option<(u32, u32)>,
+}
+
+/// "WxH"（例 480x640）。
+fn parse_screen(s: &str) -> Result<(u32, u32), String> {
+    let (w, h) = s.split_once(['x', 'X']).ok_or("--screen: want WxH")?;
+    let p = |v: &str| {
+        v.parse::<u32>()
+            .map_err(|_| format!("--screen: bad size {s:?}"))
+    };
+    Ok((p(w)?, p(h)?))
 }
 
 fn parse_u64(s: &str) -> Result<u64, String> {
@@ -219,6 +232,7 @@ fn parse_run_opts(args: &[String]) -> Result<RunOpts, String> {
         };
         match a.as_str() {
             "--rtc" => o.rtc = Some(parse_rtc(&val()?)?),
+            "--screen" => o.screen = Some(parse_screen(&val()?)?),
             "--max-steps" => o.max_steps = parse_u64(&val()?)?,
             "--script" => o.scripts.push(val()?),
             "--history" => o.history = parse_u64(&val()?)? as usize,
@@ -393,6 +407,11 @@ fn cmd_run(args: &[String]) -> Result<ExitCode, String> {
     for &(lo, hi) in &o.watches {
         m.add_watch(lo, hi);
     }
+    if o.screen.is_some() && o.snap_load.is_some() {
+        return Err(
+            "--screen: the snapshot already has the screen size (use it only from reset)".into(),
+        );
+    }
     let mut image_id = if o.image.is_empty() {
         String::new()
     } else {
@@ -420,6 +439,9 @@ fn cmd_run(args: &[String]) -> Result<ExitCode, String> {
     } else {
         let img = read_image(&o.image)?;
         m.load_image(&img).map_err(|e| e.to_string())?;
+        if let Some((w, h)) = o.screen {
+            m.set_display(w, h).map_err(|e| format!("--screen: {e}"))?;
+        }
         for (pa, f) in &o.ram_preload {
             let data = std::fs::read(f).map_err(|e| format!("{f}: {e}"))?;
             m.poke_ram(*pa, &data)

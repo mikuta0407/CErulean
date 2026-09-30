@@ -27,15 +27,23 @@
   <div id="screenBox">
     <canvas id="screen" width="240" height="320" aria-label="WM5 の画面（タップで操作）"></canvas>
     <div id="start" class="overlay">
-      <h1>Windows Mobile 5.0</h1>
+      <h1>Windows Mobile</h1>
       <p id="startMsg">準備中…</p>
       <button id="resume" class="primary" hidden>続きから再開<small id="resumeInfo"></small></button>
       <ul id="saveList" class="list"></ul>
       <ul id="imageList" class="list"></ul>
       <label class="secondary file">イメージを選ぶ（.bin）<input type="file" id="imageFile" hidden></label>
       <label class="secondary file">スナップショットを読み込む<input type="file" id="snapFile" hidden></label>
-      <p class="fine">WM5 のエミュレータ用イメージ（<code>PPC_USA.bin</code> など B000FF 形式）を選ぶと、
-        Today 画面まで早送りで起動し、着いたら自動で保存します。イメージ・保存はこの端末の中だけで使い、外部には送りません。</p>
+      <label class="fine">イメージから起動するときの画面 <select id="screenSize">
+        <option value="auto" selected>自動（名前から）</option>
+        <option value="240x320">240×320（QVGA）</option>
+        <option value="480x640">480×640（VGA）</option>
+        <option value="240x240">240×240（正方形）</option>
+        <option value="480x480">480×480（VGA 正方形）</option>
+      </select></label>
+      <p class="fine">WM5・WM6 のエミュレータ用イメージ（<code>PPC_USA.bin</code>・<code>PPC_JPN.bin</code> など）を選ぶと、
+        Today 画面まで早送りで起動し、着いたら自動で保存します。画面の大きさはイメージに合わせて選んでください
+        （「自動」は名前に VGA・Square があるかで決めます）。イメージ・保存はこの端末の中だけで使い、外部には送りません。</p>
     </div>
     <div id="stopBanner" class="overlay stop" hidden>
       <h1>停止しました</h1>

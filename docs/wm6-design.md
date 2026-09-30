@@ -53,6 +53,22 @@
 - **タッチ**: メモの手書きで、指定した座標に線が描かれることを確かめた（ずれなし。touch.dll の
   換算は WM5 と同じ式・定数で、キャリブレーションは使われない）。
 
+## 高解像度（VGA・正方形）のイメージ（2026-09-30）
+
+- 画面の大きさはイメージの中にはなく、Device Emulator がスキンの設定（`displayWidth`・
+  `displayHeight`。VGA は 480×640、VGA の正方形は 480×480、QVGA の正方形は 240×240）から起動前に
+  RAM に置く。WM5 JPN の `PPC_JPN_VGA.bin` の OAL（VA 0x800AF89C〜）は PA 0x30020000（BSP の引数の
+  領域）の +0x44 が署名 0xDE12DE34 なら +0x48 幅・+0x4A 高さ・+0x4C 色数を使い（「Using
+  emulator-specified video parameters」）、なければ 240×320・16 ビット。置かないと VGA 用の大きな
+  部品を 240×320 に描く。WM6 の IPL は引数の領域を初期化し直すが +0x44〜 は残り、同じく効く。
+- `Machine::set_display`（CLI `--screen 480x640`、ブラウザ版は起動画面の「画面」。既定の「自動」は
+  名前の VGA・Square から決める）で置く。指定しなければ何も置かない（今までと同じ）。
+- touch.dll の換算は画面の幅・高さの 4 倍を変数に持つので、タッチの逆変換も LCD に設定された
+  大きさから求める（`touch_screen_size`）。VGA のメモの手書きで指定どおりの位置に描けた。
+- WM5 JPN の VGA 版と WM6 の電話つき VGA 版（`PPC_JPN_GSM_VGA_VR.BIN`）が 480×640 で Today まで
+  起動し、操作できる（ブラウザ版も Chrome で確認）。基準シナリオ `wm6-vga-settings`
+  （`CERULEAN_IMAGE_WM6_VGA`）。
+
 ## NOR フラッシュ（`rust/core/src/norflash.rs`）
 
 一次資料は Am29LV800B のデータシートのコマンドの表。ゲストの使い方は IPL とカーネルの
