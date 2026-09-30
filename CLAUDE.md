@@ -51,7 +51,8 @@ Go 版の設計の理由コメントは Rust のコードに移してある。�
 - **`unsafe` は原則使わない**。使うなら `// SAFETY:` に理由と安全性の根拠を書き、
   計測で効果が確かめられた場合だけにし、テストで守る。
 - **依存の追加はユーザーの承認を取る**（計画書 §8）。現在の依存: web の
-  `wasm-bindgen`（=0.2.129、wasm-bindgen-cli と同じ版に固定）、CLI の `sha2`・`png`。
+  `wasm-bindgen`（=0.2.129、wasm-bindgen-cli と同じ版に固定）、CLI の `sha2`・`png`・
+  `rustls`（ring）・`webpki-roots`（HTTPS の中継。2026-09-30 承認）。
   コアは依存なし。ワークスペース内の自作クレート `cerulean-fat`・`cerulean-net`（どちらも
   std のみ）を CLI・web が使う。
 - **版の固定**: `rust/rust-toolchain.toml`（1.98.1）と `rust/Cargo.lock` をコミット。
@@ -187,6 +188,8 @@ mmu → bus::PhysMem、bus → bus::Devices（ボードが MMIO を振り分け�
   状態になる）。オン・オフはイーサネットカードの挿抜（`nic insert/eject`）として見せる。
   ブラウザ版はメニューでオンにしたときだけ、指定した中継サーバー（`cerulean relay`）と
   WebSocket で通信する。CLI は `--net`（OS のソケットで直接。実時間に合わせる）。
+  HTTPS はゲストの TLS 1.0 を `rust/net` で終端（自前の CA をゲストに入れる）し、外へは
+  CLI の rustls で今の TLS につなぎ直す（docs/network-design.md の HTTPS）。
 - 対話フロントエンドは段階3 のブラウザ版（`rust/web/www/app`。Worker＋wasm、保存は OPFS、
   PWA）。Chrome での確認は `tools/browser/app-e2e.mjs`（完了条件の通し）と
   `app-smoke.mjs`（配置・操作）。既定の判断は計画書の段階3 の「経過」。Go 版の serve の
@@ -310,9 +313,9 @@ mmu → bus::PhysMem、bus → bus::Devices（ボードが MMIO を振り分け�
   表示のタップで同じ操作ができるので後回し。着手するなら、DE 本体ボタンの経路を
   観察する（他の入力系モジュール: conshid/kbdhid・emulserv・0x500F0000 の準仮想
   デバイスへのアクセスを -watch とトレースで確認）。
-- **HTTPS**（ネットワーク）: IE Mobile の TLS は古く今のサイトにつながらない。警告なしに
-  吸収するには、ゲストの TLS をこちらで終端（自前の CA をゲストに入れる）し、外へは今の TLS で
-  つなぎ直す（依存が要る）。方式はユーザーと決める（docs/network-design.md の末尾）。
+- ストレージの続き（2026-09-30 ユーザー了承の順）: NOR フラッシュ（amdnord.dll。本体
+  ストレージ）の観察、vcefsd.dll のフォルダ共有（ネットワークとストレージの共存）の調査。ROM は
+  書き換えない方針（ハードを用意するだけ）。
 - **電源ボタン**（pwrbtn2410.dll、GPF0/EINT0）: 押すとサスペンド（OEMPowerOff・
   スリープ・起床要因）の実装が必要になり範囲が大きい。UI 操作には不要なので後回し。
 - 性能改善の続き: 段階4 は 4-2（IR）で区切った（2026-09-29。ネイティブ約 100M・Node の

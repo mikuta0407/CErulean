@@ -7,6 +7,7 @@ mod net;
 mod relay;
 mod result;
 mod tools;
+mod upstream;
 
 use std::io::Write;
 use std::process::ExitCode;
@@ -67,6 +68,9 @@ run options:
   --net-record F        --net で受け取ったフレームを入力のスクリプトとして F に書く（再生は
                         同じ起点から --script F。--script は複数指定できる）
   --net-verbose         --net の接続を表示する
+  --net-ca F            --net で HTTPS を中継する（ゲストの TLS を終端し、外へは今の TLS で
+                        つなぎ直す）。F は CA の鍵（なければ作り、F.cer に証明書を書く。証明書は
+                        WM5 に入れる。WM5 の IE で http://10.0.2.2/ から入れられる）
 ";
 
 fn main() -> ExitCode {
@@ -155,6 +159,7 @@ struct RunOpts {
     net: bool,
     net_record: Option<String>,
     net_verbose: bool,
+    net_ca: Option<String>,
 }
 
 fn parse_u64(s: &str) -> Result<u64, String> {
@@ -227,6 +232,7 @@ fn parse_run_opts(args: &[String]) -> Result<RunOpts, String> {
             "--net" => o.net = true,
             "--net-record" => o.net_record = Some(val()?),
             "--net-verbose" => o.net_verbose = true,
+            "--net-ca" => o.net_ca = Some(val()?),
             s if s.starts_with("--") => return Err(format!("unknown option {s}\n{USAGE}")),
             s => {
                 if image.replace(s.to_string()).is_some() {
@@ -442,7 +448,11 @@ fn cmd_run(args: &[String]) -> Result<ExitCode, String> {
     }
     let mut sess = Session::new();
     sess.schedule(events.into_iter().skip(skip));
-    let mut direct = o.net.then(|| net::DirectNet::new(o.net_verbose));
+    let ca = match &o.net_ca {
+        Some(p) => Some(net::load_or_create_ca(p)?),
+        None => None,
+    };
+    let mut direct = o.net.then(|| net::DirectNet::new(o.net_verbose, ca));
     if o.net {
         if m.nic_mac().is_none() {
             eprintln!("cerulean: --net: no network card is inserted yet (use --nic or a script)");

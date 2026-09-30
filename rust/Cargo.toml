@@ -25,6 +25,10 @@ wasm-bindgen = "=0.2.129"
 sha2 = "0.11"
 # 画面の PNG 保存（CLI のみ。段階0 で「段階1 の CLI で入れる」と合意）。
 png = "0.18"
+# 中継サーバー・CLI の --net が HTTPS のサイトへ今の TLS でつなぐ（CLI のみ。
+# 2026-09-30 ユーザー承認。暗号は ring を使い、aws-lc は使わない）。
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+webpki-roots = "1"
 
 # 計測は必ず release で行う（計画書 §6.1）。
 [profile.release]

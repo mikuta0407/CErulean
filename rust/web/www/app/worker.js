@@ -386,6 +386,24 @@ let netRetry = null;
 const netPending = new Map();
 const netIds = new Set();
 
+// HTTPS の中継の CA（OPFS の net/ca.bin。最初にオンにしたときに作る）。ゲストには
+// http://10.0.2.2/ から入れてもらう。
+let netCa = null;
+async function loadOrCreateCa() {
+  if (netCa) return;
+  const d = await dir("net");
+  try {
+    netCa = new Uint8Array(await (await (await d.getFileHandle("ca.bin")).getFile()).arrayBuffer());
+    return;
+  } catch {}
+  netStatus("HTTPS の中継用の CA を作っています（初回だけ。十数秒かかることがあります）…");
+  await new Promise((ok) => setTimeout(ok, 0));
+  const ca = wasm.netCreateCa(crypto.getRandomValues(new Uint8Array(32)));
+  await writeAtomic(d, "ca.bin", ca);
+  netCa = ca;
+  log("HTTPS の中継用の CA を作った（WM5 の IE で http://10.0.2.2/ から入れる）");
+}
+
 function netStatus(msg) {
   netMsg = msg;
   post({ net: { msg, on: netCfg.on, ready: wsReady, conns: emu ? emu.netConnections() : 0, nic: emu ? emu.nicInserted() : false } });
@@ -466,6 +484,12 @@ function onRelay(m) {
   const dv = new DataView(m.buffer, m.byteOffset, m.byteLength);
   const kind = m[0];
   if (kind === 0x81) {
+    const ver = m.length >= 3 ? dv.getUint16(1, true) : 0;
+    if (ver < 2) {
+      netStatus(`中継サーバーの版が古い（${ver}）: cerulean relay を新しくしてください`);
+      ws?.close();
+      return;
+    }
     wsReady = true;
     netStatus("中継サーバーにつながっています");
     return;
@@ -565,6 +589,7 @@ function netApply() {
       return;
     }
     emu.netEnable(true);
+    if (netCa) emu.netSetCa(netCa, crypto.getRandomValues(new Uint8Array(32)));
     if (!emu.nicInserted()) {
       emu.nicInsert();
       inputSinceSave = true;
@@ -746,7 +771,10 @@ function start(e, id, name, turbo) {
   enqueue(sendCard);
   // 前のマシンの接続は捨て、設定に合わせてカードを挿す・抜く
   wsClose();
-  netApply();
+  enqueue(async () => {
+    if (netCfg.on) await loadOrCreateCa();
+    netApply();
+  });
 }
 
 function bootImage(bytes, name, id, rtc) {
@@ -1030,11 +1058,17 @@ const handlers = {
   clockOption({ on }) {
     syncClock = on;
   },
-  netConfig({ on, url, token }) {
+  async netConfig({ on, url, token }) {
     const changed = url !== netCfg.url || token !== netCfg.token;
     netCfg = { on, url, token };
     if (changed) wsClose();
+    if (on) await loadOrCreateCa();
     netApply();
+  },
+  async netExportCa() {
+    await loadOrCreateCa();
+    const bytes = wasm.netCaCert(netCa);
+    post({ download: { name: "cerulean-ca.cer", bytes } }, [bytes.buffer]);
   },
   syncClock() {
     setClockNow("手動");

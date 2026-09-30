@@ -10,7 +10,8 @@
 //  1. cerulean relay をトークン付きで起動し、スナップショットを読み込む
 //  2. メニューで中継サーバーの URL・トークンを入れてオンにし、中継につながること
 //  3. 記録しながら Internet Explorer で http://example.com/ を開き、中継が接続を
-//     中継したこと・画面が変わったこと
+//     中継したこと。続けて http://10.0.2.2/ から CA を入れて https://example.com/ を開き、
+//     中継が TLS でつないだこと
 //  4. 書き出したスクリプトと起点スナップショットをネイティブ CLI で（ネットワークなしで）
 //     再生し、終わりの CPU 状態・RAM・画面の SHA-256 が一致すること
 import { execFileSync, spawn } from "node:child_process";
@@ -112,6 +113,33 @@ try {
   check(true, "中継が example.com:80 につないだ");
   await sleep(12000);
   await h.shot("example-com");
+
+  // HTTPS: http://10.0.2.2/ から CA を入れ、確認用のリンク（https://example.com/）を開く
+  await h.tap(110, 35);
+  await sleep(1500);
+  for (const c of "10.0.2.2") {
+    if (c === ".") await h.key("Period", ".", 190);
+    else await h.key("Digit" + c, c, c.charCodeAt(0));
+  }
+  await h.key("Enter", "Enter", 13);
+  await sleep(6000);
+  await h.tap(40, 97); // cerulean-ca.cer
+  await sleep(6000);
+  await h.key("Tab", "Tab", 9); // ダウンロードの「はい」へ
+  await sleep(800);
+  await h.key("Enter", "Enter", 13);
+  await sleep(6000);
+  await h.shot("ca-install");
+  await h.key("Enter", "Enter", 13); // 証明書のインストールの「はい」
+  await sleep(5000);
+  await h.shot("ca-installed");
+  await h.tap(140, 212); // https://example.com/
+  await sleep(3000);
+  await h.shot("https-tapped");
+  await h.waitFor("relay connected example.com:443 (tls)", () => /example\.com:443 \(tls\) connected/.test(relayLog), 60_000);
+  check(true, "中継が example.com:443 に TLS でつないだ");
+  await sleep(12000);
+  await h.shot("https-example-com");
   await h.click("menuBtn");
   await sleep(500);
   await h.click("rec");

@@ -2,13 +2,14 @@
 //! OS のソケットで外へつなぐ経路（cerulean-net のスタックを使う）。
 
 use std::collections::{BTreeMap, VecDeque};
-use std::io::{Read, Write};
-use std::net::{Shutdown, TcpStream, ToSocketAddrs};
+use std::io::Write;
 use std::sync::mpsc;
-use std::time::Duration;
 
 use cerulean_core::smdk2410::INSTRUCTIONS_PER_SECOND;
+use cerulean_net::x509::Ca;
 use cerulean_net::{Request, Stack, Target};
+
+use crate::upstream::{self, Event, Upstream};
 
 /// pcap（libpcap の古典形式、リンク層はイーサネット）に書く。時刻は仮想時間
 /// （命令数から）なので、同じ入力なら同じファイルになる。
@@ -48,11 +49,8 @@ impl Pcap {
     }
 }
 
-/// 外への接続を作る時間の上限。
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-
 enum HostEvent {
-    Connected(u32, Option<TcpStream>),
+    Connected(u32, Option<Upstream>),
     Data(u32, Vec<u8>),
     Eof(u32),
     Reset(u32),
@@ -60,14 +58,14 @@ enum HostEvent {
 
 struct HostConn {
     /// 書き込み側（接続できるまで None）
-    stream: Option<TcpStream>,
+    up: Option<Upstream>,
     /// スタックが受け取れずに待たせている外からのデータ
     pending: VecDeque<Vec<u8>>,
     eof: bool,
 }
 
 /// OS のソケットで直接外へつなぐ（CLI 用。中継サーバーを使わない）。接続・読み出しは
-/// 接続ごとのスレッドで行い、結果はチャネルで受け取る。
+/// 接続ごとのスレッドで行い（upstream.rs）、結果はチャネルで受け取る。
 /// 外とのやり取りの時刻は壁時計に依存するので決定論的ではない。ゲストへ渡した
 /// フレームは入力として記録し、記録の再生で同じ状態にする（--net-record）。
 pub struct DirectNet {
@@ -78,11 +76,47 @@ pub struct DirectNet {
     verbose: bool,
 }
 
+/// OS に依らない乱数の種（std の HashMap の乱数の種と時刻。暗号用の乱数源ではないが、
+/// エミュレータの中の TLS の中継にだけ使う）。
+pub fn entropy() -> Vec<u8> {
+    use std::hash::{BuildHasher, Hasher};
+    let mut out = Vec::new();
+    for i in 0..4u64 {
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u64(i);
+        h.write_u128(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos()),
+        );
+        out.extend_from_slice(&h.finish().to_le_bytes());
+    }
+    out
+}
+
+/// CA のファイルを読む（なければ作って書く）。
+pub fn load_or_create_ca(path: &str) -> Result<Ca, String> {
+    if let Ok(b) = std::fs::read(path) {
+        return Ca::from_bytes(&b).map_err(|e| format!("{path}: {e}"));
+    }
+    eprintln!("cerulean: creating a new CA in {path} (RSA 2048, may take a few seconds)");
+    let ca = Ca::generate(&mut cerulean_net::crypto::Drbg::new(&entropy()));
+    std::fs::write(path, ca.to_bytes()).map_err(|e| format!("{path}: {e}"))?;
+    let cer = format!("{path}.cer");
+    std::fs::write(&cer, &ca.cert).map_err(|e| format!("{cer}: {e}"))?;
+    eprintln!("cerulean: wrote the CA certificate to {cer} (install it in WM5)");
+    Ok(ca)
+}
+
 impl DirectNet {
-    pub fn new(verbose: bool) -> DirectNet {
+    pub fn new(verbose: bool, ca: Option<Ca>) -> DirectNet {
         let (tx, rx) = mpsc::channel();
+        let mut stack = Stack::new();
+        if let Some(ca) = ca {
+            stack.set_https(ca, &entropy());
+        }
         DirectNet {
-            stack: Stack::new(),
+            stack,
             conns: BTreeMap::new(),
             tx,
             rx,
@@ -116,44 +150,57 @@ impl DirectNet {
     fn handle_requests(&mut self) {
         for r in self.stack.take_requests() {
             match r {
-                Request::Connect { id, target, port } => {
+                Request::Connect {
+                    id,
+                    target,
+                    port,
+                    tls,
+                } => {
                     let host = match &target {
                         Target::Ip(ip) => format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]),
                         Target::Host(h) => h.clone(),
                     };
                     if self.verbose {
-                        eprintln!("cerulean: net: connect #{id} {host}:{port}");
+                        let t = if tls { " (tls)" } else { "" };
+                        eprintln!("cerulean: net: connect #{id} {host}:{port}{t}");
                     }
                     self.conns.insert(
                         id,
                         HostConn {
-                            stream: None,
+                            up: None,
                             pending: VecDeque::new(),
                             eof: false,
                         },
                     );
                     let tx = self.tx.clone();
-                    std::thread::spawn(move || connect_thread(id, host, port, tx));
+                    upstream::spawn(host, port, tls, None, move |ev| {
+                        let _ = tx.send(match ev {
+                            Event::Connected(u) => HostEvent::Connected(id, u),
+                            Event::Data(d) => HostEvent::Data(id, d),
+                            Event::Eof => HostEvent::Eof(id),
+                            Event::Reset => HostEvent::Reset(id),
+                        });
+                    });
                 }
                 Request::Send { id, data } => {
-                    if let Some(s) = self.conns.get_mut(&id).and_then(|c| c.stream.as_mut()) {
-                        // TODO: 書き込みは相手が受け取るまで止まり得る（開発用の CLI なので
-                        // 簡単にしている）
-                        if s.write_all(&data).is_err() {
-                            self.stack.remote_reset(id);
-                        }
+                    if let Some(u) = self.conns.get(&id).and_then(|c| c.up.as_ref())
+                        && u.write(&data).is_err()
+                    {
+                        u.close();
+                        self.conns.remove(&id);
+                        self.stack.remote_reset(id);
                     }
                 }
                 Request::Shutdown { id } => {
-                    if let Some(s) = self.conns.get(&id).and_then(|c| c.stream.as_ref()) {
-                        let _ = s.shutdown(Shutdown::Write);
+                    if let Some(u) = self.conns.get(&id).and_then(|c| c.up.as_ref()) {
+                        u.shutdown_write();
                     }
                 }
                 Request::Close { id } => {
                     if let Some(c) = self.conns.remove(&id)
-                        && let Some(s) = c.stream
+                        && let Some(u) = c.up
                     {
-                        let _ = s.shutdown(Shutdown::Both);
+                        u.close();
                     }
                 }
             }
@@ -162,15 +209,15 @@ impl DirectNet {
 
     fn handle_event(&mut self, ev: HostEvent) {
         match ev {
-            HostEvent::Connected(id, s) => {
+            HostEvent::Connected(id, u) => {
                 let Some(c) = self.conns.get_mut(&id) else {
-                    if let Some(s) = s {
-                        let _ = s.shutdown(Shutdown::Both);
+                    if let Some(u) = u {
+                        u.close();
                     }
                     return;
                 };
-                let ok = s.is_some();
-                c.stream = s;
+                let ok = u.is_some();
+                c.up = u;
                 if self.verbose {
                     eprintln!(
                         "cerulean: net: #{id} {}",
@@ -219,49 +266,6 @@ impl DirectNet {
             if c.eof && c.pending.is_empty() {
                 c.eof = false;
                 self.stack.remote_closed(id);
-            }
-        }
-    }
-}
-
-fn connect_thread(id: u32, host: String, port: u16, tx: mpsc::Sender<HostEvent>) {
-    let addrs: Vec<_> = match (host.as_str(), port).to_socket_addrs() {
-        Ok(a) => a.filter(|a| a.is_ipv4()).collect(),
-        Err(_) => Vec::new(),
-    };
-    let stream = addrs
-        .iter()
-        .find_map(|a| TcpStream::connect_timeout(a, CONNECT_TIMEOUT).ok());
-    let Some(stream) = stream else {
-        let _ = tx.send(HostEvent::Connected(id, None));
-        return;
-    };
-    let _ = stream.set_nodelay(true);
-    let mut reader = match stream.try_clone() {
-        Ok(r) => r,
-        Err(_) => {
-            let _ = tx.send(HostEvent::Connected(id, None));
-            return;
-        }
-    };
-    if tx.send(HostEvent::Connected(id, Some(stream))).is_err() {
-        return;
-    }
-    let mut buf = vec![0u8; 16 * 1024];
-    loop {
-        match reader.read(&mut buf) {
-            Ok(0) => {
-                let _ = tx.send(HostEvent::Eof(id));
-                return;
-            }
-            Ok(n) => {
-                if tx.send(HostEvent::Data(id, buf[..n].to_vec())).is_err() {
-                    return;
-                }
-            }
-            Err(_) => {
-                let _ = tx.send(HostEvent::Reset(id));
-                return;
             }
         }
     }

@@ -652,6 +652,7 @@ Worker → メイン:
 | wasm と JS の連携 | wasm-bindgen、js-sys、web-sys | 2 | web クレートのみ |
 | wasm の生成（JIT-to-wasm） | ~~wasm-encoder 等~~ → 自作（2026-09-29 決定） | 5 | コアの `jit/wasm.rs`。依存なし |
 | ネットワークの NAT（TCP の終端）・中継サーバーの WebSocket | ~~smoltcp・tungstenite 等~~ → 自作（2026-09-30 決定） | 3 以降 | `rust/net`（cerulean-net）と CLI の `relay.rs`。依存なし |
+| HTTPS の中継: 外への今の TLS | rustls（ring）・webpki-roots（2026-09-30 承認） | 3 以降 | CLI のみ（`upstream.rs`）。ゲスト側の TLS 1.0・RSA・X.509 は `rust/net` に自作 |
 | ネイティブ JIT | Cranelift／dynasm-rs／自作 | 将来 | この計画の範囲外 |
 
 - ツール: rustup（`wasm32-unknown-unknown` ターゲット）、wasm-bindgen-cli、

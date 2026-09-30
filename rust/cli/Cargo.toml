@@ -16,3 +16,5 @@ cerulean-fat.workspace = true
 cerulean-net.workspace = true
 sha2.workspace = true
 png.workspace = true
+rustls.workspace = true
+webpki-roots.workspace = true

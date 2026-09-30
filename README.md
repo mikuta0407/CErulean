@@ -235,12 +235,17 @@ PC カードのソケットに NE2000 互換のイーサネットカードを挿
 ゲストの TCP はエミュレータの外側の小さな NAT（`rust/net`）で終端し、外へは TCP の
 バイト列だけを出します。**初めて使うときは WM5 の「設定 → 接続 → ネットワークカード」で
 「ネットワークカードの接続先」を「インターネット設定」にしてください**（スナップショットに
-残ります）。HTTPS のサイトは IE Mobile の TLS が古いのでつながりません。
+残ります）。
+
+HTTPS のサイトも開けます: IE Mobile の古い TLS はエミュレータの外側（`rust/net`）で受け、外へは
+中継サーバー・CLI が今の TLS でつなぎ直します。最初に一度、WM5 の IE で `http://10.0.2.2/` を開き、
+証明書（CErulean Local CA）を開いてインストールしてください（CLI は `--net-ca ca.bin` で CA を作る・使う。
+ブラウザ版は端末の中で作る）。
 
 ```sh
 # CLI: OS のソケットで直接つなぐ（実時間に合わせて進む）。受け取ったフレームを記録し、
 # 送受信を pcap に書く
-$R run --snap-load today.snap --nic --net --net-record net.txt --net-pcap net.pcap --script ops.txt
+$R run --snap-load today.snap --nic --net --net-ca ca.bin --net-record net.txt --net-pcap net.pcap --script ops.txt
 # 記録の再生（ネットワークなしで同じ状態になる）
 $R run --snap-load today.snap --nic --script ops.txt --script net.txt
 

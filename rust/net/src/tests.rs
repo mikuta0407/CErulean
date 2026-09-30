@@ -159,7 +159,15 @@ fn tcp_connect_exchange_and_close() {
         "no SYN-ACK before the connect result"
     );
     let reqs = s.take_requests();
-    let [Request::Connect { id, target, port }] = &reqs[..] else {
+    let [
+        Request::Connect {
+            id,
+            target,
+            port,
+            tls: false,
+        },
+    ] = &reqs[..]
+    else {
         panic!("{reqs:?}");
     };
     assert_eq!((target, *port), (&Target::Host("example.com".into()), 80));

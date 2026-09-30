@@ -354,6 +354,7 @@ $("netOn").onchange = () => {
   sendNet();
 };
 $("netUrl").onchange = () => sendNet();
+$("netCaExport").onclick = () => send("netExportCa");
 $("netToken").onchange = () => sendNet();
 
 // ---- ストレージカード ----

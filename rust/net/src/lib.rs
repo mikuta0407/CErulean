@@ -21,11 +21,18 @@
 //! 対応しないもの: IPv6（ゲストは送ってくるが捨てる）、DNS・DHCP 以外の UDP、外への
 //! ICMP、IP の断片、TCP の受け（外からゲストへの接続）。
 
+pub mod bigint;
+pub mod crypto;
+pub mod tls;
 pub mod wire;
+pub mod x509;
 
 use std::collections::{BTreeMap, VecDeque};
 
+use crypto::Drbg;
+use tls::TlsServer;
 use wire::*;
+use x509::Ca;
 
 /// ゲストに渡す IPv4 アドレス（DHCP）。
 pub const GUEST_IP: [u8; 4] = [10, 0, 2, 15];
@@ -72,8 +79,14 @@ pub enum Target {
 /// 呼び出し側への依頼（take_requests で取り出す）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
-    /// 外への TCP 接続を作る。結果は connected で返す
-    Connect { id: u32, target: Target, port: u16 },
+    /// 外への TCP 接続を作る。結果は connected で返す。tls なら外へは TLS でつなぎ
+    /// （接続先の名前で証明書を確かめる）、Send・recv は TLS の中の平文になる
+    Connect {
+        id: u32,
+        target: Target,
+        port: u16,
+        tls: bool,
+    },
     /// 外へ送る
     Send { id: u32, data: Vec<u8> },
     /// ゲストが送り終えた（FIN）。外の接続の送信側を閉じる
@@ -116,6 +129,12 @@ struct Conn {
     rto_at: Option<u64>,
     rto: u64,
     retries: u32,
+    /// ゲストの TLS をここで終端している（HTTPS の中継）
+    tls: Option<Box<TlsServer>>,
+    /// ハンドシェイクが済む前に外から届いた平文
+    early: Vec<u8>,
+    /// このスタック自身が答える HTTP（ゲートウェイの 80 番。CA の配布）の要求の受け
+    local: Option<Vec<u8>>,
 }
 
 impl Conn {
@@ -142,7 +161,20 @@ pub struct Stack {
     now: u64,
     frames: Vec<Vec<u8>>,
     requests: Vec<Request>,
+    https: Option<Https>,
 }
+
+/// HTTPS の中継（ゲストの TLS をこちらで終端する）のための CA・証明書。
+struct Https {
+    ca: Ca,
+    rng: Drbg,
+    /// サーバー証明書の鍵（全部の名前で共有する。最初の接続で作る）
+    leaf: Option<crate::bigint::RsaKey>,
+    certs: BTreeMap<String, Vec<u8>>,
+}
+
+/// サーバー証明書の鍵の大きさ（ゲストの接続ごとに RSA の復号をするので小さめ）。
+const LEAF_BITS: usize = 1024;
 
 impl Default for Stack {
     fn default() -> Self {
@@ -164,7 +196,41 @@ impl Stack {
             now: 0,
             frames: Vec::new(),
             requests: Vec::new(),
+            https: None,
         }
+    }
+
+    /// HTTPS の中継を有効にする（ca をゲストに信頼させておくこと。seed は呼び出し側の乱数）。
+    /// 以後、443 番への接続はゲストの TLS をここで終端し、外へは TLS でつなぎ直す。
+    pub fn set_https(&mut self, ca: Ca, seed: &[u8]) {
+        self.https = Some(Https {
+            ca,
+            rng: Drbg::new(seed),
+            leaf: None,
+            certs: BTreeMap::new(),
+        });
+    }
+
+    /// 乱数の種を足す（呼び出し側がときどき渡す）。
+    pub fn add_entropy(&mut self, extra: &[u8]) {
+        if let Some(h) = &mut self.https {
+            h.rng.reseed(extra);
+        }
+    }
+
+    /// ゲストの TLS を受けるサーバーを作る（名前の証明書は作って覚えておく）。
+    fn tls_server(&mut self, host: &str) -> Option<Box<TlsServer>> {
+        let h = self.https.as_mut()?;
+        if h.leaf.is_none() {
+            h.leaf = Some(crate::bigint::RsaKey::generate(&mut h.rng, LEAF_BITS));
+        }
+        let leaf = h.leaf.clone()?;
+        if !h.certs.contains_key(host) {
+            let c = h.ca.issue(&mut h.rng, host, &leaf);
+            h.certs.insert(host.to_string(), c);
+        }
+        let chain = vec![h.certs[host].clone(), h.ca.cert.clone()];
+        Some(Box::new(TlsServer::new(chain, leaf)))
     }
 
     /// ゲストが送ったフレーム（宛先〜データ）を処理する。now はミリ秒の時刻
@@ -237,7 +303,14 @@ impl Stack {
         if let Some(c) = self.conns.get_mut(&id)
             && !c.remote_eof
         {
-            c.buf.extend(data);
+            match &mut c.tls {
+                Some(t) if t.is_open() => {
+                    t.send(data);
+                    c.buf.extend(t.take_output());
+                }
+                Some(_) => c.early.extend_from_slice(data),
+                None => c.buf.extend(data),
+            }
             self.push(id);
         }
     }
@@ -248,6 +321,10 @@ impl Stack {
             if c.state == State::Connecting {
                 self.connected(id, false);
                 return;
+            }
+            if let Some(t) = &mut c.tls {
+                t.close();
+                c.buf.extend(t.take_output());
             }
             c.remote_eof = true;
             self.push(id);
@@ -601,10 +678,9 @@ impl Stack {
         if t.seq == c.rcv_nxt && !c.guest_fin {
             if !t.data.is_empty() {
                 c.rcv_nxt = c.rcv_nxt.wrapping_add(t.data.len() as u32);
-                self.requests.push(Request::Send {
-                    id,
-                    data: t.data.to_vec(),
-                });
+                if !self.guest_data(id, t.data) {
+                    return;
+                }
             }
             let c = self.conns.get_mut(&id).expect("live");
             if t.flags & FIN != 0 {
@@ -622,6 +698,55 @@ impl Stack {
         self.maybe_finish(id);
     }
 
+    /// 順番どおりに届いたゲストのデータ。false なら接続を捨てた。
+    fn guest_data(&mut self, id: u32, data: &[u8]) -> bool {
+        let https = &mut self.https;
+        let c = self.conns.get_mut(&id).expect("live");
+        if let Some(req) = &mut c.local {
+            req.extend_from_slice(data);
+            if req.windows(4).any(|w| w == b"\r\n\r\n") || req.len() > 8192 {
+                let resp = local_http(req, https.as_ref().map(|h| &h.ca));
+                c.local = Some(Vec::new());
+                c.buf.extend(resp);
+                c.remote_eof = true;
+            }
+            return true;
+        }
+        let Some(tls) = &mut c.tls else {
+            self.requests.push(Request::Send {
+                id,
+                data: data.to_vec(),
+            });
+            return true;
+        };
+        let Some(h) = https else {
+            return true;
+        };
+        let was_open = tls.is_open();
+        let r = tls.input(data, &mut h.rng);
+        c.buf.extend(tls.take_output());
+        match r {
+            Ok(plain) => {
+                if !was_open && tls.is_open() && !c.early.is_empty() {
+                    let e = std::mem::take(&mut c.early);
+                    tls.send(&e);
+                    c.buf.extend(tls.take_output());
+                }
+                if !plain.is_empty() {
+                    self.requests.push(Request::Send { id, data: plain });
+                }
+                true
+            }
+            Err(_) => {
+                // alert は送った（buf に入れた）。送ってから切るのは省き、リセットする
+                let (rip, rport, gport, seq, ack) = (c.rip, c.rport, c.gport, c.snd_nxt, c.rcv_nxt);
+                self.send_tcp(rip, rport, gport, seq, ack, RST | ACK, &[], false);
+                self.drop_conn(id, true);
+                false
+            }
+        }
+    }
+
     fn tcp_new(&mut self, rip: [u8; 4], t: &Tcp<'_>) {
         if t.flags & RST != 0 {
             return;
@@ -637,6 +762,8 @@ impl Stack {
             self.send_tcp(rip, t.dport, t.sport, seq, ack, fl, &[], false);
             return;
         }
+        // ゲートウェイの 80 番はこのスタック自身が答える（CA の配布）
+        let local = rip == GATEWAY_IP && t.dport == 80;
         let target = match fake_index(rip) {
             Some(i) => match self.names.get(i as usize) {
                 Some(n) => Target::Host(n.clone()),
@@ -647,6 +774,15 @@ impl Stack {
                 }
             },
             None => Target::Ip(rip),
+        };
+        let tls = if t.dport == 443 && !local {
+            let host = match &target {
+                Target::Host(h) => h.clone(),
+                Target::Ip(a) => format!("{}.{}.{}.{}", a[0], a[1], a[2], a[3]),
+            };
+            self.tls_server(&host)
+        } else {
+            None
         };
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1).max(1);
@@ -675,13 +811,23 @@ impl Stack {
                 rto_at: None,
                 rto: RTO_MIN,
                 retries: 0,
+                tls: None,
+                early: Vec::new(),
+                local: local.then(Vec::new),
             },
         );
         self.by_tuple.insert((t.sport, rip, t.dport), id);
+        if local {
+            self.connected(id, true);
+            return;
+        }
+        let tls_on = tls.is_some();
+        self.conns.get_mut(&id).expect("live").tls = tls;
         self.requests.push(Request::Connect {
             id,
             target,
             port: t.dport,
+            tls: tls_on,
         });
     }
 
@@ -812,11 +958,49 @@ impl Stack {
     fn drop_conn(&mut self, id: u32, tell: bool) {
         if let Some(c) = self.conns.remove(&id) {
             self.by_tuple.remove(&(c.gport, c.rip, c.rport));
-            if tell {
+            if tell && c.local.is_none() {
                 self.requests.push(Request::Close { id });
             }
         }
     }
+}
+
+/// ゲートウェイの 80 番の応答（HTTP/1.0）: CA の証明書の配布と説明のページ。
+fn local_http(req: &[u8], ca: Option<&Ca>) -> Vec<u8> {
+    let line = req.split(|&b| b == b'\r').next().unwrap_or(&[]);
+    let path = line.split(|&b| b == b' ').nth(1).unwrap_or(b"/");
+    let (status, ctype, body): (&str, &str, Vec<u8>) = match (path, ca) {
+        (b"/cerulean-ca.cer", Some(ca)) => {
+            ("200 OK", "application/x-x509-ca-cert", ca.cert.clone())
+        }
+        (b"/", _) => {
+            let msg = if ca.is_some() {
+                "<p><a href=\"/cerulean-ca.cer\">cerulean-ca.cer</a></p>\
+                 <p>HTTPS のサイトを開くには、この証明書（CErulean Local CA）を開いて\
+                 インストールしてください（最初の 1 回だけ）。</p>\
+                 <p>To open HTTPS sites, open and install this certificate once.</p>\
+                 <p>確認用 (test): <a href=\"https://example.com/\">https://example.com/</a></p>"
+            } else {
+                "<p>HTTPS の中継は無効です（HTTPS relay is off）。</p>"
+            };
+            (
+                "200 OK",
+                "text/html; charset=utf-8",
+                format!(
+                    "<html><head><title>CErulean</title></head><body><h3>CErulean</h3>{msg}</body></html>"
+                )
+                .into_bytes(),
+            )
+        }
+        _ => ("404 Not Found", "text/plain", b"not found".to_vec()),
+    };
+    let mut r = format!(
+        "HTTP/1.0 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    )
+    .into_bytes();
+    r.extend_from_slice(&body);
+    r
 }
 
 fn fake_index(ip: [u8; 4]) -> Option<u32> {

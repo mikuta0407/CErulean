@@ -3,7 +3,8 @@
 //! ブラウザは生の TCP を使えないので、ゲストの TCP はブラウザ内のスタック
 //! （cerulean-net）で終端し、外への TCP のバイト列だけを 1 本の WebSocket に多重化して
 //! ここへ送る。ここは接続先へ TCP をつなぎ、バイト列を中継するだけ（ゲストのフレームは
-//! 見ない）。std のみ（WebSocket・SHA-1・Base64 も自前。依存を増やさないため）。
+//! 見ない）。WebSocket・SHA-1・Base64 は自前。HTTPS の中継（ゲストの TLS はブラウザ内の
+//! スタックが終端する）では、ここが今の TLS でサイトにつなぐ（rustls。upstream.rs）。
 //!
 //! 一次資料: RFC 6455（WebSocket）、RFC 3174（SHA-1）、RFC 4648（Base64）。
 //!
@@ -16,13 +17,14 @@
 //! ```text
 //! ブラウザ → 中継
 //!   01 HELLO    トークン（UTF-8）            最初に 1 回。違えば 86 を返して切る
-//!   02 CONNECT  番号 u32・ポート u16・接続先（名前か IPv4 の文字列）
+//!   02 CONNECT  番号 u32・ポート u16・フラグ u8（bit0 = TLS でつなぐ）・接続先（名前か
+//!               IPv4 の文字列）。TLS なら DATA は TLS の中の平文
 //!   03 DATA     番号 u32・バイト列
 //!   04 SHUTDOWN 番号 u32                      送信の終わり（相手へ FIN）
 //!   05 CLOSE    番号 u32                      接続を捨てる
 //!   06 CREDIT   番号 u32・バイト数 u32         この分だけ受け取れるようになった
 //! 中継 → ブラウザ
-//!   81 READY    版 u16
+//!   81 READY    版 u16（今は 2）
 //!   82 CONNECTED 番号 u32・成否 u8
 //!   83 DATA     番号 u32・バイト列（CREDIT の残りを超えては送らない）
 //!   84 EOF      番号 u32
@@ -32,20 +34,21 @@
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
-use std::net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs};
-use std::sync::{Arc, Condvar, Mutex};
+use std::net::{TcpListener, TcpStream};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+use crate::upstream::{self, Event, Upstream};
 
 const USAGE: &str = "usage: cerulean relay [--listen ADDR:PORT] [--token TOKEN]
   --listen A   待ち受けるアドレス（既定 127.0.0.1:8765）
   --token T    接続に要るトークン（省くと起動時に乱数で作って表示する）";
 
-/// 中継の約束の版。
-const PROTOCOL_VERSION: u16 = 1;
+/// 中継の約束の版（2: CONNECT に TLS のフラグを足した。2026-09-30）。
+const PROTOCOL_VERSION: u16 = 2;
 /// 接続ごとの最初の CREDIT（ブラウザのスタックが溜められる量と同じ。
 /// cerulean_net::MAX_BUFFERED）。
 const INITIAL_CREDIT: usize = cerulean_net::MAX_BUFFERED;
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// 受け取る WebSocket のメッセージの上限（ブラウザは 1 回に 1 セグメント程度しか送らない）。
 const MAX_MESSAGE: usize = 1 << 20;
 /// 1 クライアントの同時接続の上限。
@@ -239,15 +242,6 @@ fn read_message(s: &mut TcpStream, out: &WsOut) -> Result<Option<Vec<u8>>, Strin
 
 // ---- 多重化 ----
 
-/// 外への 1 本の接続の、読み出し側と共有する状態。
-struct Stream {
-    tcp: Mutex<Option<TcpStream>>,
-    /// あと何バイトブラウザへ送ってよいか
-    credit: Mutex<usize>,
-    cv: Condvar,
-    closed: Mutex<bool>,
-}
-
 fn client(mut s: TcpStream, token: &str) -> Result<(), String> {
     let _ = s.set_nodelay(true);
     handshake(&mut s)?;
@@ -270,7 +264,8 @@ fn client(mut s: TcpStream, token: &str) -> Result<(), String> {
     ready.extend_from_slice(&PROTOCOL_VERSION.to_le_bytes());
     out.send(2, &ready).map_err(|e| e.to_string())?;
 
-    let mut streams: BTreeMap<u32, Arc<Stream>> = BTreeMap::new();
+    // 番号 → 接続（つながるまでは None）
+    let streams: Arc<Mutex<BTreeMap<u32, Option<Upstream>>>> = Arc::default();
     let r = (|| -> Result<(), String> {
         while let Some(m) = read_message(&mut s, &out)? {
             if m.len() < 5 {
@@ -278,57 +273,92 @@ fn client(mut s: TcpStream, token: &str) -> Result<(), String> {
             }
             let id = u32::from_le_bytes([m[1], m[2], m[3], m[4]]);
             let body = &m[5..];
+            let get = |id: u32| -> Option<Upstream> {
+                streams
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&id)
+                    .cloned()
+                    .flatten()
+            };
             match m[0] {
                 0x02 => {
-                    if body.len() < 2 || streams.contains_key(&id) {
+                    if body.len() < 3 {
                         return Err("bad CONNECT".into());
                     }
-                    if streams.len() >= MAX_STREAMS {
+                    let mut st = streams.lock().unwrap_or_else(|e| e.into_inner());
+                    if st.contains_key(&id) {
+                        return Err("duplicate CONNECT".into());
+                    }
+                    if st.len() >= MAX_STREAMS {
                         out.msg(0x82, id, &[0]).map_err(|e| e.to_string())?;
                         continue;
                     }
+                    st.insert(id, None);
+                    drop(st);
                     let port = u16::from_le_bytes([body[0], body[1]]);
-                    let host = String::from_utf8_lossy(&body[2..]).to_string();
-                    let st = Arc::new(Stream {
-                        tcp: Mutex::new(None),
-                        credit: Mutex::new(INITIAL_CREDIT),
-                        cv: Condvar::new(),
-                        closed: Mutex::new(false),
+                    let tls = body[2] & 1 != 0;
+                    let host = String::from_utf8_lossy(&body[3..]).to_string();
+                    let (out, streams) = (out.clone(), streams.clone());
+                    let what = format!("#{id} {host}:{port}{}", if tls { " (tls)" } else { "" });
+                    upstream::spawn(host, port, tls, Some(INITIAL_CREDIT), move |ev| match ev {
+                        Event::Connected(up) => {
+                            let ok = up.is_some();
+                            eprintln!(
+                                "cerulean relay: {what} {}",
+                                if ok { "connected" } else { "failed" }
+                            );
+                            let mut st = streams.lock().unwrap_or_else(|e| e.into_inner());
+                            match (st.get_mut(&id), up) {
+                                (Some(slot), Some(up)) => *slot = Some(up),
+                                // 待つ間に捨てられた
+                                (None, Some(up)) => up.close(),
+                                _ => {
+                                    st.remove(&id);
+                                }
+                            }
+                            drop(st);
+                            let _ = out.msg(0x82, id, &[ok as u8]);
+                        }
+                        Event::Data(d) => {
+                            let _ = out.msg(0x83, id, &d);
+                        }
+                        Event::Eof => {
+                            let _ = out.msg(0x84, id, &[]);
+                        }
+                        Event::Reset => {
+                            let _ = out.msg(0x85, id, &[]);
+                        }
                     });
-                    streams.insert(id, st.clone());
-                    let out = out.clone();
-                    std::thread::spawn(move || stream_thread(id, host, port, st, out));
                 }
                 0x03 => {
-                    if let Some(st) = streams.get(&id) {
-                        let mut t = st.tcp.lock().unwrap_or_else(|e| e.into_inner());
-                        if let Some(t) = t.as_mut()
-                            && t.write_all(body).is_err()
-                        {
-                            let _ = t.shutdown(Shutdown::Both);
-                        }
+                    if let Some(up) = get(id)
+                        && up.write(body).is_err()
+                    {
+                        up.close();
                     }
                 }
                 0x04 => {
-                    if let Some(st) = streams.get(&id)
-                        && let Some(t) = st.tcp.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
-                    {
-                        let _ = t.shutdown(Shutdown::Write);
+                    if let Some(up) = get(id) {
+                        up.shutdown_write();
                     }
                 }
                 0x05 => {
-                    if let Some(st) = streams.remove(&id) {
-                        close_stream(&st);
+                    let up = streams
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&id)
+                        .flatten();
+                    if let Some(up) = up {
+                        up.close();
                     }
                 }
                 0x06 => {
                     if body.len() >= 4
-                        && let Some(st) = streams.get(&id)
+                        && let Some(up) = get(id)
                     {
                         let n = u32::from_le_bytes([body[0], body[1], body[2], body[3]]) as usize;
-                        let mut c = st.credit.lock().unwrap_or_else(|e| e.into_inner());
-                        *c = (*c + n).min(INITIAL_CREDIT * 4);
-                        st.cv.notify_all();
+                        up.add_credit(n, INITIAL_CREDIT * 4);
                     }
                 }
                 k => return Err(format!("unknown message {k:#x}")),
@@ -336,78 +366,13 @@ fn client(mut s: TcpStream, token: &str) -> Result<(), String> {
         }
         Ok(())
     })();
-    for st in streams.values() {
-        close_stream(st);
+    for up in std::mem::take(&mut *streams.lock().unwrap_or_else(|e| e.into_inner()))
+        .into_values()
+        .flatten()
+    {
+        up.close();
     }
     r
-}
-
-fn close_stream(st: &Stream) {
-    *st.closed.lock().unwrap_or_else(|e| e.into_inner()) = true;
-    if let Some(t) = st.tcp.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
-        let _ = t.shutdown(Shutdown::Both);
-    }
-    st.cv.notify_all();
-}
-
-/// 接続して、CREDIT の範囲で読んでブラウザへ送る。
-fn stream_thread(id: u32, host: String, port: u16, st: Arc<Stream>, out: WsOut) {
-    let addrs: Vec<_> = (host.as_str(), port)
-        .to_socket_addrs()
-        .map(|a| a.filter(|a| a.is_ipv4()).collect())
-        .unwrap_or_default();
-    let tcp = addrs
-        .iter()
-        .find_map(|a| TcpStream::connect_timeout(a, CONNECT_TIMEOUT).ok());
-    let reader = tcp.as_ref().and_then(|t| t.try_clone().ok());
-    let (Some(tcp), Some(mut reader)) = (tcp, reader) else {
-        eprintln!("cerulean relay: #{id} {host}:{port} failed");
-        let _ = out.msg(0x82, id, &[0]);
-        return;
-    };
-    let _ = tcp.set_nodelay(true);
-    *st.tcp.lock().unwrap_or_else(|e| e.into_inner()) = Some(tcp);
-    if *st.closed.lock().unwrap_or_else(|e| e.into_inner()) {
-        close_stream(&st);
-        return;
-    }
-    eprintln!("cerulean relay: #{id} {host}:{port} connected");
-    if out.msg(0x82, id, &[1]).is_err() {
-        return;
-    }
-    let mut buf = vec![0u8; 16 * 1024];
-    loop {
-        // CREDIT が残るまで待つ
-        let allowed = {
-            let mut c = st.credit.lock().unwrap_or_else(|e| e.into_inner());
-            while *c == 0 && !*st.closed.lock().unwrap_or_else(|e| e.into_inner()) {
-                c = st.cv.wait(c).unwrap_or_else(|e| e.into_inner());
-            }
-            *c
-        };
-        if *st.closed.lock().unwrap_or_else(|e| e.into_inner()) {
-            return;
-        }
-        let n = buf.len().min(allowed);
-        match reader.read(&mut buf[..n]) {
-            Ok(0) => {
-                let _ = out.msg(0x84, id, &[]);
-                return;
-            }
-            Ok(n) => {
-                *st.credit.lock().unwrap_or_else(|e| e.into_inner()) -= n;
-                if out.msg(0x83, id, &buf[..n]).is_err() {
-                    return;
-                }
-            }
-            Err(_) => {
-                if !*st.closed.lock().unwrap_or_else(|e| e.into_inner()) {
-                    let _ = out.msg(0x85, id, &[]);
-                }
-                return;
-            }
-        }
-    }
 }
 
 /// 長さに依らない時間で比べる（トークンの比較）。

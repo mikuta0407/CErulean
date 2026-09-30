@@ -457,7 +457,8 @@ impl Emu {
 
     /// ゲストが送ったフレームをスタックに渡し、時間を進め（再送）、ゲストへのフレームを
     /// 渡す。戻り値は中継への依頼の列（[種類 u8][番号 u32][長さ u32][中身] の繰り返し。
-    /// 種類 1 = 接続（中身はポート u16 と接続先の名前）、2 = 送信、3 = 送信の終わり、
+    /// 種類 1 = 接続（中身はポート u16・フラグ u8（bit0 = TLS）・接続先の名前。中継の
+    /// CONNECT の中身と同じ形）、2 = 送信、3 = 送信の終わり、
     /// 4 = 切断。整数はリトルエンディアン）。now_ms は仮想時間のミリ秒。
     #[wasm_bindgen(js_name = netStep)]
     pub fn net_step(&mut self, now_ms: f64) -> Result<Vec<u8>, JsError> {
@@ -477,7 +478,12 @@ impl Emu {
         };
         for r in net.take_requests() {
             let (kind, id, body) = match r {
-                cerulean_net::Request::Connect { id, target, port } => {
+                cerulean_net::Request::Connect {
+                    id,
+                    target,
+                    port,
+                    tls,
+                } => {
                     let host = match target {
                         cerulean_net::Target::Ip(ip) => {
                             format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3])
@@ -485,6 +491,7 @@ impl Emu {
                         cerulean_net::Target::Host(h) => h,
                     };
                     let mut b = port.to_le_bytes().to_vec();
+                    b.push(tls as u8);
                     b.extend_from_slice(host.as_bytes());
                     (1u8, id, b)
                 }
@@ -513,6 +520,17 @@ impl Emu {
             self.sess
                 .inject(&mut self.m, ev)
                 .map_err(|e| JsError::new(&e))?;
+        }
+        Ok(())
+    }
+
+    /// HTTPS の中継を有効にする（ca は netCreateCa で作って保存しておいたもの、seed は
+    /// crypto.getRandomValues の乱数）。netEnable(true) の後に呼ぶ。
+    #[wasm_bindgen(js_name = netSetCa)]
+    pub fn net_set_ca(&mut self, ca: &[u8], seed: &[u8]) -> Result<(), JsError> {
+        let ca = cerulean_net::x509::Ca::from_bytes(ca).map_err(|e| JsError::new(&e))?;
+        if let Some(n) = &mut self.net {
+            n.set_https(ca, seed);
         }
         Ok(())
     }
@@ -727,6 +745,21 @@ impl Emu {
     pub fn frame_height(&self) -> u32 {
         self.frame_h
     }
+}
+
+/// HTTPS の中継の CA を新しく作る（RSA 2048。数秒〜十数秒かかる）。戻り値は保存用の形
+/// （netSetCa に渡す）。seed は crypto.getRandomValues の乱数（32 バイト以上）。
+#[wasm_bindgen(js_name = netCreateCa)]
+pub fn net_create_ca(seed: &[u8]) -> Vec<u8> {
+    let mut rng = cerulean_net::crypto::Drbg::new(seed);
+    cerulean_net::x509::Ca::generate(&mut rng).to_bytes()
+}
+
+/// CA の証明書（DER。書き出し用）。
+#[wasm_bindgen(js_name = netCaCert)]
+pub fn net_ca_cert(ca: &[u8]) -> Result<Vec<u8>, JsError> {
+    let ca = cerulean_net::x509::Ca::from_bytes(ca).map_err(|e| JsError::new(&e))?;
+    Ok(ca.cert)
 }
 
 // ---- ストレージカードのイメージ（抜いている間の出し入れ。cerulean-fat）----
