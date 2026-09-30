@@ -1,6 +1,7 @@
 # CErulean 設計方針
 
-Windows Mobile 5.0（WinCE 5.0）LLE エミュレータ。**Rust 製**（`rust/`）。最初の出荷先は
+Windows Mobile 5.0（WinCE 5.0）LLE エミュレータ。WM6 の日本語版も同じ構成で動く
+（2026-09-30。`docs/wm6-design.md`）。**Rust 製**（`rust/`）。最初の出荷先は
 ブラウザ（wasm）で、将来はネイティブ（iOS/Android/PC）と JIT も揃える。
 移行の計画・段階・決定事項は `docs/rust-migration-plan.md`。
 
@@ -60,7 +61,8 @@ Go 版の設計の理由コメントは Rust のコードに移してある。�
 - **コミット前の確認**: `tools/check.sh`（fmt・clippy・テスト〔ネイティブと
   wasm32-wasip1〕、web の wasm ビルドと Node での読み込み。CERULEAN_IMAGE があれば
   実イメージのテストも）。CI は置かない。コアの動作に関わる変更では加えて
-  `CERULEAN_IMAGE=tmp/images/PPC_USA.bin tools/golden/verify.sh`（全基準シナリオ、約 4 分）。
+  `CERULEAN_IMAGE=tmp/images/PPC_USA.bin tools/golden/verify.sh`（全基準シナリオ、約 4 分。
+  `CERULEAN_IMAGE_WM6=tmp/images/wm6/PPC_JPN.bin` を足すと WM6 のシナリオも走る。+約 40 秒）。
 - 手元のツール（2026-09 導入）: rustup（~/.cargo。ターゲット wasm32-unknown-unknown・
   wasm32-wasip1）、wasm-bindgen-cli（`cargo install --locked`）、Node.js 24 LTS
   （~/.local/node）。いずれも ~/.local/bin にリンクしてある。/tmp は tmpfs で小さいので、
@@ -101,6 +103,7 @@ mmu → bus::PhysMem、bus → bus::Devices（ボードが MMIO を振り分け�
   止める（黙って NOP にしない）。アーキテクチャ上の未定義命令（arch=true）はゲストに
   例外として配送する。
 - `bus`: 領域の表と RAM（1 本のアリーナ）。MMIO はデバイス番号を `Devices` に渡す。
+  フラッシュ領域（`map_flash`）は読みが RAM と同じ直接、書き込みが装置へのコマンド。
   未マップは `BusError`（停止）。監視（`--watch`）は `watch_log` にためる。
   MMIO の読み書きはアクセス幅に切り詰める。
 - `mmu`: CP15・ソフト TLB（ゲストから見える状態として埋める・捨てる規則まで固定）・
@@ -120,6 +123,8 @@ mmu → bus::PhysMem、bus → bus::Devices（ボードが MMIO を振り分け�
   Device Emulator のフォルダ共有（ソケットを使わない「Storage Card」）は `smdk2410/deshare.rs`。
   ゲストのイーサネットを外へつなぐ NAT（ARP・DHCP・DNS・TCP の終端）は別クレート `rust/net`
   （cerulean-net。sans-IO。コアは使わない）。設計は docs/network-design.md。
+- `norflash`: AMD 方式の NOR フラッシュ（WM6 のイメージ。SoC に依らない部品で、バンク0 への
+  配置は smdk2410。`load_image` がフラッシュのイメージを見たときだけ載せる）。
 - `jit`: JIT-to-wasm（段階5。設計は `docs/stage5-design.md`）。ブロックの切り出しと
   IR → wasm の生成（`codegen.rs`）・自作のエンコーダ（`wasm.rs`）・管理（実行回数・
   無効化・上限）。読み込みと呼び出しは web の `JitHost` の実装（ネイティブにはホストが
@@ -335,6 +340,15 @@ mmu → bus::PhysMem、bus → bus::Devices（ボードが MMIO を振り分け�
 - **マイルストーン4 の到達点**: Today（36 億命令）のスナップショットから、タップで
   Start メニュー → Calendar / Settings が起動し、方向キー・Enter・文字入力も効く。
 
+- **WM6（2026-09-30。docs/wm6-design.md）**: archive.org の「Windows Mobile 6 Localized Emulator
+  Images」の JPN（Professional Images の msi）の `PPC_JPN.bin`（`tmp/images/wm6/`）は 96MB の
+  **バンク0 の NOR フラッシュの中身**（B000FF でない。先頭が IPL、+0x30000 からカーネル）。
+  OEMAddressTable に VA 0x88000000 → PA 0（96MB）。IPL・カーネルのドライバは Am29LV800BB
+  （製造元 0x0001・デバイス 0x225B）の ID を AMD の自動選択で確かめる。カーネル側のドライバは
+  フラッシュ上で XIP 実行したまま自動選択に入るので、ID は先頭の数語でだけ返す（推定）。
+  約 30 億命令で日本語の Today。タッチ・キーは WM5 と同じ。Today・設定までフラッシュへの
+  書き込み・消去はない。
+
 ## 今後の計画（2026-09 時点。後回しと判断したもの）
 
 - **ソフトキーの物理キー入力**: kbdmouse の表に VK_F1/F2 が無い。画面のソフトキー
@@ -395,5 +409,7 @@ mmu → bus::PhysMem、bus → bus::Devices（ボードが MMIO を振り分け�
 - INTC の PRIORITY（回転アービトレーション）は固定優先度に簡略化中。
 - BLX 等 ARMv5TE 拡張は未実装（PXA27x 対応時）。
 - LDC/STC・CDP は未実装または未定義例外扱い。
-- 日本語版イメージ: 「Localized Windows Mobile 5.0 Pocket PC Emulator Images」
-  （JPN 版 msi）の入手先が未発見。archive.org には USA 版 SDK のみ確認。
+- 日本語版イメージ: WM5 の JPN 版 msi は Wayback Machine にある（tmp/images/HOWTO_images.md）。
+  WM6 の JPN 版は archive.org（docs/wm6-design.md）。
+- NOR フラッシュ（WM6）: ID を返す範囲・セクタの構成・書き込み／消去の時間は推定
+  （norflash.rs の TODO）。Phone・VGA の BIN、WM6 Standard・6.1/6.5 は未確認。

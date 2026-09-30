@@ -176,6 +176,9 @@ pub struct Mmu {
     /// 計測用
     code_marks: u64,
     code_writes: u64,
+    /// 直接書き込まない物理範囲（フラッシュ。書き込みはバス経由でコマンドになる）。
+    /// マシンの構成で決まる（保存しない）。
+    read_only: Vec<(u32, u32)>,
 }
 
 impl Default for Mmu {
@@ -207,6 +210,7 @@ impl Mmu {
             code_invalidated: vec![],
             code_marks: 0,
             code_writes: 0,
+            read_only: vec![],
         };
         m.update_perm_mask();
         m
@@ -216,6 +220,56 @@ impl Mmu {
     /// ソフト TLB を引くときに使う（jit/codegen.rs）。
     pub(crate) fn jit_perms(&self) -> (u8, u8) {
         (self.perm_r, self.perm_w)
+    }
+
+    /// 物理アドレス base から size バイトを、TLB の直接書き込み（wram）の対象から
+    /// 外す（フラッシュ。マシンの構成で 1 回だけ呼ぶ）。
+    pub fn set_read_only(&mut self, base: u32, size: u32) {
+        self.read_only.push((base, size));
+    }
+
+    fn in_read_only(&self, pa: u32) -> bool {
+        self.read_only.iter().any(|&(b, n)| pa.wrapping_sub(b) < n)
+    }
+
+    /// 物理ページ pa の直接書き込み用の位置（コードページ・フラッシュでは NO_RAM）。
+    fn wram_of(&self, pa: u32, ram: RamOff) -> RamOff {
+        if self.is_code(pa) || self.in_read_only(pa) {
+            NO_RAM
+        } else {
+            ram
+        }
+    }
+
+    /// フラッシュのモードが変わった・装置が中身を書き換えた後に、書き換えた範囲の
+    /// デコード結果を捨て、TLB の RAM の位置を引き直す（フラッシュの ID 読み出し等の
+    /// モードの間は読みも装置を通す）。tag/pa/perm は変えない。
+    #[cold]
+    fn remap(&mut self, phys: &mut impl PhysMem) {
+        while let Some((pa, len)) = phys.take_changed() {
+            let (lo, hi) = (pa >> 12, (pa as u64 + len as u64).div_ceil(0x1000));
+            for pn in lo as u64..hi {
+                let page = (pn as u32) << 12;
+                if self.is_code(page) {
+                    self.code_write(page);
+                }
+            }
+        }
+        for i in 0..TLB_SIZE {
+            let e = self.tlb[i];
+            if e.tag & TLB_VALID == 0 {
+                continue;
+            }
+            let ram = phys.ram_page(e.pa).unwrap_or(NO_RAM);
+            let wram = if ram == NO_RAM {
+                NO_RAM
+            } else {
+                self.wram_of(e.pa, ram)
+            };
+            let e = &mut self.tlb[i];
+            (e.ram, e.wram) = (ram, wram);
+        }
+        self.bump_gen();
     }
 
     /// MMU（CP15 c1 の M ビット）が有効化されているか。
@@ -387,7 +441,11 @@ impl Mmu {
             return;
         };
         let ram = phys.ram_page(pa).unwrap_or(NO_RAM);
-        let wram = if self.is_code(pa) { NO_RAM } else { ram };
+        let wram = if ram == NO_RAM {
+            NO_RAM
+        } else {
+            self.wram_of(pa, ram)
+        };
         let e = &mut self.tlb[((mva >> 12) as usize) & (TLB_SIZE - 1)];
         let watched = e.watched;
         *e = TlbEntry {
@@ -523,7 +581,11 @@ impl Mmu {
                 return Ok(());
             }
             self.check_code_write(e.pa);
-            return Ok(phys.write(e.pa | va & 0xFFF, size, v)?);
+            phys.write(e.pa | va & 0xFFF, size, v)?;
+            if phys.take_remap() {
+                self.remap(phys);
+            }
+            return Ok(());
         }
         self.write_slow(va, size, v, phys)
     }
@@ -538,7 +600,11 @@ impl Mmu {
     ) -> Result<(), MemError> {
         let pa = self.translate_fill(va, true, phys)?;
         self.check_code_write(pa);
-        Ok(phys.write(pa, size, v)?)
+        phys.write(pa, size, v)?;
+        if phys.take_remap() {
+            self.remap(phys);
+        }
+        Ok(())
     }
 
     /// 命令フェッチ。M ビット変更直後、MCR に続く連続した最大 2 命令だけ
@@ -776,8 +842,9 @@ impl Mmu {
         let pn = (page >> 12) as usize;
         self.code_pages[pn >> 6] &= !(1 << (pn & 63));
         self.code_writes += 1;
+        let ro = self.in_read_only(page);
         for e in self.tlb.iter_mut() {
-            if e.tag & TLB_VALID != 0 && e.pa == page {
+            if e.tag & TLB_VALID != 0 && e.pa == page && !ro {
                 e.wram = e.ram;
             }
         }
@@ -809,8 +876,13 @@ impl Mmu {
     pub fn reset_code(&mut self) {
         self.code_pages.iter_mut().for_each(|w| *w = 0);
         self.code_invalidated.clear();
-        for e in self.tlb.iter_mut() {
-            e.wram = e.ram;
+        for i in 0..TLB_SIZE {
+            let e = self.tlb[i];
+            self.tlb[i].wram = if e.ram == NO_RAM || self.in_read_only(e.pa) {
+                NO_RAM
+            } else {
+                e.ram
+            };
         }
         self.bump_gen();
     }
@@ -853,6 +925,7 @@ impl Mmu {
             code_invalidated: _,
             code_marks: _,
             code_writes: _,
+            read_only: _,
         } = self;
         e.u32s(&[*ctrl, *ttb, *dacr, *fsr, *far, *pid]);
         e.bool(*privileged);
@@ -902,6 +975,7 @@ impl Mmu {
             code_invalidated: _,
             code_marks: _,
             code_writes: _,
+            read_only: _,
         } = self;
         [*ctrl, *ttb, *dacr, *fsr, *far, *pid] = d.u32s()?;
         *privileged = d.bool()?;

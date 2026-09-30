@@ -4,6 +4,7 @@
 //! 対応形式:
 //!   - Windows CE BIN 形式（"B000FF" 署名 + レコード列）: Platform Builder の出力
 //!   - .nb0 生形式（ヘッダなしのフラットイメージ）
+//!   - フラッシュのイメージ（WM6 の Device Emulator 用。ヘッダなし、先頭がブートローダ）
 //!   - .words（命令語のテキスト。合成プログラム用で、実イメージの形式ではない）
 //!
 //! コアはファイルに触れないので、読み込みはバイト列から行う（ファイルを読むのは
@@ -25,6 +26,8 @@ pub struct Segment {
 pub enum Format {
     Bin,
     Nb0,
+    /// バンク0 の NOR フラッシュの中身（segs は物理アドレス 0 から 1 つ）
+    Flash,
     Words,
 }
 
@@ -33,6 +36,7 @@ impl fmt::Display for Format {
         f.write_str(match self {
             Format::Bin => "bin",
             Format::Nb0 => "nb0",
+            Format::Flash => "flash",
             Format::Words => "words",
         })
     }
@@ -95,8 +99,11 @@ pub fn load(data: &[u8], name: &str, nb0_base: u32) -> Result<Image, LoadError> 
     if lower.ends_with(".words") {
         return load_words(data);
     }
+    if is_flash(data) {
+        return load_flash(data);
+    }
     err(format!(
-        "{name}: unknown image format (no B000FF magic and not .nb0/.words)"
+        "{name}: unknown image format (no B000FF magic, not a flash image, not .nb0/.words)"
     ))
 }
 
@@ -219,6 +226,42 @@ pub fn load_nb0(data: &[u8], base: u32) -> Result<Image, LoadError> {
         entry: base,
         segs: vec![Segment {
             addr: base,
+            data: data.to_vec(),
+        }],
+        records: vec![],
+    })
+}
+
+/// フラッシュのイメージとして受け付ける大きさの上限（128MB。載せられるかは
+/// マシンの構成が決める）。
+pub const FLASH_MAX: u32 = 0x08000000;
+
+/// フラッシュのイメージか。根拠（2026-09-30。WM6 の JPN 版（Professional Images の msi）の
+/// PPC_JPN.bin）: 96MB ちょうどのヘッダなしのイメージで、先頭が分岐命令（リセット
+/// ベクタ。`b` で 0x1000 へ）、+0x40 に 'CECE' の署名（ブートローダの ROMHDR への
+/// ポインタが続く）。OEMAddressTable が VA 0x88000000 → PA 0 を 96MB として持ち、
+/// リセットで PA 0 から IPL が走る。
+fn is_flash(data: &[u8]) -> bool {
+    let n = data.len();
+    n >= 0x1000
+        && n as u64 <= FLASH_MAX as u64
+        && n.is_multiple_of(0x1000)
+        && data[3] == 0xEA // 条件 AL の B
+        && &data[0x40..0x44] == b"ECEC"
+}
+
+/// フラッシュのイメージを読み込む（物理アドレス 0 に置き、リセットで 0 から実行）。
+pub fn load_flash(data: &[u8]) -> Result<Image, LoadError> {
+    if !is_flash(data) {
+        return err("not a flash image".into());
+    }
+    Ok(Image {
+        format: Format::Flash,
+        start: 0,
+        length: data.len() as u32,
+        entry: 0,
+        segs: vec![Segment {
+            addr: 0,
             data: data.to_vec(),
         }],
         records: vec![],
@@ -465,6 +508,29 @@ mod tests {
     #[test]
     fn nb0_empty() {
         assert!(load_nb0(&[], 0).is_err());
+    }
+
+    #[test]
+    fn flash() {
+        let mut data = vec![0u8; 0x2000];
+        data[0..4].copy_from_slice(&0xEA0003FEu32.to_le_bytes());
+        data[0x40..0x44].copy_from_slice(b"ECEC");
+        let img = load(&data, "PPC_JPN.bin", 0x30000000).unwrap();
+        assert_eq!(img.format, Format::Flash);
+        assert_eq!((img.start, img.length, img.entry), (0, 0x2000, 0));
+        assert_eq!(
+            img.segs,
+            vec![Segment {
+                addr: 0,
+                data: data.clone()
+            }]
+        );
+        // 大きさが 4KB の倍数でない・署名がない・.nb0 の名前なら違う
+        assert!(load(&data[..0x1FFC], "x.bin", 0).is_err());
+        data[0x40] = 0;
+        assert!(load(&data, "x.bin", 0).is_err());
+        data[0x40] = b'E';
+        assert_eq!(load(&data, "x.nb0", 0).unwrap().format, Format::Nb0);
     }
 
     #[test]

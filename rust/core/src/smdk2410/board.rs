@@ -20,6 +20,8 @@ pub enum Dev {
     Bank2,
     /// 0x500F4000〜0x500F5FFF: Device Emulator のフォルダ共有（deshare.rs）
     DeShare,
+    /// バンク0 の NOR フラッシュ（WM6 のイメージ。中身はバスのフラッシュ領域）
+    Flash,
     /// GPIO（値保持スタブ＋外部割り込み。StubId::Gpio のスタブを使う）
     Gpio,
     Uart(u8),
@@ -71,6 +73,8 @@ pub struct Board {
     pub card: Option<Slot>,
     /// Device Emulator のフォルダ共有（「Storage Card」。ソケットを使わない）
     pub deshare: super::deshare::DeShare,
+    /// バンク0 の NOR フラッシュ（WM6 のイメージの構成だけ。中身はバスが持つ）
+    pub flash: Option<crate::norflash::NorFlash>,
     /// 外部割り込みのピンのレベル（ビット n = EINTn。部品の状態から決まる派生情報。
     /// 保存しない）
     pub(crate) eint_levels: u32,
@@ -114,6 +118,7 @@ impl Board {
             pcic: Pd6710::new(),
             card: None,
             deshare: Default::default(),
+            flash: None,
             eint_levels: EINT_IDLE,
             // UART1 がカーネルデバッグシリアル（2026-09 に実測。ブートバナーが
             // UART1 の UTXH に書かれた）。TODO: UART0/2 の出力先はアプリの
@@ -525,6 +530,8 @@ impl Devices<Dev> for Board {
             Dev::OpenBus => 0,
             Dev::Bank2 => self.bank2_read(off, size),
             Dev::DeShare => self.deshare.read((off & !3) + 0x4000) >> ((off & 3) * 8),
+            // 中身の読みはバスが直接行う（Bus::map_flash）
+            Dev::Flash => 0,
             Dev::Gpio => self.stubs[StubId::Gpio as usize].read(off, size),
             Dev::Uart(n) => self.uart[n as usize].read(off, size),
             Dev::Intc => self.intc.read(off, size),
@@ -558,6 +565,11 @@ impl Devices<Dev> for Board {
             Dev::Bank2 => self.bank2_write(off, size, v),
             // TODO: 32 ビット以外の書き込み（ゲストのドライバは 32 ビットだけを使う）
             Dev::DeShare => self.deshare.write((off & !3) + 0x4000, v),
+            Dev::Flash => {
+                if let Some(f) = &mut self.flash {
+                    f.write(off, size, v);
+                }
+            }
             Dev::Gpio => {
                 let gpio = &mut self.stubs[StubId::Gpio as usize];
                 if off & !3 == eint::EINTPEND {
@@ -617,6 +629,15 @@ impl Devices<Dev> for Board {
 
     fn after_write(&mut self, dev: Dev, ram: &mut dyn crate::bus::RamAccess) {
         self.flush_audio(ram);
+        if dev == Dev::Flash
+            && let Some(f) = &mut self.flash
+            && f.pending.is_some()
+        {
+            // フラッシュは PA 0 から（smdk2410 の map）
+            if let Some((off, len)) = ram.ram_slice_mut(0, f.size()).and_then(|d| f.apply(d)) {
+                ram.changed(off, len);
+            }
+        }
         if dev == Dev::DeShare {
             // 新しい項目の日時はゲストの RTC の今の時刻（決定論的）
             self.sync_time();
@@ -630,6 +651,17 @@ impl Devices<Dev> for Board {
                 t.second as i64,
             );
             self.deshare.after_write(ram, now);
+        }
+    }
+
+    fn flash_array(&self, dev: Dev) -> bool {
+        dev != Dev::Flash || self.flash.as_ref().is_none_or(|f| f.array())
+    }
+
+    fn flash_read(&mut self, dev: Dev, off: u32, size: u32) -> Option<u32> {
+        match dev {
+            Dev::Flash => self.flash.as_ref()?.id_read(off, size),
+            _ => None,
         }
     }
 

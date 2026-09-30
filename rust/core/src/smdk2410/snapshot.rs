@@ -7,6 +7,9 @@
 //! cpu          レジスタ・バンク・PSR
 //! mmu          CP15 とソフト TLB
 //! ram          SDRAM の中身（128MB）
+//! flash        NOR フラッシュのコマンドの状態（machine の版数 6 から。フラッシュを載せた
+//!              構成だけ。大きさは machine チャンク）
+//! flash:data   NOR フラッシュの中身
 //! kbd          SPI1 のキーボード用マイコン（バス外のボード部品）
 //! intc timer lcd rtc adc spi uart0 uart1 uart2 dma iis   周辺機器（iis は machine の版数 5 から）
 //! stub:<名前>  値保持スタブ（board.rs の StubId の順）
@@ -37,8 +40,10 @@ use crate::s3c2410::eint;
 /// 3: イーサネットカード（ne2000 チャンク）を足した。2026-09-30。
 /// 4: Device Emulator のフォルダ共有（deshare チャンク）を足した。2026-09-30。
 /// 5: DMA と IIS を実装した（dma チャンクの版数 2・iis チャンク。stub:iis をなくした）。
-/// 2026-09-30）。
-const MACHINE_VERSION: u16 = 5;
+/// 2026-09-30。
+/// 6: WM6 のイメージ用の NOR フラッシュ（machine チャンクにフラッシュの大きさ、
+/// flash・flash:data チャンク）を足した。2026-09-30）。
+const MACHINE_VERSION: u16 = 6;
 use super::{Machine, SDRAM_BASE, SDRAM_SIZE};
 
 const STUB_NAMES: [&str; NUM_STUBS] = [
@@ -90,6 +95,7 @@ impl Machine {
             pcic,
             card,
             deshare,
+            flash,
             eint_levels: _,
             uart,
             dma,
@@ -109,11 +115,18 @@ impl Machine {
             e.u64(*steps);
             e.u32(*tick_acc);
             e.u32(*entry_pa);
+            e.u32(flash.as_ref().map_or(0, |f| f.size()));
         })?;
         s.chunk("cpu", crate::arm::Cpu::STATE_VERSION, |e| cpu.save_state(e))?;
         s.chunk("mmu", crate::mmu::Mmu::STATE_VERSION, |e| mmu.save_state(e))?;
         let (ram, _) = bus.ram(SDRAM_BASE).expect("SDRAM is mapped");
         s.raw_chunk("ram", 1, ram)?;
+        if let Some(f) = flash {
+            debug_assert!(f.pending.is_none());
+            s.chunk("flash", 1, |e| e.u8(f.state_byte()))?;
+            let (data, _) = bus.ram(0).expect("flash is mapped");
+            s.raw_chunk("flash:data", 1, &data[..f.size() as usize])?;
+        }
         s.chunk("kbd", 1, |e| {
             let super::KbdMcu { out, log: _ } = kbd;
             e.bytes(out.make_contiguous());
@@ -179,7 +192,12 @@ impl Machine {
         }
         let mut d = c.decoder(version)?;
         let (steps, tick_acc, entry_pa) = (d.u64()?, d.u32()?, d.u32()?);
+        let flash_size = if version >= 6 { d.u32()? } else { 0 };
         d.finish()?;
+        if flash_size > super::FLASH_MAX || !flash_size.is_multiple_of(0x1000) {
+            return format_err("machine: bad flash size");
+        }
+        self.reconfigure_flash(flash_size);
         if tick_acc >= 8 {
             return format_err("machine: bad tick fraction");
         }
@@ -192,6 +210,21 @@ impl Machine {
         debug_assert_eq!(ram.len(), SDRAM_SIZE as usize);
         if s.expect_raw_into("ram", ram)? != 1 {
             return format_err("ram: bad version");
+        }
+        if flash_size > 0 {
+            let c = s.expect("flash")?;
+            let mut d = c.decoder(1)?;
+            let st = d.u8()?;
+            d.finish()?;
+            let super::Sys { bus, board, .. } = &mut self.sys;
+            let f = board.flash.as_mut().expect("flash is configured");
+            f.set_state_byte(st).map_err(Error::Format)?;
+            let (data, _) = bus.ram_mut(0).expect("flash is mapped");
+            if s.expect_raw_into("flash:data", data)? != 1 {
+                return format_err("flash:data: bad version");
+            }
+            bus.sync_flash(board);
+            bus.take_remap();
         }
         {
             let super::Sys {

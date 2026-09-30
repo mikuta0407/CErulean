@@ -3,7 +3,8 @@
 Windows Mobile 5.0（Windows CE 5.0 ベース）の LLE エミュレータ。Rust 製（2026-09 に
 Go から移行）。
 
-Microsoft Device Emulator 向けの WM5 エミュレータイメージ（英語版・日本語版）を、
+Microsoft Device Emulator 向けの WM5 エミュレータイメージ（英語版・日本語版）と
+WM6 の日本語版のイメージ（2026-09-30 から）を、
 Samsung S3C2410（ARM920T）構成のマシンで動かす。最初の出荷先はブラウザ（wasm。PC と
 iOS/iPadOS の Safari）で、将来はネイティブ（iOS/Android/PC）と JIT にも対応する予定。
 将来的には PXA27x 系の実機構成の追加も予定。
@@ -110,6 +111,23 @@ rm wm5sdk.msi  # 抽出後は不要
 
 # 確認（B000FF 形式、start=80070000 / entry=80076CF0 / 99 レコードのはず）
 cd ../.. && rust/target/release/cerulean info tmp/images/PPC_USA.bin
+```
+
+Windows Mobile 6 Professional の日本語版（「Windows Mobile 6 Localized Emulator Images」の JPN。
+228MB）は archive.org にある。中の `PPC_JPN.bin`（96MB のフラッシュのイメージ。B000FF 形式では
+ない）をそのまま渡す（`cerulean run tmp/images/wm6/PPC_JPN.bin`・ブラウザ版で選ぶ）。
+設計・確認済みの事実は `docs/wm6-design.md`。
+
+```sh
+mkdir -p tmp/images/wm6 && cd tmp/images/wm6
+curl -L -o wm6pro_jpn.msi \
+  "https://archive.org/download/WM6LocalizedEmulatorImages/Windows%20Mobile%206%20Professional%20Images%20(JPN).msi"
+# .msi 内の CAB の CGen_PocketPC_0411_PPC_JPN.BIN が QVGA・電話なし（WM6 Classic）のイメージ
+# （cabextract での抽出は未確認。2026-09-30 は標準ライブラリだけの Python で CAB を展開した）
+cabextract -F 'CGen_PocketPC_0411_PPC_JPN.BIN' wm6pro_jpn.msi
+mv CGen_PocketPC_0411_PPC_JPN.BIN PPC_JPN.bin
+# 確認（format: flash、length 06000000。SHA-256 は docs/wm6-design.md）
+cd ../../.. && rust/target/release/cerulean info tmp/images/wm6/PPC_JPN.bin
 ```
 
 ## ブラウザ版（段階3・作業中）

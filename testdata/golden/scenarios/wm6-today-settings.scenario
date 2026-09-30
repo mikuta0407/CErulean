@@ -1,0 +1,8 @@
+# WM6 の JPN 版（Professional Images の msi の PPC_JPN.bin。フラッシュのイメージ）: リセットから IPL・カーネル・Today
+# （約 30 億命令）の後、Start → 下キー 2 回 → 「設定」をタップ。
+image=$CERULEAN_IMAGE_WM6
+image_sha256=14270634549027eb83fb2b9ecd5e0fe23935a811f76b402a9ebd8bb5e33a1ea7
+rtc=2007-01-02T12:00:00
+max_steps=3900000000
+script=wm6-today-settings.script
+checkpoints=1200000000 2400000000 3000000000 3311060000

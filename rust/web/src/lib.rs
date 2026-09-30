@@ -272,7 +272,7 @@ impl Emu {
     /// 全状態を保存する（無圧縮。命令境界で呼ぶ）。
     #[wasm_bindgen(js_name = saveSnapshot)]
     pub fn save_snapshot(&mut self, image_id: &str) -> Result<Vec<u8>, JsError> {
-        let mut buf = Vec::with_capacity(135 << 20);
+        let mut buf = Vec::with_capacity((135 << 20) + self.m.flash_size() as usize);
         self.m
             .save_snapshot(&mut buf, image_id)
             .map_err(|e| JsError::new(&e.to_string()))?;

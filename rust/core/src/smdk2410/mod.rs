@@ -22,7 +22,7 @@ use crate::arm::{
 use crate::bus::{Bus, BusPhys, RamOff};
 use crate::cpu::{Abort, MemError};
 use crate::jit::{Action, Jit, JitHost};
-use crate::loader::Image;
+use crate::loader::{Format, Image};
 use crate::mmu::Mmu;
 use crate::pccard::Slot;
 use crate::s3c2410::{Frame, FrameError, LcdConfig};
@@ -41,6 +41,9 @@ pub use kbd::{KEY_SCAN_CODES, KbdMcu, scan_code};
 //   - 0x50000000: UART（UART0/1/2 が 0x4000 間隔）
 pub const SDRAM_BASE: u32 = 0x30000000;
 pub const SDRAM_SIZE: u32 = 128 * 1024 * 1024;
+/// バンク0 の NOR フラッシュの最大（バンクの窓 128MB）。WM6 の Device Emulator 用
+/// イメージは 96MB（OEMAddressTable が VA 0x88000000 → PA 0 を 96MB）。
+pub const FLASH_MAX: u32 = 0x08000000;
 const UART_BASE: u32 = 0x50000000;
 
 /// WinCE カーネルの仮想アドレスマッピングのうち、ロード時の変換に使う部分。
@@ -339,14 +342,27 @@ pub struct Machine {
 impl Machine {
     /// SMDK2410 相当のマシンを組み立てる。
     pub fn new() -> Machine {
+        Machine::with_flash(0)
+    }
+
+    /// バンク0 に flash_size バイトの NOR フラッシュを載せたマシン（WM6 のイメージ用。
+    /// 0 なら載せない）。
+    pub(crate) fn with_flash(flash_size: u32) -> Machine {
+        debug_assert!(flash_size <= FLASH_MAX && flash_size.is_multiple_of(0x1000));
         let mut b = Bus::new();
-        map(&mut b).expect("smdk2410: fixed memory map must be valid");
+        map(&mut b, flash_size).expect("smdk2410: fixed memory map must be valid");
+        let mut mmu = Mmu::new();
+        let mut board = Board::new();
+        if flash_size > 0 {
+            mmu.set_read_only(0, flash_size);
+            board.flash = Some(crate::norflash::NorFlash::new(flash_size));
+        }
         Machine {
             cpu: Cpu::new(),
             sys: Sys {
-                mmu: Mmu::new(),
+                mmu,
                 bus: b,
-                board: Board::new(),
+                board,
                 code: CodeCache::new(),
                 jit: Jit::new(),
             },
@@ -357,6 +373,27 @@ impl Machine {
         }
     }
 
+    /// 載せている NOR フラッシュの大きさ（なければ 0）。
+    pub fn flash_size(&self) -> u32 {
+        self.sys.board.flash.as_ref().map_or(0, |f| f.size())
+    }
+
+    /// フラッシュの構成を flash_size に作り直す（イメージ・スナップショットの読み込み用。
+    /// バス・MMU・フラッシュは初期状態になる。監視は引き継ぐ）。
+    pub(crate) fn reconfigure_flash(&mut self, flash_size: u32) {
+        if self.flash_size() == flash_size {
+            return;
+        }
+        let fresh = Machine::with_flash(flash_size);
+        let mut bus = fresh.sys.bus;
+        for &(lo, hi) in self.sys.bus.watch_ranges() {
+            bus.add_watch(lo, hi);
+        }
+        self.sys.bus = bus;
+        self.sys.mmu = fresh.sys.mmu;
+        self.sys.board.flash = fresh.sys.board.flash;
+    }
+
     pub fn name(&self) -> &'static str {
         "smdk2410"
     }
@@ -365,6 +402,9 @@ impl Machine {
     /// 実行される状態にする。イメージ内アドレス（CE 仮想アドレス）から
     /// 物理アドレスへの変換はここで行う。
     pub fn load_image(&mut self, img: &Image) -> Result<(), Error> {
+        if img.format == Format::Flash {
+            return self.load_flash(img);
+        }
         for seg in &img.segs {
             let pa = va_to_pa(seg.addr)?;
             let fits = self.sys.bus.ram_mut(pa).and_then(|(ram, off)| {
@@ -381,6 +421,26 @@ impl Machine {
             }
         }
         self.entry_pa = va_to_pa(img.entry).map_err(|e| Error(format!("entry point: {}", e.0)))?;
+        Ok(())
+    }
+
+    /// フラッシュのイメージ（WM6）: バンク0 に NOR フラッシュを載せて中身を置き、
+    /// リセットで PA 0（IPL）から実行する。
+    fn load_flash(&mut self, img: &Image) -> Result<(), Error> {
+        let [seg] = img.segs.as_slice() else {
+            return Err(Error("flash image must have one segment".into()));
+        };
+        let len = seg.data.len();
+        if seg.addr != 0 || len == 0 || !len.is_multiple_of(0x1000) || len as u64 > FLASH_MAX as u64
+        {
+            return Err(Error(format!(
+                "flash image of {len} bytes does not fit in bank 0"
+            )));
+        }
+        self.reconfigure_flash(len as u32);
+        let (flash, _) = self.sys.bus.ram_mut(0).expect("flash is mapped");
+        flash.copy_from_slice(&seg.data);
+        self.entry_pa = 0;
         Ok(())
     }
 
@@ -730,8 +790,11 @@ impl Default for Machine {
 }
 
 /// 物理メモリマップを登録する（Go の New のバス構成と同じアドレス・大きさ）。
-fn map(b: &mut Bus<Dev>) -> Result<(), crate::bus::MapError> {
+fn map(b: &mut Bus<Dev>, flash_size: u32) -> Result<(), crate::bus::MapError> {
     b.map_ram("sdram", SDRAM_BASE, SDRAM_SIZE)?;
+    if flash_size > 0 {
+        b.map_flash("flash", 0, flash_size, Dev::Flash)?;
+    }
     // バンク0〜1・3〜5: ROM/SROM 未実装。フラッシュドライバ（amdnord.dll）が NOR フラッシュの
     // 自動選択（0xAAAA/0x5554 の書き込み）を PA 0 に対して行うので、オープンバスで空振りさせる
     // （Device Emulator 構成はフラッシュではなく RAMFMD を使う）。
@@ -739,7 +802,12 @@ fn map(b: &mut Bus<Dev>) -> Result<(), crate::bus::MapError> {
     // 消去を始め、その番地は 16MB で折り返す。実在のチップの構成と合わないので載せない
     // （docs/storage-persistence.md）。
     // TODO: バンク3 の Ethernet（CS8900 相当）等が必要になったら分割する。
-    b.map_mmio("bank0-1-empty", 0, 0x10000000, Dev::OpenBus)?;
+    b.map_mmio(
+        "bank0-1-empty",
+        flash_size,
+        0x10000000 - flash_size,
+        Dev::OpenBus,
+    )?;
     // バンク2: PC カードコントローラ（CL-PD6710 互換。board.rs の配線のコメント）
     b.map_mmio("bank2-pcic", 0x10000000, 0x08000000, Dev::Bank2)?;
     b.map_mmio(

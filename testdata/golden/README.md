@@ -67,7 +67,7 @@ testdata/golden/
 | `stop` | オブジェクト | stop のときだけ。`kind` と種類ごとの値（下記） |
 | `cpu` | 文字列 | CPU 状態のダンプ（16 進小文字） |
 | `cpu_sha256` | 文字列 | ダンプの SHA-256 |
-| `ram_sha256` | 文字列 | SDRAM 全体（PA 0x30000000 から 128MB）の SHA-256 |
+| `ram_sha256` | 文字列 | SDRAM 全体（PA 0x30000000 から 128MB）の SHA-256。フラッシュのイメージ（WM6）でもフラッシュの中身は含めない（ゲストが書き換えれば CPU か RAM に現れる） |
 | `uart1_sha256` | 文字列 | リセットから UART1 が送信したバイト列の SHA-256 |
 | `uart1_bytes` | 数 | そのバイト数 |
 | `screen_sha256` | 文字列 | LCD の変換後の RGBA 画素列（左上から行順、1 画素 R,G,B,A の 4 バイト、行の詰め物なし）の SHA-256。表示が無効なら `""` |
@@ -115,7 +115,7 @@ N の倍数でなくても行を書く）。時点の定義は上と同じ。2 �
 
 | キー | 内容 |
 |---|---|
-| `image` | イメージ。`$CERULEAN_IMAGE`（PPC_USA.bin）か、`synthetic/` の合成プログラム |
+| `image` | イメージ。`$CERULEAN_IMAGE`（PPC_USA.bin）、`$CERULEAN_IMAGE_WM6`（WM6 の JPN 版（Professional Images の msi）の PPC_JPN.bin。フラッシュのイメージ）か、`synthetic/` の合成プログラム |
 | `image_sha256` | イメージの SHA-256（取り違えの検出用。合成プログラムでは省略） |
 | `rtc` | RTC の初期時刻（年月日時分秒。タイムゾーンは関係しない） |
 | `max_steps` | 停止する命令数（stop は `max-steps` になる） |
@@ -134,3 +134,4 @@ N の倍数でなくても行を書く）。時点の定義は上と同じ。2 �
 | `boot-today` | リセットから 36 億命令（Today 完成） | 長時間の一致、アイドル区間 |
 | `today-calendar` | Today の後に Start → Calendar → 右キー | タッチ・キー・アプリ起動 |
 | `taps-5` | Today の後にタップ 5 回（Start → アプリ起動など） | 記録→再生、ADC 待ちのスキップ |
+| `wm6-today-settings` | WM6（JPN）: リセットから Today（30 億命令）→ Start → 下キー 2 回 → 設定 | フラッシュのイメージ（IPL・NOR フラッシュのコマンド・XIP）、WM6 の入力 |

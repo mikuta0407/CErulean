@@ -29,18 +29,35 @@ pub trait Devices<D> {
     /// デバイスへの書き込みの直後に呼ぶ（書き込みを合図に RAM を読み書きする装置用。
     /// 次の命令より前に済む。既定は何もしない）。
     fn after_write(&mut self, _dev: D, _ram: &mut dyn RamAccess) {}
+    /// フラッシュ領域（[`Bus::map_flash`]）の装置が読み出し配列のモード（読みが
+    /// 中身そのもの）か。既定は true。false の間は領域の先頭の 4KB ページの読みを
+    /// flash_read に問う（ID 等を返すのはそのページの中だけ。他のページは直接読む）。
+    fn flash_array(&self, _dev: D) -> bool {
+        true
+    }
+    /// 読み出し配列でないモードの、領域の先頭ページの読み。None なら中身を読む。
+    fn flash_read(&mut self, _dev: D, _off: u32, _size: u32) -> Option<u32> {
+        None
+    }
 }
 
 /// 装置から RAM を読み書きする口（[`Devices::after_write`] に渡す）。
 pub trait RamAccess {
     /// 物理アドレス pa から len バイトの RAM（全部が 1 つの RAM 領域に入るときだけ）。
     fn ram_slice_mut(&mut self, pa: u32, len: u32) -> Option<&mut [u8]>;
+    /// 装置が物理アドレス pa から len バイトを書き換えたことを知らせる（MMU がその範囲の
+    /// デコード結果を捨てる。今はフラッシュの消去・書き込みだけが使う）。
+    fn changed(&mut self, _pa: u32, _len: u32) {}
 }
 
 impl<D: Copy> RamAccess for Bus<D> {
     fn ram_slice_mut(&mut self, pa: u32, len: u32) -> Option<&mut [u8]> {
         let (ram, off) = self.ram_mut(pa)?;
         ram.get_mut(off as usize..off as usize + len as usize)
+    }
+    fn changed(&mut self, pa: u32, len: u32) {
+        self.changed.push((pa, len));
+        self.remap = true;
     }
 }
 
@@ -96,6 +113,16 @@ enum Kind<D> {
         mask: u32,
     },
     Mmio(D),
+    /// フラッシュ: 中身はアリーナの `off` から `len` バイト。読みは RAM と同じく
+    /// 直接行い、書き込みは常に装置 `dev` に渡す（コマンド。書き換えは装置が
+    /// after_write で行う）。読み出し配列でないモード（`array` が false）の間は、
+    /// 先頭の 4KB ページの読みだけ装置に問う（Devices::flash_read）。
+    Flash {
+        off: RamOff,
+        len: u32,
+        dev: D,
+        array: bool,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -128,6 +155,12 @@ pub struct Bus<D> {
     has_watch: bool,
     /// 監視範囲へのアクセスの記録（呼び出し側が取り出して空にする）。
     pub watch_log: Vec<WatchEvent>,
+    /// フラッシュのモードが変わり ram_page の答えが変わったか、装置が中身を
+    /// 書き換えた（MMU が TLB の RAM の位置を引き直し、changed のデコード結果を捨てる。
+    /// take_remap で取り出す）。
+    remap: bool,
+    /// 装置が書き換えた物理範囲（take_changed で取り出す）
+    changed: Vec<(u32, u32)>,
 }
 
 impl<D: Copy> Default for Bus<D> {
@@ -145,6 +178,8 @@ impl<D: Copy> Bus<D> {
             watches: vec![],
             has_watch: false,
             watch_log: vec![],
+            remap: false,
+            changed: vec![],
         }
     }
 
@@ -191,6 +226,53 @@ impl<D: Copy> Bus<D> {
                 mask: size - 1,
             },
         })
+    }
+
+    /// base から size バイトのフラッシュを確保して配置する（中身の読みは直接、
+    /// 書き込みはデバイス dev へのコマンド。Kind::Flash）。
+    pub fn map_flash(
+        &mut self,
+        name: &'static str,
+        base: u32,
+        size: u32,
+        dev: D,
+    ) -> Result<(), MapError> {
+        let off = self.alloc(name, size)?;
+        self.add(Region {
+            base,
+            size,
+            name,
+            kind: Kind::Flash {
+                off,
+                len: size,
+                dev,
+                array: true,
+            },
+        })
+    }
+
+    /// フラッシュ領域の読み出し配列のモードを装置の状態に合わせる（書き込みの後と
+    /// スナップショットの復元の後）。変わったら remap を立てる。
+    pub fn sync_flash(&mut self, devs: &impl Devices<D>) {
+        for r in self.regions.iter_mut() {
+            if let Kind::Flash { dev, array, .. } = &mut r.kind {
+                let now = devs.flash_array(*dev);
+                if *array != now {
+                    *array = now;
+                    self.remap = true;
+                }
+            }
+        }
+    }
+
+    /// フラッシュのモードが変わったか、装置が中身を書き換えたか（取り出すと下ろす）。
+    pub fn take_remap(&mut self) -> bool {
+        std::mem::take(&mut self.remap)
+    }
+
+    /// 装置が書き換えた物理範囲を 1 つ取り出す。
+    pub fn take_changed(&mut self) -> Option<(u32, u32)> {
+        self.changed.pop()
     }
 
     /// base から size バイトを MMIO としてデバイス dev に接続する。
@@ -262,6 +344,11 @@ impl<D: Copy> Bus<D> {
         self.has_watch = true;
     }
 
+    /// 監視範囲の一覧（構成を作り直すときに引き継ぐ）。
+    pub fn watch_ranges(&self) -> &[(u32, u32)] {
+        &self.watches
+    }
+
     /// 監視が有効か。
     pub fn watching(&self) -> bool {
         self.has_watch
@@ -303,8 +390,12 @@ impl<D: Copy> Bus<D> {
             return None;
         }
         let r = self.find(pa)?;
-        let Kind::Ram { off, len, mask } = r.kind else {
-            return None;
+        let (off, len, mask) = match r.kind {
+            Kind::Ram { off, len, mask } => (off, len, mask),
+            Kind::Flash {
+                off, len, array, ..
+            } if array || pa - r.base >= 1 << PAGE_SHIFT => (off, len, 0),
+            _ => return None,
         };
         let page = pa & !((1 << PAGE_SHIFT) - 1);
         if page < r.base || page as u64 + (1 << PAGE_SHIFT) > r.base as u64 + r.size as u64 {
@@ -351,6 +442,9 @@ impl<D: Copy> Bus<D> {
                     o &= mask;
                 }
                 Some((off, len, o))
+            }
+            Kind::Flash { off, len, .. } if addr >= r.base && addr - r.base < r.size => {
+                Some((off, len, addr - r.base))
             }
             _ => None,
         })
@@ -400,6 +494,22 @@ impl<D: Copy> Bus<D> {
                 })
             }
             Kind::Mmio(d) => Ok(devs.read(d, o, size)),
+            Kind::Flash {
+                off, dev, array, ..
+            } => {
+                if !array
+                    && o < 1 << PAGE_SHIFT
+                    && let Some(v) = devs.flash_read(dev, o, size)
+                {
+                    return Ok(v);
+                }
+                let (a, m) = ((off + o) as usize, &self.arena);
+                Ok(match size {
+                    1 => m[a] as u32,
+                    2 => u16::from_le_bytes([m[a], m[a + 1]]) as u32,
+                    _ => u32::from_le_bytes([m[a], m[a + 1], m[a + 2], m[a + 3]]),
+                })
+            }
         }
     }
 
@@ -439,6 +549,12 @@ impl<D: Copy> Bus<D> {
                 devs.after_write(d, self);
                 Ok(())
             }
+            Kind::Flash { dev, .. } => {
+                devs.write(dev, o, size, v & size_mask(size));
+                devs.after_write(dev, self);
+                self.sync_flash(devs);
+                Ok(())
+            }
         }
     }
 
@@ -456,6 +572,9 @@ impl<D: Copy> Bus<D> {
         }
         match r.kind {
             Kind::Ram { .. } => self.read1(addr, 4, devs).ok(),
+            // 読み出し配列でない間の先頭ページは副作用がないが、アイドルの対象にしない
+            Kind::Flash { array, .. } => (array || addr - r.base >= 1 << PAGE_SHIFT)
+                .then(|| self.read1(addr, 4, devs).ok())?,
             Kind::Mmio(d) => devs.stable_read(d, addr - r.base, 4),
         }
     }
@@ -464,7 +583,7 @@ impl<D: Copy> Bus<D> {
     pub fn mmio_regions(&self) -> impl Iterator<Item = (&'static str, u32, D)> + '_ {
         self.regions.iter().filter_map(|r| match r.kind {
             Kind::Mmio(d) => Some((r.name, r.base, d)),
-            Kind::Ram { .. } => None,
+            Kind::Ram { .. } | Kind::Flash { .. } => None,
         })
     }
 }
@@ -493,6 +612,10 @@ pub trait PhysMem {
     fn arena_mut(&mut self) -> &mut [u8];
     /// [`Bus::probe32`]。
     fn probe32(&mut self, pa: u32) -> Option<u32>;
+    /// [`Bus::take_remap`]。
+    fn take_remap(&mut self) -> bool;
+    /// [`Bus::take_changed`]。
+    fn take_changed(&mut self) -> Option<(u32, u32)>;
 }
 
 /// バスとデバイス群の組を [`PhysMem`] として使う。
@@ -513,6 +636,13 @@ impl<D: Copy, V: Devices<D>> PhysMem for BusPhys<'_, D, V> {
     #[inline(always)]
     fn ram_page(&self, pa: u32) -> Option<RamOff> {
         self.bus.ram_page(pa)
+    }
+    #[inline(always)]
+    fn take_remap(&mut self) -> bool {
+        self.bus.take_remap()
+    }
+    fn take_changed(&mut self) -> Option<(u32, u32)> {
+        self.bus.take_changed()
     }
     #[inline(always)]
     fn arena(&self) -> &[u8] {

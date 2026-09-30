@@ -684,7 +684,7 @@ fn rewrite_as_v1(buf: &[u8]) -> Vec<u8> {
     rewrite_as(buf, 1)
 }
 
-/// スナップショットを machine の版数 v（4 以下）の形に書き直す。DMA と IIS は値保持
+/// スナップショット（フラッシュなし）を machine の版数 v（4 以下）の形に書き直す。DMA と IIS は値保持
 /// スタブの形（書かれたレジスタ）にし、版数 1 なら pcic 以降を除く。
 fn rewrite_as(buf: &[u8], v: u16) -> Vec<u8> {
     use crate::s3c2410::{Dma, Iis, Stub};
@@ -700,7 +700,9 @@ fn rewrite_as(buf: &[u8], v: u16) -> Vec<u8> {
     while let Some(c) = rd.next_chunk().unwrap() {
         match c.name.as_str() {
             "pcic" if v == 1 => break,
-            "machine" => w.raw_chunk(&c.name, v, &c.body).unwrap(),
+            // 版数 5 までの machine は命令数・端数・エントリの 16 バイト（6 でフラッシュの
+            // 大きさを足した）
+            "machine" => w.raw_chunk(&c.name, v, &c.body[..16]).unwrap(),
             "dma" => {
                 let mut dma = Dma::new();
                 let mut d = c.decoder(Dma::STATE_VERSION).unwrap();
@@ -785,4 +787,93 @@ fn snapshot_version_4_converts_dma_and_iis() {
     let ints = b.dma.service_iis_tx(&mut b.iis);
     assert_eq!(ints, 0);
     assert_eq!(b.dma.read(0x94, 4), 1 << 20 | (0x400 - 32));
+}
+
+/// フラッシュのイメージ（WM6）の構成: バンク0 に NOR フラッシュが載り、MMU 越しの
+/// 読みは中身を直接、書き込みは AMD 方式のコマンドになる。ID 読み出しの間も先頭の
+/// 数語以外は中身が読める（XIP のドライバがフラッシュ上で動き続ける）。
+#[test]
+fn flash_through_the_mmu() {
+    let mut data = vec![0u8; 0x30000];
+    data[0..4].copy_from_slice(&0xEA0003FEu32.to_le_bytes());
+    data[0x40..0x44].copy_from_slice(b"ECEC");
+    data[0x1000..0x1004].copy_from_slice(&0x1234_5678u32.to_le_bytes());
+    data[0x2000..0x2002].copy_from_slice(&0xFF0Fu16.to_le_bytes());
+    data[0x10000..0x10004].copy_from_slice(&0xE1A0_0000u32.to_le_bytes());
+    let img = crate::loader::load(&data, "PPC_JPN.bin", 0).unwrap();
+    let mut m = Machine::new();
+    m.load_image(&img).unwrap();
+    m.reset();
+    assert_eq!((m.flash_size(), m.cpu.pc()), (0x30000, 0));
+    assert_eq!(bus_r(&mut m, 0x30000, 4), 0, "open bus after the flash");
+
+    // 変換表（TTB = PA 0x30004000）: VA 0〜 → フラッシュ、VA 0x30000000〜 → SDRAM
+    let ttb = 0x3000_4000;
+    for (i, pa) in [(0u32, 0u32), (0x300, 0x3000_0000)] {
+        bus_w(&mut m, ttb + i * 4, 4, pa | 0xC02); // セクション・AP=11・ドメイン 0
+    }
+    let s = &mut m.sys;
+    s.cp15_write(0, 2, 0, 0, ttb);
+    s.cp15_write(0, 3, 0, 0, 3); // ドメイン 0 はマネージャ
+    s.cp15_write(0, 1, 0, 0, 1); // M
+    assert_eq!(s.read(0x1000, 4).unwrap(), 0x1234_5678);
+    assert!(s.ram_run(0x1000, 4, false).is_some(), "read directly");
+    assert!(
+        s.ram_run(0x1000, 4, true).is_none(),
+        "never written directly"
+    );
+
+    let unlock = |s: &mut Sys, cmd: u32| {
+        s.write(0xAAAA, 2, 0xAAAA).unwrap();
+        s.write(0x5554, 2, 0x5555).unwrap();
+        s.write(0xAAAA, 2, cmd).unwrap();
+    };
+    // 自動選択: 先頭の語だけ ID、他は中身
+    unlock(s, 0x9090);
+    assert_eq!(s.read(0, 2).unwrap(), 0x0001);
+    assert_eq!(s.read(2, 2).unwrap(), 0x225B);
+    assert_eq!(s.read(0x40, 4).unwrap(), u32::from_le_bytes(*b"ECEC"));
+    assert_eq!(s.read(0x1000, 4).unwrap(), 0x1234_5678);
+    s.write(0, 2, 0xF0F0).unwrap();
+    assert_eq!(s.read(0, 4).unwrap(), 0xEA0003FE);
+
+    // 書き込みは 1→0 だけ
+    unlock(s, 0xA0A0);
+    s.write(0x2000, 2, 0x0FFF).unwrap();
+    assert_eq!(s.read(0x2000, 2).unwrap(), 0x0F0F);
+
+    // セクタの消去はデコード済みのページを捨てさせる
+    assert_eq!(s.read(0x10000, 4).unwrap(), 0xE1A0_0000);
+    s.mmu.mark_code(0x10000);
+    unlock(s, 0x8080);
+    s.write(0xAAAA, 2, 0xAAAA).unwrap();
+    s.write(0x5554, 2, 0x5555).unwrap();
+    s.write(0x10004, 2, 0x3030).unwrap();
+    assert_eq!(s.read(0x10000, 4).unwrap(), 0xFFFF_FFFF);
+    assert_eq!(s.read(0x1FFFC, 4).unwrap(), 0xFFFF_FFFF);
+    assert_eq!(s.read(0x2000, 2).unwrap(), 0x0F0F, "other sector kept");
+    let mut inv = vec![];
+    while let Some(p) = s.mmu.take_code_invalidated() {
+        inv.push(p);
+    }
+    assert!(inv.contains(&0x10000), "{inv:X?}");
+
+    // スナップショット（ID 読み出しの途中）: フラッシュごと戻る
+    unlock(s, 0x9090);
+    let mut buf = vec![];
+    m.save_snapshot(&mut buf, "id").unwrap();
+    let mut r = Machine::new();
+    r.load_snapshot(&buf[..]).unwrap();
+    assert_eq!(r.flash_size(), 0x30000);
+    assert_eq!(r.sys.read(2, 2).unwrap(), 0x225B, "still in autoselect");
+    assert_eq!(r.sys.read(0x2000, 2).unwrap(), 0x0F0F);
+    let mut again = vec![];
+    r.save_snapshot(&mut again, "id").unwrap();
+    assert!(buf == again, "save after load must give the same bytes");
+    // フラッシュのないスナップショットを読めば、フラッシュのない構成に戻る
+    let mut plain = vec![];
+    Machine::new().save_snapshot(&mut plain, "id").unwrap();
+    r.load_snapshot(&plain[..]).unwrap();
+    assert_eq!(r.flash_size(), 0);
+    assert_eq!(bus_r(&mut r, 0, 4), 0, "open bus");
 }

@@ -8,6 +8,7 @@
 # GOLDEN_RUNNER=wasm なら web クレートの wasm を Node で走らせる（run-wasm.mjs）。
 #
 # 実イメージのシナリオは環境変数 CERULEAN_IMAGE（PPC_USA.bin のパス）が必要。
+# WM6 のシナリオ（wm6-*）は CERULEAN_IMAGE_WM6（WM6 の JPN 版（Professional Images の msi）の PPC_JPN.bin）。
 # UART1 の出力は <出力>.uart に、CLI の標準エラーは <出力>.err に書く。
 set -euo pipefail
 if [ $# -lt 2 ]; then
@@ -40,6 +41,12 @@ if [ "$image" = '$CERULEAN_IMAGE' ]; then
     exit 3
   fi
   image=$CERULEAN_IMAGE
+elif [ "$image" = '$CERULEAN_IMAGE_WM6' ]; then
+  if [ -z "${CERULEAN_IMAGE_WM6:-}" ]; then
+    echo "run.sh: $name needs CERULEAN_IMAGE_WM6 (path to the WM6 Professional JPN PPC_JPN.bin)" >&2
+    exit 3
+  fi
+  image=$CERULEAN_IMAGE_WM6
 else
   image=$gdir/$image
 fi

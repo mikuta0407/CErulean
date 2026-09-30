@@ -1,0 +1,11 @@
+# wm6-today-settings: Today 画面（30 億命令）の後に Start → 下キー 2 回 → 設定。
+# 元の相対表記（押下時間は既定の 100ms = 13,520,000 命令）:
+#   @3000100000i tap 20 10 / +1s press Down / +0.5s press Down / +0.6s tap 40 190
+@3000100000i down 20 10     # Start
+@3013620000i up
+@3148820000i key down Down  # Office Mobile へ
+@3162340000i key up Down
+@3229940000i key down Down  # Internet Explorer へ
+@3243460000i key up Down
+@3324580000i down 40 190    # Start メニューの「設定」
+@3338100000i up

@@ -4,7 +4,7 @@
 // web クレートの wasm（Node 用の出力 rust/web/pkg-node。tools/web-build.sh で作る）を
 // リセットから走らせ、結果の JSON Lines（testdata/golden/README.md）を書く。
 // ネイティブの CLI の --result と同じ値になるはず（計画書 §9 段階2）。
-// 実イメージのシナリオは環境変数 CERULEAN_IMAGE が必要。
+// 実イメージのシナリオは環境変数 CERULEAN_IMAGE（WM6 のシナリオは CERULEAN_IMAGE_WM6）が必要。
 // CERULEAN_JIT=1（または「閾値,まとめる数」。例 1,1）で JIT を有効にする（段階5。
 // どの値でも結果は同じになるはず）。
 import { createHash } from "node:crypto";
@@ -33,10 +33,11 @@ for (const raw of readFileSync(`${gdir}/scenarios/${name}.scenario`, "utf8").spl
   def[line.slice(0, i)] = line.slice(i + 1).trim();
 }
 let image = def.image;
-if (image === "$CERULEAN_IMAGE") {
-  image = process.env.CERULEAN_IMAGE;
+if (image === "$CERULEAN_IMAGE" || image === "$CERULEAN_IMAGE_WM6") {
+  const env = image.slice(1);
+  image = process.env[env];
   if (!image) {
-    console.error(`run-wasm: ${name} needs CERULEAN_IMAGE`);
+    console.error(`run-wasm: ${name} needs ${env}`);
     process.exit(3);
   }
 } else {
