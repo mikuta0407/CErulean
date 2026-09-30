@@ -302,6 +302,18 @@ impl DeShare {
                 let p = path_at(buf, 0x22, 0x24);
                 if idx < 0 {
                     let k = key(&p);
+                    if k.is_empty() {
+                        // 根そのもの: ディレクトリとして答える（WM6 の vcefsd.dll は一覧の前に
+                        // 「\」を名前で引き、失敗すると一覧を空にする。2026-09-30 に観察。
+                        // WM5 は引かない）。日時は持たないので 0
+                        w16(buf, 0x1C, ATTR_DIR);
+                        w32(buf, 0x0C, 0);
+                        w32(buf, 0x428, 0);
+                        w32(buf, 0x10, 0);
+                        let tok = intern(&mut self.dirs, "");
+                        w32(buf, 0x14, tok);
+                        return OK;
+                    }
                     let Some(e) = fs.nodes.get(&k) else {
                         return if k.is_empty() { E_PARAM } else { E_NOT_FOUND };
                     };
@@ -757,6 +769,13 @@ mod tests {
         assert_eq!(t.get32(0x10), 5);
         t.path("\\nope");
         assert_ne!(t.cmd(0x11), OK);
+        // 根そのもの（WM6 の vcefsd.dll が一覧の前に引く）: ディレクトリ
+        t.reset();
+        t.set16(8, 0xFFFF);
+        t.path("\\");
+        assert_eq!(t.cmd(0x11), OK);
+        assert_eq!(t.get16(0x1C), ATTR_DIR);
+        assert_eq!(t.get32(0x10), 0);
         // "\*.*" の列挙: 枠の番号なし・+8 = 0 で始め、枠の番号を入れて続ける
         t.reset();
         t.set16(8, 0);
