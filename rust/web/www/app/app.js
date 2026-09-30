@@ -109,6 +109,10 @@ function onWorker(d) {
     }
   }
   if (d.booted) {
+    // 最初の絵が出るまではブート画面（再開ならすぐ絵が届いて消える）
+    sawPicture = false;
+    bootSteps = Number(d.booted.steps);
+    bootLines = [];
     booted = true;
     stopped = false;
     fatal = false;
@@ -125,6 +129,7 @@ function onWorker(d) {
   if (d.audio) playAudio(d.audio, d.rate);
   if (d.status) showStatus(d.status);
   if (d.uart) {
+    bootLog(d.uart);
     const el = $("uart");
     el.textContent = (el.textContent + d.uart).slice(-50000);
   }
@@ -173,6 +178,7 @@ function download(bytes, name) {
 // ---- 画面 ----
 function drawFrame(buf, w, h) {
   if (!w || !h) {
+    if (!sawPicture) return drawBoot();
     ctx.fillStyle = "#000";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     return;
@@ -182,7 +188,73 @@ function drawFrame(buf, w, h) {
     canvas.height = h;
     fitScreen();
   }
+  if (!sawPicture && isBlack(buf)) return drawBoot();
+  sawPicture = true;
   ctx.putImageData(new ImageData(new Uint8ClampedArray(buf), w, h), 0, 0);
+}
+
+// ---- ブート画面 ----
+// イメージから起動すると、Windows Mobile のスプラッシュ（約 22 億命令目）までゲストの画面は
+// 真っ暗なので、その間はここで描いた画面を見せる（UI だけ。ゲストの状態には触れない）。
+// 起動（または再開）してから最初に絵が出るまでの間だけで、以後ゲストが画面を黒くしても出さない。
+const SPLASH_STEPS = 2_200_000_000; // PPC_USA でスプラッシュが出る頃（進み具合の目安）
+let sawPicture = true; // 起動してから、真っ暗でない画面が出たか
+let bootSteps = 0;
+let bootLines = []; // カーネルのデバッグ出力（UART1）の最後の数行
+
+function isBlack(buf) {
+  const px = new Uint32Array(buf);
+  for (let i = 0; i < px.length; i++) if (px[i] & 0x00ffffff) return false;
+  return true;
+}
+
+function drawBoot() {
+  const w = canvas.width;
+  const h = canvas.height;
+  const g = ctx.createLinearGradient(0, 0, 0, h);
+  g.addColorStop(0, "#0b1a33");
+  g.addColorStop(1, "#000");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, w, h);
+  ctx.textAlign = "center";
+  ctx.textBaseline = "alphabetic";
+  ctx.fillStyle = "#7fa7d9";
+  ctx.font = "10px sans-serif";
+  ctx.fillText("CErulean", w / 2, h * 0.3);
+  ctx.fillStyle = "#fff";
+  ctx.font = "bold 17px sans-serif";
+  ctx.fillText("Windows Mobile 5.0", w / 2, h * 0.3 + 26);
+  ctx.fillStyle = "#b8c4d6";
+  ctx.font = "11px sans-serif";
+  ctx.fillText("起動しています…", w / 2, h * 0.3 + 46);
+  // 進み具合（スプラッシュまでの命令数の目安。イメージによって前後する）
+  const p = Math.min(bootSteps / SPLASH_STEPS, 0.99);
+  const bw = Math.round(w * 0.6);
+  const bx = Math.round((w - bw) / 2);
+  const by = Math.round(h * 0.55);
+  ctx.fillStyle = "#1c2c47";
+  ctx.fillRect(bx, by, bw, 5);
+  ctx.fillStyle = "#3d8ee8";
+  ctx.fillRect(bx, by, Math.round(bw * p), 5);
+  ctx.fillStyle = "#6f7f96";
+  ctx.font = "9px sans-serif";
+  ctx.fillText(`${Math.floor(p * 100)}%`, w / 2, by + 18);
+  // カーネルのデバッグ出力の最後の数行
+  ctx.textAlign = "left";
+  ctx.font = "8px monospace";
+  ctx.fillStyle = "#4f6178";
+  bootLines.forEach((line, i) => {
+    let t = line;
+    while (t.length > 1 && ctx.measureText(t).width > w - 8) t = t.slice(0, -1);
+    ctx.fillText(t, 4, h - 6 - (bootLines.length - 1 - i) * 10);
+  });
+}
+
+function bootLog(text) {
+  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+  if (!lines.length) return;
+  bootLines = [...bootLines, ...lines].slice(-4);
+  if (!sawPicture) drawBoot();
 }
 
 // 画面の枠に収まる最大の大きさに合わせる。デバイスピクセルの整数倍で 85% 以上の
@@ -281,6 +353,8 @@ function showStatus(s) {
   $("pause").textContent = paused ? "▶" : "❚❚";
   $("pause").title = paused ? "再開" : "一時停止";
   $("steps").textContent = BigInt(s.steps).toLocaleString();
+  bootSteps = Number(s.steps);
+  if (!sawPicture) drawBoot();
   $("vtime").textContent = fmtTime(s.virtualSec);
   $("ratio").textContent = paused ? "一時停止中" : `${s.ratio.toFixed(2)} 倍`;
   $("mips").textContent = `${s.mips.toFixed(1)}M 命令/秒`;
