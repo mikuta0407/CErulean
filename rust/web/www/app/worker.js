@@ -105,10 +105,17 @@ async function writeAtomic(d, name, data) {
     throw e;
   }
   h.close();
+  // move は「移動先のフォルダ, 名前」の 2 引数の形で呼ぶ（名前だけの形は Chrome にしかなく、
+  // Safari は "Not enough arguments" で失敗する。2026-09-30）。失敗したらコピーで置き換える。
+  let moved = false;
   if (tmp.move) {
-    await tmp.move(name);
-  } else {
-    // TODO(Safari): FileSystemHandle.move が無い環境。置き換えが原子的でなくなる
+    try {
+      await tmp.move(d, name);
+      moved = true;
+    } catch {}
+  }
+  if (!moved) {
+    // move が無いか失敗した環境。置き換えが原子的でなくなる
     // （書きかけは .tmp に残るだけなので、壊れたファイルは読み込み時の検査で除く）。
     const dst = await d.getFileHandle(name, { create: true });
     const w = await dst.createSyncAccessHandle();
