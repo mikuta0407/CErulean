@@ -129,6 +129,26 @@
       ここで行います。挿している間の中身はエミュレータの中にあり、保存（スナップショット）にも含まれます。
       抜くとこの端末に書き戻します。</p>
   </section>
+  <section id="netSection">
+    <h2>ネットワーク（中継サーバー経由）</h2>
+    <div class="row">
+      <label><input type="checkbox" id="netOn"> オン（イーサネットカードを挿す）</label>
+    </div>
+    <div class="row">
+      <label>中継サーバー <input type="url" id="netUrl" placeholder="ws://127.0.0.1:8765/" size="28" spellcheck="false"></label>
+    </div>
+    <div class="row">
+      <label>トークン <input type="password" id="netToken" size="28" autocomplete="off" spellcheck="false"></label>
+    </div>
+    <p class="note" id="netState">オフ</p>
+    <p class="note">オンにしたときだけ、ここで指定した中継サーバーと WebSocket で通信し、WM5 の通信
+      （TCP のバイト列と接続先の名前）を中継させます。オフの間、このサイトは外部と通信しません。
+      中継サーバーは <code>cerulean relay</code>（ネイティブの CLI）で起動し、表示されたトークンを入れます。
+      https のページからは <code>wss://</code> の中継サーバー（または自分の端末の <code>ws://127.0.0.1</code>）にしかつなげません。</p>
+    <p class="note">初めて使うときは WM5 の「設定 → 接続 → ネットワークカード」で「ネットワークカードの接続先」を
+      「インターネット設定」にしてください。PC カードのソケットは 1 つなので、ストレージカードとは同時に使えません。
+      受け取ったデータは操作の記録に含まれます。</p>
+  </section>
   <section>
     <h2>操作の記録</h2>
     <div class="row">
@@ -157,11 +177,12 @@
       <tr><td><kbd>↑↓←→</kbd> <kbd>Enter</kbd></td><td>方向キー・決定</td></tr>
       <tr><td><kbd>F1</kbd>〜<kbd>F5</kbd></td><td>App1〜App5</td></tr>
       <tr><td><kbd>A</kbd>〜<kbd>Z</kbd> <kbd>0</kbd>〜<kbd>9</kbd></td><td>英数字</td></tr>
+      <tr><td><kbd>.</kbd> <kbd>,</kbd> <kbd>/</kbd> <kbd>-</kbd> <kbd>;</kbd> <kbd>=</kbd> <kbd>[</kbd> <kbd>]</kbd> <kbd>'</kbd> <kbd>`</kbd> <kbd>\</kbd></td><td>記号（どの文字になるかは WM5 のキー配列による）</td></tr>
       <tr><td><kbd>Space</kbd> <kbd>BS</kbd> <kbd>Tab</kbd> <kbd>Esc</kbd> <kbd>Del</kbd></td><td>編集キー</td></tr>
       <tr><td><kbd>Shift</kbd> <kbd>Ctrl</kbd> <kbd>Alt</kbd> <kbd>CapsLock</kbd></td><td>修飾キー</td></tr>
     </table>
     <p class="note">日本語入力（IME）は切ってください（変換中のキーは送りません）。
-      ソフトキー（画面下の左右のメニュー）は画面をタップします。記号は WM5 の画面上のキーボードで入力します。</p>
+      ソフトキー（画面下の左右のメニュー）は画面をタップします。上の表にない記号は WM5 の画面上のキーボードで入力します。</p>
   </section>
   <section>
     <h2>ログ</h2>

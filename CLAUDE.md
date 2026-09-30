@@ -52,7 +52,8 @@ Go 版の設計の理由コメントは Rust のコードに移してある。�
   計測で効果が確かめられた場合だけにし、テストで守る。
 - **依存の追加はユーザーの承認を取る**（計画書 §8）。現在の依存: web の
   `wasm-bindgen`（=0.2.129、wasm-bindgen-cli と同じ版に固定）、CLI の `sha2`・`png`。
-  コアは依存なし。ワークスペース内の自作クレート `cerulean-fat`（std のみ）を CLI・web が使う。
+  コアは依存なし。ワークスペース内の自作クレート `cerulean-fat`・`cerulean-net`（どちらも
+  std のみ）を CLI・web が使う。
 - **版の固定**: `rust/rust-toolchain.toml`（1.98.1）と `rust/Cargo.lock` をコミット。
   wasm-bindgen を上げるときは wasm-bindgen-cli も同じ版を入れ直す。
 - **コミット前の確認**: `tools/check.sh`（fmt・clippy・テスト〔ネイティブと
@@ -110,9 +111,12 @@ mmu → bus::PhysMem、bus → bus::Devices（ボードが MMIO を振り分け�
   変換）、実行ループ（`run_until`）、仮想時間、入力 API、スナップショットのチャンクの並び。
 - `snapshot`（形式）・`script`（入力スクリプト）・`emu`（イベントを命令境界で適用・記録）・
   `loader`（B000FF・.nb0・.words）。
-- `pccard`: PC カードのコントローラ（`pd6710.rs`）とカード（`cf.rs`。CompactFlash の ATA）。
+- `pccard`: PC カードのコントローラ（`pd6710.rs`）とカード（`cf.rs`。CompactFlash の ATA、
+  `ne2000.rs`。NE2000 互換のイーサネット。ソケットの中身は `Slot`）。
   SoC に依らない部品で、バンク2 の配置と EINT への配線は smdk2410 の board.rs。
   カードのイメージを外から読み書きするのは別クレート `rust/fat`（cerulean-fat。コアは使わない）。
+  ゲストのイーサネットを外へつなぐ NAT（ARP・DHCP・DNS・TCP の終端）は別クレート `rust/net`
+  （cerulean-net。sans-IO。コアは使わない）。設計は docs/network-design.md。
 - `jit`: JIT-to-wasm（段階5。設計は `docs/stage5-design.md`）。ブロックの切り出しと
   IR → wasm の生成（`codegen.rs`）・自作のエンコーダ（`wasm.rs`）・管理（実行回数・
   無効化・上限）。読み込みと呼び出しは web の `JitHost` の実装（ネイティブにはホストが
@@ -178,6 +182,11 @@ mmu → bus::PhysMem、bus → bus::Devices（ボードが MMIO を振り分け�
 - 入力 API（touch_down/up・key_down/up）は smdk2410 の Machine に置き、スクリプトの解釈は
   `script`、イベントの適用は `emu`。時刻は命令数（`INSTRUCTIONS_PER_SECOND` =
   135.2M/仮想秒）で、決定論的。スクリプトの書式は当面 Go 版と同じ。
+- **ネットワーク**（2026-09-30）: ネットワークから来たフレームはすべて `net rx` の入力として
+  命令数つきで記録する（外とのやり取りは決定論的でないが、記録の再生はネットワークなしで同じ
+  状態になる）。オン・オフはイーサネットカードの挿抜（`nic insert/eject`）として見せる。
+  ブラウザ版はメニューでオンにしたときだけ、指定した中継サーバー（`cerulean relay`）と
+  WebSocket で通信する。CLI は `--net`（OS のソケットで直接。実時間に合わせる）。
 - 対話フロントエンドは段階3 のブラウザ版（`rust/web/www/app`。Worker＋wasm、保存は OPFS、
   PWA）。Chrome での確認は `tools/browser/app-e2e.mjs`（完了条件の通し）と
   `app-smoke.mjs`（配置・操作）。既定の判断は計画書の段階3 の「経過」。Go 版の serve の
@@ -257,6 +266,9 @@ mmu → bus::PhysMem、bus → bus::Devices（ボードが MMIO を振り分け�
   はドライバ内の固定表（0x00〜0x6F。Enter=0x5A、↑0x6C ↓0x6A ←0x6D →0x6F、App1〜5=0x64〜0x68）。
   **ソフトキー（VK_F1/F2）は表に無い**。初期化時に 0xFF×10 と 3 バイトコマンド
   （1B A0 7B / 1B A1 7A）を送るが応答は読まない。
+  表には記号のキー（VK_OEM_*: '.'=0x5E・'/'=0x5D・'-'=0x51・','=0x56 等）もあり、キー名
+  Period・Slash 等で押せる（2026-09-30 に RAM から表を読んで追加）。JPN 版の IE のアドレス欄は
+  画面のキーボードが「かな」でローマ字変換されるので、先に「英数」(10,249) をタップする。
 - 電源ボタン pwrbtn2410.dll は GPF0（EINT0）を設定する（未実装）。
 - **PC カード（ストレージカード。2026-09-29）**: バンク2 に CL-PD6710（82365SL 互換）。
   I/O は PA 0x11000000+ポート、メモリは PA 0x10000000+ISA アドレス。-INTR（管理割り込み）が
@@ -264,6 +276,12 @@ mmu → bus::PhysMem、bus → bus::Devices（ボードが MMIO を振り分け�
   命令目にプローブし（Chip Revision 0x82〜0x84 で有効）、atadisk.dll は I/O の範囲 2 個の
   CIS の構成（プライマリ 1F0h/3F6h）を選ぶ。WM5 からは「Storage Card」。詳細・根拠は
   docs/storage-card-design.md。外部割り込みは s3c2410/eint.rs（部品が駆動するピンだけ）。
+- **NE2000（イーサネットの PC カード。2026-09-30）**: CISTPL_FUNCID=06h の CIS で PCMCIA の
+  検出の表の NE2000 が名乗り出て ne2000.dll が読み込まれる。8 ビットのカード（DCR=48h）として
+  使い、局アドレスは PROM（リモート DMA の 0000h〜、各バイト 2 回ずつ）から、送信 40h〜・
+  受信リング 4Ch〜80h（RAM 4000h〜7FFFh）。受信バイト数は FCS を含みヘッダを含まない。
+  **IE で使うには WM5 の「設定 → 接続 → ネットワークカード」の接続先を「インターネット設定」に
+  する**（既定の「社内」では接続できない）。詳細は docs/network-design.md。
 - **OAL のアイドルは割り込み待ちのスピン**: 0x800AFDE4〜 の
   `LDR r3,[r4]`（r4=0x814C8708）/ `CMP r3,#0` / `BEQ` の 3 命令で、割り込み
   ハンドラが RAM の変数を書くまで回る（直前に 0x800AFDDC で変数を 0 にし、
@@ -292,6 +310,9 @@ mmu → bus::PhysMem、bus → bus::Devices（ボードが MMIO を振り分け�
   表示のタップで同じ操作ができるので後回し。着手するなら、DE 本体ボタンの経路を
   観察する（他の入力系モジュール: conshid/kbdhid・emulserv・0x500F0000 の準仮想
   デバイスへのアクセスを -watch とトレースで確認）。
+- **HTTPS**（ネットワーク）: IE Mobile の TLS は古く今のサイトにつながらない。警告なしに
+  吸収するには、ゲストの TLS をこちらで終端（自前の CA をゲストに入れる）し、外へは今の TLS で
+  つなぎ直す（依存が要る）。方式はユーザーと決める（docs/network-design.md の末尾）。
 - **電源ボタン**（pwrbtn2410.dll、GPF0/EINT0）: 押すとサスペンド（OEMPowerOff・
   スリープ・起床要因）の実装が必要になり範囲が大きい。UI 操作には不要なので後回し。
 - 性能改善の続き: 段階4 は 4-2（IR）で区切った（2026-09-29。ネイティブ約 100M・Node の

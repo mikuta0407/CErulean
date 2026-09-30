@@ -35,6 +35,7 @@ version = "0.1.0"
 dependencies = [
  "cerulean-core",
  "cerulean-fat",
+ "cerulean-net",
  "png",
  "sha2",
 ]
@@ -48,11 +49,16 @@ name = "cerulean-fat"
 version = "0.1.0"
 
 [[package]]
+name = "cerulean-net"
+version = "0.1.0"
+
+[[package]]
 name = "cerulean-web"
 version = "0.1.0"
 dependencies = [
  "cerulean-core",
  "cerulean-fat",
+ "cerulean-net",
  "wasm-bindgen",
 ]
 

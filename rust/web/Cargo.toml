@@ -12,4 +12,5 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 cerulean-core.workspace = true
 cerulean-fat.workspace = true
+cerulean-net.workspace = true
 wasm-bindgen.workspace = true

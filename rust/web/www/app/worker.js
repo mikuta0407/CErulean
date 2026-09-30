@@ -13,6 +13,8 @@
 //   rec/start.snap.gz・script.txt  最後の記録（起点スナップショットとスクリプト）
 //   rec/cerulean-card-*.img     記録中に挿したストレージカードのイメージ（再生に要る）
 //   cards/card.img・card.json   ストレージカードのイメージ（抜いている間の中身）
+// ネットワーク（中継サーバー経由）はメニューでオンにしたときだけ、指定された中継
+// サーバーと WebSocket でつなぐ（それ以外にサイトは外と通信しない。計画書 §7.5）。
 // 書き込みは一時ファイルに書き終えてから名前を変える（書きかけを残さない。§7.3）。
 import init, * as wasm from "../pkg/cerulean_web.js";
 
@@ -369,6 +371,219 @@ function setClockNow(reason) {
   log(`時計を合わせた（${reason}）: ${t[0]}-${String(t[1]).padStart(2, "0")}-${String(t[2]).padStart(2, "0")} ${t.slice(3).map((v) => String(v).padStart(2, "0")).join(":")}`);
 }
 
+// ---- ネットワーク（中継サーバー経由。rust/cli/src/relay.rs が約束の正）----
+//
+// ゲストの TCP は wasm の中のスタック（cerulean-net）で終端し、外への TCP のバイト列
+// だけを 1 本の WebSocket で中継サーバーへ送る。スタックがゲストへ渡すフレームは
+// `net rx` の入力として記録される（記録を再生すればネットワークなしで同じ状態）。
+// オン・オフはイーサネットカードの挿入・抜去としてゲストに見せる（これも記録される）。
+let netCfg = { on: false, url: "", token: "" };
+let ws = null;
+let wsReady = false;
+let netMsg = "オフ";
+let netRetry = null;
+// 外から届いて、まだスタックに渡していないデータ（接続の番号 → { chunks, eof, reset }）
+const netPending = new Map();
+const netIds = new Set();
+
+function netStatus(msg) {
+  netMsg = msg;
+  post({ net: { msg, on: netCfg.on, ready: wsReady, conns: emu ? emu.netConnections() : 0, nic: emu ? emu.nicInserted() : false } });
+}
+
+function wsSend(kind, id, body) {
+  if (!ws || !wsReady) return;
+  const b = body ?? new Uint8Array(0);
+  const m = new Uint8Array(5 + b.length);
+  m[0] = kind;
+  new DataView(m.buffer).setUint32(1, id, true);
+  m.set(b, 5);
+  ws.send(m);
+}
+
+function wsOpen() {
+  if (ws || !netCfg.on || !netCfg.url) return;
+  clearTimeout(netRetry);
+  let sock;
+  try {
+    sock = new WebSocket(netCfg.url);
+  } catch (e) {
+    netStatus(`中継サーバーの URL が不正です: ${e.message}`);
+    return;
+  }
+  ws = sock;
+  sock.binaryType = "arraybuffer";
+  netStatus("中継サーバーに接続中…");
+  sock.onopen = () => {
+    const t = new TextEncoder().encode(netCfg.token);
+    const m = new Uint8Array(1 + t.length);
+    m[0] = 0x01;
+    m.set(t, 1);
+    sock.send(m);
+  };
+  sock.onmessage = ({ data }) => {
+    if (ws !== sock) return;
+    try {
+      onRelay(new Uint8Array(data));
+    } catch (e) {
+      if (e instanceof WebAssembly.RuntimeError) fatal(e);
+      else log(`ネットワーク: ${e.message}`);
+    }
+  };
+  sock.onclose = () => {
+    if (ws !== sock) return;
+    ws = null;
+    const was = wsReady;
+    wsReady = false;
+    netResetAll();
+    if (netCfg.on) {
+      netStatus(was ? "中継サーバーとの接続が切れました（5 秒後につなぎ直します）" : "中継サーバーにつなげません（URL・トークン・サーバーの起動を確認してください。5 秒後に再試行）");
+      netRetry = setTimeout(wsOpen, 5000);
+    }
+  };
+}
+
+function wsClose() {
+  clearTimeout(netRetry);
+  if (ws) {
+    const s = ws;
+    ws = null;
+    wsReady = false;
+    s.close();
+  }
+  netResetAll();
+}
+
+// 中継が使えなくなった: 生きている接続をすべてゲストにリセットとして見せる。
+function netResetAll() {
+  netPending.clear();
+  if (emu && !stopped) for (const id of netIds) emu.netRemoteReset(id);
+  netIds.clear();
+}
+
+function onRelay(m) {
+  if (!emu || stopped) return;
+  const dv = new DataView(m.buffer, m.byteOffset, m.byteLength);
+  const kind = m[0];
+  if (kind === 0x81) {
+    wsReady = true;
+    netStatus("中継サーバーにつながっています");
+    return;
+  }
+  if (kind === 0x86) {
+    netStatus(`中継サーバーが拒否しました: ${new TextDecoder().decode(m.subarray(1))}`);
+    return;
+  }
+  const id = dv.getUint32(1, true);
+  if (!netIds.has(id)) return; // もう捨てた接続
+  const p = netPending.get(id) ?? { chunks: [], eof: false };
+  netPending.set(id, p);
+  if (kind === 0x82) {
+    if (!m[5]) {
+      netIds.delete(id);
+      netPending.delete(id);
+    }
+    emu.netConnected(id, !!m[5]);
+  } else if (kind === 0x83) {
+    p.chunks.push(m.slice(5));
+  } else if (kind === 0x84) {
+    p.eof = true;
+  } else if (kind === 0x85) {
+    netIds.delete(id);
+    netPending.delete(id);
+    emu.netRemoteReset(id);
+  }
+  netFeed();
+}
+
+// 待たせているデータを、スタックが受け取れるだけ渡し、渡した分の CREDIT を返す。
+function netFeed() {
+  for (const [id, p] of netPending) {
+    let given = 0;
+    while (p.chunks.length) {
+      const room = emu.netTxRoom(id);
+      if (room === 0) break;
+      const c = p.chunks[0];
+      if (c.length <= room) {
+        emu.netRecv(id, c);
+        given += c.length;
+        p.chunks.shift();
+      } else {
+        emu.netRecv(id, c.subarray(0, room));
+        given += room;
+        p.chunks[0] = c.subarray(room);
+      }
+    }
+    if (given) {
+      const b = new Uint8Array(4);
+      new DataView(b.buffer).setUint32(0, given, true);
+      wsSend(0x06, id, b);
+    }
+    if (p.eof && !p.chunks.length) {
+      netPending.delete(id);
+      emu.netRemoteClosed(id);
+    }
+  }
+}
+
+// run の合間に呼ぶ: ゲストが送ったフレームをスタックに渡し、依頼を中継へ送る。
+function netPump() {
+  if (!netCfg.on && !netIds.size) return;
+  const out = emu.netStep((Number(emu.steps()) * 1000) / IPS);
+  const dv = new DataView(out.buffer, out.byteOffset, out.byteLength);
+  let i = 0;
+  while (i + 9 <= out.length) {
+    const kind = out[i];
+    const id = dv.getUint32(i + 1, true);
+    const len = dv.getUint32(i + 5, true);
+    const body = out.subarray(i + 9, i + 9 + len);
+    i += 9 + len;
+    if (kind === 1) {
+      if (!wsReady) {
+        emu.netConnected(id, false);
+        continue;
+      }
+      netIds.add(id);
+      wsSend(0x02, id, body);
+    } else if (kind === 2) wsSend(0x03, id, body);
+    else if (kind === 3) wsSend(0x04, id);
+    else if (kind === 4) {
+      wsSend(0x05, id);
+      netIds.delete(id);
+      netPending.delete(id);
+    }
+  }
+  if (netPending.size) netFeed();
+}
+
+// 設定に合わせてカードの抜き差し・中継との接続をする（設定の変更と起動・再開のとき）。
+function netApply() {
+  if (!emu || stopped) return;
+  if (netCfg.on) {
+    if (emu.cardInserted()) {
+      netStatus("ストレージカードを抜いてからオンにしてください（PC カードのソケットは 1 つです）");
+      return;
+    }
+    emu.netEnable(true);
+    if (!emu.nicInserted()) {
+      emu.nicInsert();
+      inputSinceSave = true;
+      log("イーサネットカードを挿した");
+    }
+    wsOpen();
+    if (!ws) netStatus(netMsg);
+  } else {
+    wsClose();
+    if (emu.nicInserted()) {
+      emu.nicEject();
+      inputSinceSave = true;
+      log("イーサネットカードを抜いた");
+    }
+    emu.netEnable(false);
+    netStatus("オフ");
+  }
+}
+
 // ---- 実行 ----
 
 function rebase() {
@@ -406,7 +621,7 @@ function tick() {
     const turbo = speed === 0 || emu.steps() < turboUntil;
     if (turbo) {
       const chunk = BigInt(SLICE * 4);
-      while (performance.now() - t0 < BUDGET_MS && runTo(emu.steps() + chunk));
+      while (performance.now() - t0 < BUDGET_MS && runTo(emu.steps() + chunk)) netPump();
       rebase();
       if (turboUntil && emu.steps() >= turboUntil) {
         turboUntil = 0n;
@@ -426,6 +641,7 @@ function tick() {
       // 期限より 1 単位先まで進めて、その分だけ待つ
       while (cur <= target && performance.now() - t0 < BUDGET_MS) {
         if (!runTo(cur + slice)) break;
+        netPump();
         cur = emu.steps();
       }
       if (cur > target) delay = Math.max(1, Math.ceil((Number(cur - target) * 1000) / rate));
@@ -492,6 +708,7 @@ function sendStatus(now) {
   s.jitModules = js.modules;
   st = { t: now, steps, idle };
   post({ status: s });
+  if (netCfg.on || netIds.size) netStatus(netMsg);
 }
 
 // wasm の panic（RuntimeError）はインスタンスを使えなくする（§6.2）。以後は動かさず、
@@ -527,6 +744,9 @@ function start(e, id, name, turbo) {
     cardMeta = null; // 読み直す
   }
   enqueue(sendCard);
+  // 前のマシンの接続は捨て、設定に合わせてカードを挿す・抜く
+  wsClose();
+  netApply();
 }
 
 function bootImage(bytes, name, id, rtc) {
@@ -726,6 +946,7 @@ const handlers = {
   },
   async cardInsert() {
     if (!emu || stopped) throw new Error("エミュレータが動いていません");
+    if (emu.nicInserted()) throw new Error("ネットワークをオフにしてから挿してください（PC カードのソケットは 1 つです）");
     const c = editableCard();
     const bytes = c.bytes();
     // 記録中は再生に要るので、挿した時点のイメージを記録の置き場に残す
@@ -808,6 +1029,12 @@ const handlers = {
   },
   clockOption({ on }) {
     syncClock = on;
+  },
+  netConfig({ on, url, token }) {
+    const changed = url !== netCfg.url || token !== netCfg.token;
+    netCfg = { on, url, token };
+    if (changed) wsClose();
+    netApply();
   },
   syncClock() {
     setClockNow("手動");

@@ -194,7 +194,7 @@ fn key_names_sorted() {
     let mut sorted = names.clone();
     sorted.sort();
     assert_eq!(names, sorted);
-    assert_eq!(names.len(), 57);
+    assert_eq!(names.len(), 68); // 57 + 記号 11（2026-09-30）
 }
 
 // ---- 実行ループ（Go の run_test）と Go との一致 ----

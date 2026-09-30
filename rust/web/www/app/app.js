@@ -9,6 +9,15 @@ const ctx = canvas.getContext("2d");
 try {
   $("clockSync").checked = localStorage.getItem("cerulean-clock-sync") !== "0";
 } catch {}
+// ネットワークの設定も端末ごと（既定はオフ）。
+try {
+  const n = JSON.parse(localStorage.getItem("cerulean-net") ?? "{}");
+  $("netOn").checked = !!n.on;
+  $("netUrl").value = n.url ?? "ws://127.0.0.1:8765/";
+  $("netToken").value = n.token ?? "";
+} catch {
+  $("netUrl").value = "ws://127.0.0.1:8765/";
+}
 
 let worker = null;
 const send = (op, args = {}, transfer = []) => worker?.postMessage({ op, ...args }, transfer);
@@ -59,6 +68,7 @@ function startWorker() {
   };
   send("init");
   send("clockOption", { on: $("clockSync").checked });
+  sendNet(false);
   return new Promise(() => {});
 }
 
@@ -106,6 +116,10 @@ function onWorker(d) {
   }
   if (d.download) download(d.download.bytes, d.download.name);
   if (d.card) renderCard(d.card);
+  if (d.net) {
+    const n = d.net;
+    $("netState").textContent = n.on ? `${n.msg}${n.nic ? "" : "（カード未挿入）"}・接続 ${n.conns}` : n.msg;
+  }
   if (d.error) {
     log("エラー: " + d.error);
     if (d.fatal) showStop(d.error, true);
@@ -321,6 +335,27 @@ $("recScript").onclick = () => send("exportRecording", { what: "script" });
 $("recSnap").onclick = () => send("exportRecording", { what: "snapshot" });
 $("recCards").onclick = () => send("exportRecording", { what: "cards" });
 
+// ---- ネットワーク ----
+function sendNet(save = true) {
+  const cfg = { on: $("netOn").checked, url: $("netUrl").value.trim(), token: $("netToken").value };
+  if (save) {
+    try {
+      localStorage.setItem("cerulean-net", JSON.stringify(cfg));
+    } catch {}
+  }
+  send("netConfig", cfg);
+}
+$("netOn").onchange = () => {
+  if ($("netOn").checked && !$("netUrl").value.trim()) {
+    alert("中継サーバーの URL を入れてください");
+    $("netOn").checked = false;
+    return;
+  }
+  sendNet();
+};
+$("netUrl").onchange = () => sendNet();
+$("netToken").onchange = () => sendNet();
+
 // ---- ストレージカード ----
 // 中身の出し入れは Worker（wasm の CardImage）が行う。ここは一覧の表示と操作だけ。
 let cardInfo = null;
@@ -511,6 +546,12 @@ const keyMap = {
   ShiftLeft: "Shift", ShiftRight: "RShift", ControlLeft: "Ctrl", ControlRight: "Ctrl",
   AltLeft: "Alt", AltRight: "Alt", CapsLock: "CapsLock",
 };
+Object.assign(keyMap, {
+  Period: "Period", Comma: "Comma", Slash: "Slash", Minus: "Minus", Semicolon: "Semicolon",
+  Equal: "Equal", BracketLeft: "LBracket", BracketRight: "RBracket", Quote: "Quote",
+  Backquote: "Backquote", Backslash: "Backslash", NumpadDecimal: "Period",
+  NumpadDivide: "Slash", NumpadSubtract: "Minus",
+});
 for (const c of "ABCDEFGHIJKLMNOPQRSTUVWXYZ") keyMap["Key" + c] = c;
 for (const d of "0123456789") {
   keyMap["Digit" + d] = d;

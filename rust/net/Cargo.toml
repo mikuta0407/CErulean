@@ -1,0 +1,9 @@
+[package]
+name = "cerulean-net"
+description = "ゲストのイーサネットを外へつなぐユーザー空間の NAT（ARP・DHCP・DNS・TCP の終端。CLI・ブラウザ用。std のみ）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]

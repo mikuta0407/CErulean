@@ -203,8 +203,8 @@ $R snapdump today.snap
 ```
 
 コマンドは `tap x y [押下時間]`・`down x y`・`move x y`・`up`・`key down|up 名前`・
-`press 名前 [押下時間]`・`card insert ファイル`・`card eject [ファイル]`・`shot ファイル`・
-`snap ファイル`・`quit`。書式の詳細は `rust/core/src/script.rs` の先頭コメントを参照。
+`press 名前 [押下時間]`・`card insert ファイル`・`card eject [ファイル]`・`nic insert [MAC]`・
+`nic eject`・`net rx 16進`・`shot ファイル`・`snap ファイル`・`quit`。書式の詳細は `rust/core/src/script.rs` の先頭コメントを参照。
 
 ### ストレージカード
 
@@ -227,6 +227,33 @@ $R run --snap-load today.snap --card card.img --card-out card-after.img
 スクリプトでは `card insert card.img` で動作中に挿し（ホットプラグ）、`card eject out.img` で
 抜いて中身を書き出します。ブラウザ版はメニューの「ストレージカード」で、カードを作る・
 ファイルを入れる（抜いている間）・挿す・抜くができます。
+
+### ネットワーク（インターネット）
+
+PC カードのソケットに NE2000 互換のイーサネットカードを挿すと、WM5 が DHCP でアドレスを
+取り、Internet Explorer で http のページを開けます（設計と根拠は `docs/network-design.md`）。
+ゲストの TCP はエミュレータの外側の小さな NAT（`rust/net`）で終端し、外へは TCP の
+バイト列だけを出します。**初めて使うときは WM5 の「設定 → 接続 → ネットワークカード」で
+「ネットワークカードの接続先」を「インターネット設定」にしてください**（スナップショットに
+残ります）。HTTPS のサイトは IE Mobile の TLS が古いのでつながりません。
+
+```sh
+# CLI: OS のソケットで直接つなぐ（実時間に合わせて進む）。受け取ったフレームを記録し、
+# 送受信を pcap に書く
+$R run --snap-load today.snap --nic --net --net-record net.txt --net-pcap net.pcap --script ops.txt
+# 記録の再生（ネットワークなしで同じ状態になる）
+$R run --snap-load today.snap --nic --script ops.txt --script net.txt
+
+# ブラウザ版の中継サーバー（トークンを省くと乱数で作って表示する）
+$R relay --listen 127.0.0.1:8765
+```
+
+ブラウザ版はメニューの「ネットワーク（中継サーバー経由）」で中継サーバーの URL
+（`ws://127.0.0.1:8765/`）とトークンを入れてオンにします。オンにしたときだけ、その中継
+サーバーとだけ通信します（オフの間、サイトは外部と通信しません）。https で配信したページ
+からは `wss://` の中継サーバー（TLS は前段のリバースプロキシで付ける）か、自分の端末の
+`ws://127.0.0.1` にしかつなげません。ソケットは 1 つなので、ストレージカードとは同時に
+使えません。
 
 ## 開発
 

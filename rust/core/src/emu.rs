@@ -160,7 +160,15 @@ impl Session {
 fn is_input(k: Kind) -> bool {
     matches!(
         k,
-        Kind::TouchDown | Kind::TouchMove | Kind::TouchUp | Kind::KeyDown | Kind::KeyUp | Kind::Rtc
+        Kind::TouchDown
+            | Kind::TouchMove
+            | Kind::TouchUp
+            | Kind::KeyDown
+            | Kind::KeyUp
+            | Kind::Rtc
+            | Kind::NicInsert
+            | Kind::NicEject
+            | Kind::NetRx
     )
 }
 
@@ -176,6 +184,24 @@ pub fn apply_input(m: &mut Machine, ev: &Event) -> Result<bool, String> {
         Kind::Rtc => {
             let [y, mo, d, h, mi, s] = ev.rtc;
             m.set_rtc(y, mo, d, h, mi, s);
+        }
+        Kind::NicInsert => {
+            let mac: [u8; 6] = ev
+                .data
+                .as_slice()
+                .try_into()
+                .map_err(|_| "nic insert: bad MAC")?;
+            m.insert_nic(mac).map_err(|e| e.to_string())?;
+        }
+        Kind::NicEject => {
+            if m.nic_mac().is_none() {
+                return Err("nic eject: no network card is inserted".into());
+            }
+            m.eject_any_card();
+        }
+        // 受け取れなかったフレーム（満杯・宛先違い）は線と同じく失われる
+        Kind::NetRx => {
+            m.net_receive(&ev.data);
         }
         k => return Err(format!("{k}: not handled")),
     }

@@ -1,11 +1,12 @@
 # CErulean の Rust ワークスペース（docs/rust-migration-plan.md §3.1）。
 # core: エミュレータのコア（プラットフォーム非依存、std のみ）
 # fat:  ストレージカードのイメージ（FAT）を外から読み書きする（std のみ。コアは使わない）
+# net:  ゲストのイーサネットを外へつなぐユーザー空間の NAT（std のみ。コアは使わない）
 # cli:  ネイティブの開発用 CLI
 # web:  ブラウザ（wasm）のエントリ
 [workspace]
 resolver = "3"
-members = ["core", "fat", "cli", "web"]
+members = ["core", "fat", "net", "cli", "web"]
 
 [workspace.package]
 version = "0.1.0"
@@ -17,6 +18,7 @@ publish = false
 [workspace.dependencies]
 cerulean-core = { path = "core" }
 cerulean-fat = { path = "fat" }
+cerulean-net = { path = "net" }
 # wasm-bindgen-cli と版を一致させる必要があるので = で固定する。
 wasm-bindgen = "=0.2.129"
 # 一致確認のハッシュ（CLI のみ。段階0 で「段階1 の CLI で入れる」と合意）。

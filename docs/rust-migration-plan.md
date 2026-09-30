@@ -627,6 +627,9 @@ Worker → メイン:
   （今の README の手順と同じ）。
 - イメージ・スナップショット・入力はすべて端末内で処理し、外部に送らない
   （サイトはネットワーク通信をしない。解析・広告のスクリプトも入れない）。
+  例外はゲストのネットワーク（2026-09-30 ユーザー決定。docs/network-design.md）: メニューで
+  オンにしたときだけ、ユーザーが指定した中継サーバーとだけ WebSocket で通信し、ゲストの
+  通信（TCP のバイト列と接続先の名前）を中継させる。既定はオフ。
 - **Content-Security-Policy**: 配信側で CSP を設定する場合、wasm の実行には
   `wasm-unsafe-eval`（古いブラウザでは `unsafe-eval`）が要る。JIT-to-wasm（段階5）で
   実行時に wasm を生成・instantiate するのも同じ許可に含まれる。配信先を決めるときに
@@ -648,6 +651,7 @@ Worker → メイン:
 | PNG（CLI の画面保存） | png | 1 | CLI のみ。コアには入れない |
 | wasm と JS の連携 | wasm-bindgen、js-sys、web-sys | 2 | web クレートのみ |
 | wasm の生成（JIT-to-wasm） | ~~wasm-encoder 等~~ → 自作（2026-09-29 決定） | 5 | コアの `jit/wasm.rs`。依存なし |
+| ネットワークの NAT（TCP の終端）・中継サーバーの WebSocket | ~~smoltcp・tungstenite 等~~ → 自作（2026-09-30 決定） | 3 以降 | `rust/net`（cerulean-net）と CLI の `relay.rs`。依存なし |
 | ネイティブ JIT | Cranelift／dynasm-rs／自作 | 将来 | この計画の範囲外 |
 
 - ツール: rustup（`wasm32-unknown-unknown` ターゲット）、wasm-bindgen-cli、

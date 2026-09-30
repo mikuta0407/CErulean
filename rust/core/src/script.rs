@@ -31,6 +31,10 @@
 //! rtc <YYYY-MM-DDTHH:MM:SS> RTC（ゲストの時計。ローカル時刻）をこの時刻に合わせる
 //! card insert <ファイル>   PC カードのソケットにストレージカード（ディスクイメージ）を挿す
 //! card eject [ファイル]    カードを抜く（ファイルを指定するとディスクイメージを書き出す）
+//! nic insert [MAC]         イーサネットカードを挿す（MAC は 02:43:52:4c:4e:01 の形。
+//!                          省略すると既定の局アドレス）
+//! nic eject                イーサネットカードを抜く
+//! net rx <16 進>           ネットワークからフレーム（宛先〜データ、FCS なし）が届く
 //! shot <ファイル>          画面を保存
 //! snap <ファイル>          スナップショットを保存
 //! quit                     実行を終了
@@ -56,6 +60,12 @@ pub enum Kind {
     /// shot/snap と同じく呼び出し側が適用する。path はイメージのファイル）
     CardInsert,
     CardEject,
+    /// イーサネットカードを挿す・抜く（2026-09-30。data は局アドレス 6 バイト）
+    NicInsert,
+    NicEject,
+    /// ネットワークからフレームが届く（2026-09-30。外から来るものはすべて記録する
+    /// 入力。data はフレーム）
+    NetRx,
     Shot,
     Snap,
     Quit,
@@ -72,6 +82,9 @@ impl fmt::Display for Kind {
             Kind::Rtc => "rtc",
             Kind::CardInsert => "card insert",
             Kind::CardEject => "card eject",
+            Kind::NicInsert => "nic insert",
+            Kind::NicEject => "nic eject",
+            Kind::NetRx => "net rx",
             Kind::Shot => "shot",
             Kind::Snap => "snap",
             Kind::Quit => "quit",
@@ -94,6 +107,8 @@ pub struct Event {
     pub rtc: [i64; 6],
     /// Shot/Snap/CardInsert/CardEject のファイル
     pub path: String,
+    /// NicInsert の局アドレス・NetRx のフレーム
+    pub data: Vec<u8>,
     /// 元の行番号（エラー表示用。0 は行なし）
     pub line: usize,
 }
@@ -108,6 +123,7 @@ impl Event {
             key: String::new(),
             rtc: [0; 6],
             path: String::new(),
+            data: Vec::new(),
             line: 0,
         }
     }
@@ -240,6 +256,29 @@ pub fn parse(src: &str, steps_per_second: u64) -> Result<Vec<Event>, Error> {
                     ..ev(kind)
                 });
             }
+            "nic" => match args {
+                ["insert"] | ["insert", _] => {
+                    let mac = match args.get(1) {
+                        Some(m) => parse_mac(m).map_err(errf)?,
+                        None => DEFAULT_MAC.to_vec(),
+                    };
+                    events.push(Event {
+                        data: mac,
+                        ..ev(Kind::NicInsert)
+                    });
+                }
+                ["eject"] => events.push(ev(Kind::NicEject)),
+                _ => return Err(errf("usage: nic insert [MAC] | nic eject".into())),
+            },
+            "net" => {
+                let ["rx", hex] = args else {
+                    return Err(errf("usage: net rx <hex>".into()));
+                };
+                events.push(Event {
+                    data: parse_hex(hex).map_err(errf)?,
+                    ..ev(Kind::NetRx)
+                });
+            }
             cmd @ ("shot" | "snap") => {
                 if args.len() != 1 {
                     return Err(errf(format!("usage: {cmd} <file>")));
@@ -314,6 +353,28 @@ pub fn parse_datetime(s: &str) -> Result<[i64; 6], String> {
         return Err(bad());
     }
     Ok(v)
+}
+
+/// 既定の局アドレス（イーサネットカード。コアの pccard::ne2000::DEFAULT_MAC と同じ値）。
+const DEFAULT_MAC: [u8; 6] = crate::pccard::ne2000::DEFAULT_MAC;
+
+/// "02:43:52:4c:4e:01" を 6 バイトに。
+fn parse_mac(s: &str) -> Result<Vec<u8>, String> {
+    let v: Result<Vec<u8>, _> = s.split(':').map(|p| u8::from_str_radix(p, 16)).collect();
+    match v {
+        Ok(v) if v.len() == 6 && s.len() == 17 => Ok(v),
+        _ => Err(format!("bad MAC address {s:?} (want 02:43:52:4c:4e:01)")),
+    }
+}
+
+fn parse_hex(s: &str) -> Result<Vec<u8>, String> {
+    if !s.len().is_multiple_of(2) || !s.bytes().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!("bad hex {s:?}"));
+    }
+    Ok((0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap_or(0))
+        .collect())
 }
 
 /// 座標（Go の strconv.Atoi と同じく先頭の + を許す。負は不可）。
@@ -456,7 +517,28 @@ pub fn format(header: &[String], events: &[Event]) -> Result<String, Error> {
                 let [y, mo, d, h, mi, se] = ev.rtc;
                 write!(b, " {y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{se:02}").unwrap();
             }
-            Kind::TouchUp | Kind::Quit => {}
+            Kind::NicInsert => {
+                let m = &ev.data;
+                if m.len() != 6 {
+                    return Err(Error(format!("script: event {i}: bad MAC address")));
+                }
+                write!(
+                    b,
+                    " {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                    m[0], m[1], m[2], m[3], m[4], m[5]
+                )
+                .unwrap();
+            }
+            Kind::NetRx => {
+                if ev.data.is_empty() {
+                    return Err(Error(format!("script: event {i}: empty frame")));
+                }
+                b.push(' ');
+                for x in &ev.data {
+                    write!(b, "{x:02x}").unwrap();
+                }
+            }
+            Kind::TouchUp | Kind::NicEject | Kind::Quit => {}
         }
         b.push('\n');
     }

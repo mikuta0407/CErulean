@@ -23,6 +23,7 @@ use crate::cpu::{Abort, MemError};
 use crate::jit::{Action, Jit, JitHost};
 use crate::loader::Image;
 use crate::mmu::Mmu;
+use crate::pccard::Slot;
 use crate::s3c2410::{Frame, FrameError, LcdConfig};
 
 pub use board::{Board, Dev, StubId};
@@ -94,6 +95,15 @@ pub(crate) fn touch_to_raw(x: u32, y: u32) -> (u32, u32) {
     let yp = TOUCH_D1_OFFSET + (x4 * TOUCH_D1_SPAN + 960 / 2) / 960;
     let inv = TOUCH_D0_OFFSET + (y4 * TOUCH_D0_SPAN + 1280 / 2) / 1280;
     (1023 - inv, yp)
+}
+
+/// 抜いたカード。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Ejected {
+    /// ストレージカード（ディスクイメージ）
+    Cf(Vec<u8>),
+    /// イーサネットカード
+    Nic,
 }
 
 /// マシンの操作のエラー（構成・ロード・入力の誤り）。
@@ -560,18 +570,72 @@ impl Machine {
     /// 記録すること）。
     pub fn insert_card(&mut self, disk: Vec<u8>) -> Result<(), Error> {
         let card = crate::pccard::CfCard::new(disk).map_err(Error)?;
-        self.sys.board.insert_card(card).map_err(Error)
+        self.sys.board.insert_card(Slot::Cf(card)).map_err(Error)
     }
 
-    /// カードを抜いて、ディスクイメージ（ゲストが書いた内容を含む）を返す。
-    /// 挿さっていなければ None。
+    /// PC カードのソケットに NE2000 互換のイーサネットカードを挿す（mac は局アドレス）。
+    /// 既に挿さっていればエラー。挿抜は入力として記録すること。
+    pub fn insert_nic(&mut self, mac: [u8; 6]) -> Result<(), Error> {
+        let nic = crate::pccard::Ne2000::new(mac);
+        self.sys.board.insert_card(Slot::Nic(nic)).map_err(Error)
+    }
+
+    /// カードを抜く。挿さっていなければ None。
+    pub fn eject_any_card(&mut self) -> Option<Ejected> {
+        Some(match self.sys.board.eject_card()? {
+            Slot::Cf(c) => Ejected::Cf(c.into_disk()),
+            Slot::Nic(_) => Ejected::Nic,
+        })
+    }
+
+    /// ストレージカードを抜いて、ディスクイメージ（ゲストが書いた内容を含む）を返す。
+    /// ストレージカードが挿さっていなければ None（他のカードは抜かない）。
     pub fn eject_card(&mut self) -> Option<Vec<u8>> {
-        self.sys.board.eject_card().map(|c| c.into_disk())
+        if !matches!(self.sys.board.card, Some(Slot::Cf(_))) {
+            return None;
+        }
+        match self.eject_any_card() {
+            Some(Ejected::Cf(d)) => Some(d),
+            _ => None,
+        }
     }
 
-    /// 挿さっているカードのディスクイメージ（状態は変えない）。
+    /// 挿さっているストレージカードのディスクイメージ（状態は変えない）。
     pub fn card_disk(&self) -> Option<&[u8]> {
-        self.sys.board.card.as_ref().map(|c| c.disk())
+        match &self.sys.board.card {
+            Some(Slot::Cf(c)) => Some(c.disk()),
+            _ => None,
+        }
+    }
+
+    /// 挿さっているイーサネットカードの局アドレス。
+    pub fn nic_mac(&self) -> Option<[u8; 6]> {
+        match &self.sys.board.card {
+            Some(Slot::Nic(n)) => Some(n.mac()),
+            _ => None,
+        }
+    }
+
+    /// イーサネットカードが送信したフレームを取り出す（送信した順。宛先〜データで
+    /// FCS なし）。フロントエンドが run の合間に呼んでネットワークへ送る。
+    pub fn net_take_tx(&mut self) -> Vec<Vec<u8>> {
+        match &mut self.sys.board.card {
+            Some(Slot::Nic(n)) => n.take_tx(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// ネットワークから届いたフレーム（宛先〜データ。FCS なし）をイーサネットカードに
+    /// 渡す。受信バッファに入れたら true（カードがない・宛先が違う・満杯なら false で、
+    /// 実機の線と同じく捨てられる）。外から来る入力なので記録すること。
+    pub fn net_receive(&mut self, frame: &[u8]) -> bool {
+        let Some(Slot::Nic(n)) = &mut self.sys.board.card else {
+            return false;
+        };
+        let ok = n.receive(frame);
+        self.sys.board.card_changed();
+        self.sys.board.update_deadline();
+        ok
     }
 
     /// キーボードマイコンから送るバイト列を直接積む（調査用）。

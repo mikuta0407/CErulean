@@ -3,12 +3,14 @@
 //! 一致確認の出力（--result・--trace-hash）の中身は testdata/golden/README.md が正。
 
 mod card;
+mod net;
+mod relay;
 mod result;
 mod tools;
 
 use std::io::Write;
 use std::process::ExitCode;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use cerulean_core::arm;
 use cerulean_core::emu::{self, RunError, Session};
@@ -28,6 +30,7 @@ Usage:
   cerulean ihist [--count N] <snap>  実行した ARM 命令の種類の分布
   cerulean genrate [--steps N] <image>  MMU の変換世代・コードページの頻度
   cerulean card <new|ls|put|get|rm|mkdir> ...  ストレージカードのイメージを作る・中身を出し入れする
+  cerulean relay [--listen A] [--token T]  ブラウザ版のネットワークの中継サーバー
   cerulean run [options] <image>   イメージをリセットから実行する
   cerulean run --snap-load F [options] [image]
                                    スナップショットから再開する（image を渡すと照合する）
@@ -36,7 +39,7 @@ run options:
   --rtc YYYY-MM-DDTHH:MM:SS  RTC の初期時刻（年月日時分秒をそのまま使う。
                              既定はホストの現在時刻の UTC。TODO: ローカル時刻）
   --max-steps N         N 命令で止める（0 = 無制限）
-  --script F            入力スクリプト（書式は script モジュールのコメント）
+  --script F            入力スクリプト（書式は script モジュールのコメント。複数可）
   --history N           停止時に直前 N 命令の PC を表示する（既定 16、0 = 無効）
   --trace               実行した命令の PC と命令語を逐一表示する
   --trace-from N        --trace の表示を N 命令目から始める
@@ -57,6 +60,13 @@ run options:
   --card F              開始時に PC カードのソケットに CompactFlash を挿す（F はディスク
                         イメージ。512 バイトの倍数）
   --card-out F          停止時に挿さっているカードのディスクイメージを F に書く
+  --nic                 開始時に PC カードのソケットにイーサネットカード（NE2000 互換）を挿す
+  --net-pcap F          イーサネットカードが送受信したフレームを pcap で F に書く
+  --net                 イーサネットカードを OS のソケットで外へつなぐ（NAT。実時間に合わせて
+                        進める。外とのやり取りは決定論的でないので --net-record で記録する）
+  --net-record F        --net で受け取ったフレームを入力のスクリプトとして F に書く（再生は
+                        同じ起点から --script F。--script は複数指定できる）
+  --net-verbose         --net の接続を表示する
 ";
 
 fn main() -> ExitCode {
@@ -65,6 +75,7 @@ fn main() -> ExitCode {
         Some("info") => cmd_info(&args[1..]),
         Some("run") => cmd_run(&args[1..]),
         Some("card") => card::cmd_card(&args[1..]),
+        Some("relay") => relay::cmd_relay(&args[1..]),
         Some("snapdump") => cmd_snapdump(&args[1..]),
         Some("goldencmp") => tools::cmd_goldencmp(&args[1..]),
         Some("segspeed") => tools::cmd_segspeed(&args[1..]),
@@ -119,7 +130,7 @@ struct RunOpts {
     image: String,
     rtc: Option<[i64; 6]>,
     max_steps: u64,
-    script: Option<String>,
+    scripts: Vec<String>,
     history: usize,
     trace: bool,
     trace_from: u64,
@@ -139,6 +150,11 @@ struct RunOpts {
     fb_every: u64,
     card: Option<String>,
     card_out: Option<String>,
+    nic: bool,
+    net_pcap: Option<String>,
+    net: bool,
+    net_record: Option<String>,
+    net_verbose: bool,
 }
 
 fn parse_u64(s: &str) -> Result<u64, String> {
@@ -180,7 +196,7 @@ fn parse_run_opts(args: &[String]) -> Result<RunOpts, String> {
         match a.as_str() {
             "--rtc" => o.rtc = Some(parse_rtc(&val()?)?),
             "--max-steps" => o.max_steps = parse_u64(&val()?)?,
-            "--script" => o.script = Some(val()?),
+            "--script" => o.scripts.push(val()?),
             "--history" => o.history = parse_u64(&val()?)? as usize,
             "--trace" => o.trace = true,
             "--trace-from" => o.trace_from = parse_u64(&val()?)?,
@@ -206,6 +222,11 @@ fn parse_run_opts(args: &[String]) -> Result<RunOpts, String> {
             "--fb-every" => o.fb_every = parse_u64(&val()?)?,
             "--card" => o.card = Some(val()?),
             "--card-out" => o.card_out = Some(val()?),
+            "--nic" => o.nic = true,
+            "--net-pcap" => o.net_pcap = Some(val()?),
+            "--net" => o.net = true,
+            "--net-record" => o.net_record = Some(val()?),
+            "--net-verbose" => o.net_verbose = true,
             s if s.starts_with("--") => return Err(format!("unknown option {s}\n{USAGE}")),
             s => {
                 if image.replace(s.to_string()).is_some() {
@@ -228,6 +249,9 @@ fn parse_run_opts(args: &[String]) -> Result<RunOpts, String> {
     }
     if !o.checkpoints.is_empty() && o.result.is_none() {
         return Err("--checkpoint requires --result".into());
+    }
+    if o.net_record.is_some() && !o.net {
+        return Err("--net-record requires --net".into());
     }
     Ok(o)
 }
@@ -371,6 +395,11 @@ fn cmd_run(args: &[String]) -> Result<ExitCode, String> {
             .map_err(|e| format!("--card {path}: {e}"))?;
         eprintln!("cerulean: inserted card {path} at step {}", m.steps());
     }
+    if o.nic {
+        m.insert_nic(cerulean_core::pccard::ne2000::DEFAULT_MAC)
+            .map_err(|e| format!("--nic: {e}"))?;
+        eprintln!("cerulean: inserted network card at step {}", m.steps());
+    }
     m.cpu.set_history(o.history);
     // トレースはスキップした命令を表示できないので、アイドルスキップを切る
     // （監視中は MMU が RAM を直接持たないので元々スキップされない）。
@@ -378,15 +407,18 @@ fn cmd_run(args: &[String]) -> Result<ExitCode, String> {
         m.set_idle_skip(false);
     }
 
-    let mut events = vec![];
-    if let Some(path) = &o.script {
+    let mut events: Vec<Event> = vec![];
+    for path in &o.scripts {
         let src = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
-        events =
+        let evs =
             script::parse(&src, INSTRUCTIONS_PER_SECOND).map_err(|e| format!("{path}: {e}"))?;
-        for ev in &events {
-            emu::validate(&m, ev).map_err(|e| format!("script line {}: {e}", ev.line))?;
+        for ev in &evs {
+            emu::validate(&m, ev).map_err(|e| format!("{path}: script line {}: {e}", ev.line))?;
         }
+        events.extend(evs);
     }
+    // 複数のスクリプトは命令数の順に混ぜる（同じ命令数なら指定した順）
+    events.sort_by_key(|e| e.step);
     if let Some((f, t)) = &o.snap_save {
         // 同じ時刻のイベントの後に保存する（Go の -snap-save と同じ）。
         let at = events
@@ -410,6 +442,17 @@ fn cmd_run(args: &[String]) -> Result<ExitCode, String> {
     }
     let mut sess = Session::new();
     sess.schedule(events.into_iter().skip(skip));
+    let mut direct = o.net.then(|| net::DirectNet::new(o.net_verbose));
+    if o.net {
+        if m.nic_mac().is_none() {
+            eprintln!("cerulean: --net: no network card is inserted yet (use --nic or a script)");
+        }
+        if o.net_record.is_some() {
+            sess.start_recording(&m);
+        }
+    }
+    let wall_start = Instant::now();
+    let steps_start = m.steps();
 
     let mut results = match &o.result {
         Some(p) => Some(ResultWriter {
@@ -433,6 +476,10 @@ fn cmd_run(args: &[String]) -> Result<ExitCode, String> {
         None
     };
 
+    let mut pcap = match &o.net_pcap {
+        Some(p) => Some(net::Pcap::create(p)?),
+        None => None,
+    };
     let mut uart = UartTap::new();
     let mut stdout = std::io::stdout();
     let io = |e: std::io::Error| e.to_string();
@@ -506,12 +553,45 @@ fn cmd_run(args: &[String]) -> Result<ExitCode, String> {
         if !o.watches.is_empty() {
             target = steps + 1; // 監視の表示に命令数と PC を付けるため 1 命令ずつ
         }
+        if o.net || pcap.is_some() {
+            // ネットワークとのやり取りの間隔（仮想時間 10ms）
+            target = target.min(steps + INSTRUCTIONS_PER_SECOND / 100);
+        }
         // 少なくとも 1 命令は進める（--max-steps が今の命令数以下の場合など）。
         target = target.max(steps + 1);
         if matches!(r, Ok(false)) {
             r = sess.run(&mut m, target, &mut apply);
         }
         drain_uart(&mut m, &mut uart);
+        let sent = m.net_take_tx();
+        if let Some(p) = &mut pcap {
+            for f in &sent {
+                p.write(m.steps(), f)?;
+            }
+        }
+        if let Some(d) = &mut direct
+            && matches!(r, Ok(false))
+        {
+            let now_ms = m.steps() * 1000 / INSTRUCTIONS_PER_SECOND;
+            for f in d.step(now_ms, sent) {
+                if let Some(p) = &mut pcap {
+                    p.write(m.steps(), &f)?;
+                }
+                let ev = Event {
+                    data: f,
+                    ..Event::new(0, Kind::NetRx)
+                };
+                sess.inject(&mut m, ev)?;
+            }
+            // 実時間に合わせる（外の応答を待つ間に仮想時間が先へ進みすぎると、ゲストの
+            // TCP が時間切れにする）
+            let virt =
+                Duration::from_millis((m.steps() - steps_start) * 1000 / INSTRUCTIONS_PER_SECOND);
+            let wall = wall_start.elapsed();
+            if virt > wall {
+                std::thread::sleep((virt - wall).min(Duration::from_millis(20)));
+            }
+        }
         for ev in m.take_watch_log() {
             eprintln!(
                 "{:12}  watch {}{} {:<10} PA={:08X} v={:08X}  (PC after={:08X})",
@@ -578,6 +658,16 @@ fn cmd_run(args: &[String]) -> Result<ExitCode, String> {
     };
     if let Some(h) = &mut hasher {
         h.out.flush().map_err(io)?;
+    }
+    if let Some(p) = &mut pcap {
+        p.flush()?;
+    }
+    if let Some(f) = &o.net_record {
+        let (start, evs) = sess.stop_recording();
+        let from = o.snap_load.as_deref().unwrap_or("(reset of the image)");
+        let text = emu::format_recording(from, &image_id, start, &evs)?;
+        std::fs::write(f, text).map_err(|e| format!("{f}: {e}"))?;
+        eprintln!("cerulean: wrote {} network events to {f}", evs.len());
     }
     if let Some(w) = &mut results {
         w.write(&mut m, &uart, "stop", Some(&stop)).map_err(io)?;

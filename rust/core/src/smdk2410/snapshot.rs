@@ -27,11 +27,12 @@ use std::io::{Read, Write};
 use crate::snapshot::{self, Encoder, Error, Reader, Writer, format_err};
 
 use super::board::{NUM_STUBS, StubId};
-use crate::pccard::{CfCard, Pd6710};
+use crate::pccard::{CfCard, Ne2000, Pd6710, Slot};
 use crate::s3c2410::eint;
 
-/// machine チャンクの版数（2: PC カードのチャンクを足した。2026-09-29）。
-const MACHINE_VERSION: u16 = 2;
+/// machine チャンクの版数（2: PC カードのチャンクを足した。2026-09-29。
+/// 3: イーサネットカード（ne2000 チャンク）を足した。2026-09-30）。
+const MACHINE_VERSION: u16 = 3;
 use super::{Machine, SDRAM_BASE, SDRAM_SIZE};
 
 const STUB_NAMES: [&str; NUM_STUBS] = [
@@ -123,14 +124,20 @@ impl Machine {
             })?;
         }
         s.chunk("pcic", Pd6710::STATE_VERSION, |e| pcic.save_state(e))?;
-        if let Some(c) = card {
-            s.chunk("cf", CfCard::STATE_VERSION, |e| c.save_state(e))?;
-            for (i, b) in c.disk_blocks() {
-                s.chunk("cf:blk", 1, |e| {
-                    e.u32(i);
-                    e.bytes(b);
-                })?;
+        match card {
+            Some(Slot::Cf(c)) => {
+                s.chunk("cf", CfCard::STATE_VERSION, |e| c.save_state(e))?;
+                for (i, b) in c.disk_blocks() {
+                    s.chunk("cf:blk", 1, |e| {
+                        e.u32(i);
+                        e.bytes(b);
+                    })?;
+                }
             }
+            Some(Slot::Nic(n)) => {
+                s.chunk("ne2000", Ne2000::STATE_VERSION, |e| n.save_state(e))?;
+            }
+            None => {}
         }
         s.finish()?;
         Ok(())
@@ -149,7 +156,7 @@ impl Machine {
         }
         let c = s.expect("machine")?;
         let version = c.version;
-        if version != 1 && version != MACHINE_VERSION {
+        if !(1..=MACHINE_VERSION).contains(&version) {
             return format_err(format!("machine: unsupported version {version}"));
         }
         let mut d = c.decoder(version)?;
@@ -232,7 +239,13 @@ impl Machine {
                     d.finish()?;
                     next = s.next_chunk()?;
                 }
-                card = Some(cf);
+                card = Some(Slot::Cf(cf));
+            } else if let Some(c) = next.as_ref().filter(|c| c.name == "ne2000" && version >= 3) {
+                let mut d = c.decoder(Ne2000::STATE_VERSION)?;
+                let n = Ne2000::load_state(&mut d)?;
+                d.finish()?;
+                next = s.next_chunk()?;
+                card = Some(Slot::Nic(n));
             }
             if let Some(c) = next {
                 return format_err(format!("unexpected chunk {}", c.name));

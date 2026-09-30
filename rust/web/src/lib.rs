@@ -205,6 +205,8 @@ impl std::io::Read for JsSource<'_> {
 pub struct Emu {
     m: Machine,
     sess: Session,
+    /// ネットワーク（中継サーバー経由）がオンの間のスタック（cerulean-net）
+    net: Option<cerulean_net::Stack>,
     /// 最後に止まった理由（一致確認の stop の JSON。止まっていなければ空）
     stop: String,
     /// 最後に frame で作った画面の大きさ
@@ -225,6 +227,7 @@ impl Emu {
         Emu {
             m: Machine::new(),
             sess: Session::new(),
+            net: None,
             stop: String::new(),
             frame_w: 0,
             frame_h: 0,
@@ -406,6 +409,160 @@ impl Emu {
     #[wasm_bindgen(js_name = cardDisk)]
     pub fn card_disk(&self) -> Option<Vec<u8>> {
         self.m.card_disk().map(|d| d.to_vec())
+    }
+
+    // ---- ネットワーク（イーサネットカードと cerulean-net のスタック）----
+    //
+    // 中継サーバーとのやり取り（WebSocket）は Worker の JS が行う。スタックが作った
+    // フレームは、作った時点の命令境界で `net rx` の入力としてゲストに渡し、記録する
+    // （記録を再生すればネットワークなしで同じ状態になる）。
+
+    /// イーサネットカードを挿す（今の命令境界。記録中なら `nic insert` として記録する）。
+    #[wasm_bindgen(js_name = nicInsert)]
+    pub fn nic_insert(&mut self) -> Result<(), JsError> {
+        let ev = Event {
+            data: cerulean_core::pccard::ne2000::DEFAULT_MAC.to_vec(),
+            ..Event::new(0, Kind::NicInsert)
+        };
+        self.sess
+            .inject(&mut self.m, ev)
+            .map_err(|e| JsError::new(&e))
+    }
+
+    /// イーサネットカードを抜く（挿していなければ何もしない）。
+    #[wasm_bindgen(js_name = nicEject)]
+    pub fn nic_eject(&mut self) -> Result<(), JsError> {
+        if self.m.nic_mac().is_none() {
+            return Ok(());
+        }
+        self.sess
+            .inject(&mut self.m, Event::new(0, Kind::NicEject))
+            .map_err(|e| JsError::new(&e))
+    }
+
+    #[wasm_bindgen(js_name = nicInserted)]
+    pub fn nic_inserted(&self) -> bool {
+        self.m.nic_mac().is_some()
+    }
+
+    /// スタックを作る・捨てる（捨てると外への接続はすべて忘れる）。
+    #[wasm_bindgen(js_name = netEnable)]
+    pub fn net_enable(&mut self, on: bool) {
+        if on {
+            self.net.get_or_insert_with(cerulean_net::Stack::new);
+        } else {
+            self.net = None;
+        }
+    }
+
+    /// ゲストが送ったフレームをスタックに渡し、時間を進め（再送）、ゲストへのフレームを
+    /// 渡す。戻り値は中継への依頼の列（[種類 u8][番号 u32][長さ u32][中身] の繰り返し。
+    /// 種類 1 = 接続（中身はポート u16 と接続先の名前）、2 = 送信、3 = 送信の終わり、
+    /// 4 = 切断。整数はリトルエンディアン）。now_ms は仮想時間のミリ秒。
+    #[wasm_bindgen(js_name = netStep)]
+    pub fn net_step(&mut self, now_ms: f64) -> Result<Vec<u8>, JsError> {
+        let sent = self.m.net_take_tx();
+        let Some(net) = &mut self.net else {
+            return Ok(Vec::new());
+        };
+        let now = now_ms.max(0.0) as u64;
+        for f in &sent {
+            net.input(now, f);
+        }
+        net.poll(now);
+        self.deliver()?;
+        let mut out = Vec::new();
+        let Some(net) = &mut self.net else {
+            return Ok(out);
+        };
+        for r in net.take_requests() {
+            let (kind, id, body) = match r {
+                cerulean_net::Request::Connect { id, target, port } => {
+                    let host = match target {
+                        cerulean_net::Target::Ip(ip) => {
+                            format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3])
+                        }
+                        cerulean_net::Target::Host(h) => h,
+                    };
+                    let mut b = port.to_le_bytes().to_vec();
+                    b.extend_from_slice(host.as_bytes());
+                    (1u8, id, b)
+                }
+                cerulean_net::Request::Send { id, data } => (2, id, data),
+                cerulean_net::Request::Shutdown { id } => (3, id, Vec::new()),
+                cerulean_net::Request::Close { id } => (4, id, Vec::new()),
+            };
+            out.push(kind);
+            out.extend_from_slice(&id.to_le_bytes());
+            out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+            out.extend_from_slice(&body);
+        }
+        Ok(out)
+    }
+
+    /// スタックが作ったフレームを今の命令境界でゲストに渡す（記録する）。
+    fn deliver(&mut self) -> Result<(), JsError> {
+        let Some(net) = &mut self.net else {
+            return Ok(());
+        };
+        for f in net.take_frames() {
+            let ev = Event {
+                data: f,
+                ..Event::new(0, Kind::NetRx)
+            };
+            self.sess
+                .inject(&mut self.m, ev)
+                .map_err(|e| JsError::new(&e))?;
+        }
+        Ok(())
+    }
+
+    /// 外への接続の結果。
+    #[wasm_bindgen(js_name = netConnected)]
+    pub fn net_connected(&mut self, id: u32, ok: bool) -> Result<(), JsError> {
+        if let Some(n) = &mut self.net {
+            n.connected(id, ok);
+        }
+        self.deliver()
+    }
+
+    /// その接続にあと何バイト netRecv してよいか。
+    #[wasm_bindgen(js_name = netTxRoom)]
+    pub fn net_tx_room(&self, id: u32) -> u32 {
+        self.net.as_ref().map_or(0, |n| n.tx_room(id) as u32)
+    }
+
+    /// 外から届いたバイト列（netTxRoom 以下にすること）。
+    #[wasm_bindgen(js_name = netRecv)]
+    pub fn net_recv(&mut self, id: u32, data: &[u8]) -> Result<(), JsError> {
+        if let Some(n) = &mut self.net {
+            n.recv(id, data);
+        }
+        self.deliver()
+    }
+
+    /// 外の接続が送り終えた（EOF）。
+    #[wasm_bindgen(js_name = netRemoteClosed)]
+    pub fn net_remote_closed(&mut self, id: u32) -> Result<(), JsError> {
+        if let Some(n) = &mut self.net {
+            n.remote_closed(id);
+        }
+        self.deliver()
+    }
+
+    /// 外の接続が失敗・切断した。
+    #[wasm_bindgen(js_name = netRemoteReset)]
+    pub fn net_remote_reset(&mut self, id: u32) -> Result<(), JsError> {
+        if let Some(n) = &mut self.net {
+            n.remote_reset(id);
+        }
+        self.deliver()
+    }
+
+    /// 生きている接続の数（表示用）。
+    #[wasm_bindgen(js_name = netConnections)]
+    pub fn net_connections(&self) -> u32 {
+        self.net.as_ref().map_or(0, |n| n.connections() as u32)
     }
 
     /// ゲストの時計（RTC）を今の命令境界で合わせる（記録中なら記録する）。rtc は

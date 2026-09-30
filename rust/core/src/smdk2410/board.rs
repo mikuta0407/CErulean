@@ -7,7 +7,7 @@ use crate::s3c2410::*;
 
 use super::kbd::KbdMcu;
 use super::{PCLK_HZ, PCLK_TICKS_NUM};
-use crate::pccard::{Card, CfCard, Pd6710};
+use crate::pccard::{Card, Pd6710, Slot};
 use crate::s3c2410::eint;
 
 /// バスに登録する MMIO デバイスの識別子（Go では bus.Device の値そのものを
@@ -66,7 +66,7 @@ pub struct Board {
     pub kbd: KbdMcu,
     /// PC カードコントローラ（バンク2）とソケットのカード
     pub pcic: Pd6710,
-    pub card: Option<CfCard>,
+    pub card: Option<Slot>,
     /// 外部割り込みのピンのレベル（ビット n = EINTn。部品の状態から決まる派生情報。
     /// 保存しない）
     pub(crate) eint_levels: u32,
@@ -295,8 +295,8 @@ impl Board {
         self.update_eint();
     }
 
-    fn card_dyn(card: &mut Option<CfCard>) -> Option<&mut dyn Card> {
-        card.as_mut().map(|c| c as &mut dyn Card)
+    fn card_dyn(card: &mut Option<Slot>) -> Option<&mut dyn Card> {
+        card.as_mut().map(|c| c.as_card())
     }
 
     /// バンク2 の読み出し（16 ビットのバス。32 ビットのアクセスは 2 回に分かれる）。
@@ -342,7 +342,7 @@ impl Board {
     }
 
     /// カードを挿す（既に挿さっていればエラー）。
-    pub(crate) fn insert_card(&mut self, card: CfCard) -> Result<(), String> {
+    pub(crate) fn insert_card(&mut self, card: Slot) -> Result<(), String> {
         if self.card.is_some() {
             return Err("a card is already inserted".into());
         }
@@ -354,15 +354,22 @@ impl Board {
     }
 
     /// カードを抜く（電源を切ってから手放す）。
-    pub(crate) fn eject_card(&mut self) -> Option<CfCard> {
+    pub(crate) fn eject_card(&mut self) -> Option<Slot> {
         self.card.as_ref()?;
         self.pcic.set_inserted(false);
         if let Some(c) = self.card.as_mut() {
-            c.set_power(false);
+            c.as_card().set_power(false);
         }
         self.pcic.sync(None);
         self.update_eint();
         self.card.take()
+    }
+
+    /// カードの状態がバスのアクセス以外で変わった後（ネットワークからの受信）:
+    /// コントローラと割り込み線に反映する。
+    pub(crate) fn card_changed(&mut self) {
+        self.pcic.sync(Self::card_dyn(&mut self.card));
+        self.update_eint();
     }
 }
 
