@@ -267,7 +267,10 @@ mmu → bus::PhysMem、bus → bus::Devices（ボードが MMIO を振り分け�
   X4=(ADCDAT1−85)×960/880、Y4=(1023−ADCDAT0−105)×1280/875（軸入れ替え・Y 反転）。
 - **キーは SPI1 のキーボード用マイコン**（kbdmouse.dll、VA 0x014D0000〜）。EINT1
   （GPF1 立ち下がり）1 回ごとに GPB6=Low→SPTDAT1=0xFF→GPB6=High→SPRDAT1 で 1 バイト。
-  bit7=1 が離した、bit6〜0 がスキャンコード、直前と同じバイトは無視。スキャンコード→VK
+  bit7=1 が離した、bit6〜0 がスキャンコード、直前と同じバイトは無視。
+  **OAL の InterruptDone は EINT1 の SRCPND をクリアしてからマスクを外す**ので、IST が読んで
+  いる間に上げた次のバイトの EINT1 は消える（2026-09-30。押して直ぐ離すと離したバイトが残り
+  押しっぱなしになっていた）。2 バイト目以降はマスク解除時に上げる（board.rs の kbd_rearm）。スキャンコード→VK
   はドライバ内の固定表（0x00〜0x6F。Enter=0x5A、↑0x6C ↓0x6A ←0x6D →0x6F、App1〜5=0x64〜0x68）。
   **ソフトキー（VK_F1/F2）は表に無い**。初期化時に 0xFF×10 と 3 バイトコマンド
   （1B A0 7B / 1B A1 7A）を送るが応答は読まない。

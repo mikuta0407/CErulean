@@ -152,9 +152,9 @@ fn kbd_one_interrupt_per_byte() {
     let mut k = KbdMcu::default();
     assert!(k.push(0x5A));
     assert!(!k.push(0xDA), "second waits for the first to be read");
-    assert_eq!(k.transfer(0xFF), (0x5A, true));
-    assert_eq!(k.transfer(0xFF), (0xDA, false));
-    assert_eq!(k.transfer(0xFF), (0, false), "empty queue returns 0");
+    assert_eq!(k.transfer(0xFF), 0x5A);
+    assert_eq!(k.transfer(0xFF), 0xDA);
+    assert_eq!(k.transfer(0xFF), 0, "empty queue returns 0");
     assert_eq!(k.log, [0xFF; 3]);
 }
 
@@ -172,7 +172,7 @@ fn key_down_up_bytes() {
         m.key_up(key).unwrap();
         let k = &mut m.sys.board.kbd;
         assert_eq!(
-            (k.transfer(0xFF).0, k.transfer(0xFF).0),
+            (k.transfer(0xFF), k.transfer(0xFF)),
             (code, code | 0x80),
             "{key}"
         );
@@ -184,6 +184,40 @@ fn key_down_up_bytes() {
         m.sys.board.intc.read(0, 4) & (1 << 1),
         0,
         "EINT1 not raised"
+    );
+}
+
+/// 押して直ぐ離したとき（2 バイトが同時に積まれる）: OAL の割り込みの流れ（ISR が
+/// マスクして SRCPND/INTPND をクリア → IST が SPI で 1 バイト読む → InterruptDone が
+/// SRCPND をクリアしてからマスクを外す。2026-09-30 に --watch で観察）で、離した
+/// バイトの EINT1 が消されずに届くこと。
+#[test]
+fn kbd_second_byte_after_interrupt_done() {
+    use crate::bus::Devices;
+    use crate::s3c2410::{REG_INTMSK, REG_INTPND, REG_SRCPND};
+    let mut m = Machine::new();
+    let b = &mut m.sys.board;
+    let eint1 = 1u32 << 1;
+    b.write(Dev::Intc, REG_INTMSK, 4, !eint1);
+    m.key_down("Right").unwrap();
+    m.key_up("Right").unwrap();
+    let b = &mut m.sys.board;
+    for want in [0x6F, 0xEF] {
+        assert_ne!(b.intc.read(REG_SRCPND, 4) & eint1, 0, "EINT1 for {want:#x}");
+        // ISR
+        b.write(Dev::Intc, REG_INTMSK, 4, 0xFFFF_FFFF);
+        b.write(Dev::Intc, REG_SRCPND, 4, eint1);
+        b.write(Dev::Intc, REG_INTPND, 4, eint1);
+        // IST（SPI の転送はキーボード用マイコンを直接読む）
+        assert_eq!(b.kbd.transfer(0xFF), want);
+        // InterruptDone
+        b.write(Dev::Intc, REG_SRCPND, 4, eint1);
+        b.write(Dev::Intc, REG_INTMSK, 4, !eint1);
+    }
+    assert_eq!(
+        b.intc.read(REG_SRCPND, 4) & eint1,
+        0,
+        "no EINT1 after the queue drains"
     );
 }
 

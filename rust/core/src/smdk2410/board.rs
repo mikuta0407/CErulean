@@ -385,12 +385,25 @@ impl Board {
         self.pcic.sync(Self::card_dyn(&mut self.card));
         self.update_eint();
     }
+
+    /// キーボード用マイコンに渡していないバイトが残っていて、EINT1 がマスクを外され
+    /// 保留もないなら、次のバイトの EINT1 を上げる（kbd.rs のモデルのコメント）。
+    /// 状態を持たない判定なので、取りこぼした状態で保存したスナップショットも
+    /// 次のマスク解除で回復する。
+    fn kbd_rearm(&mut self) {
+        let bit = 1 << (INT_EINT0 + 1);
+        if !self.kbd.out.is_empty()
+            && self.intc.read(REG_INTMSK, 4) & bit == 0
+            && self.intc.read(REG_SRCPND, 4) & bit == 0
+        {
+            self.intc.raise(INT_EINT0 + 1); // EINT1
+        }
+    }
 }
 
-/// SPI1 のキーボード用マイコンと、EINT1 を上げる INTC の組（SPI の転送中に使う）。
+/// SPI1 のキーボード用マイコン（SPI の転送中に使う）。
 struct KbdPort<'a> {
     kbd: &'a mut KbdMcu,
-    intc: &'a mut Intc,
 }
 
 impl SpiSlaves for KbdPort<'_> {
@@ -398,11 +411,7 @@ impl SpiSlaves for KbdPort<'_> {
         if ch != 1 {
             return None; // SPI0 には何もつながっていない
         }
-        let (b, raise) = self.kbd.transfer(tx);
-        if raise {
-            self.intc.raise(INT_EINT0 + 1); // EINT1
-        }
-        Some(b)
+        Some(self.kbd.transfer(tx))
     }
 }
 
@@ -458,13 +467,13 @@ impl Devices<Dev> for Board {
                 self.update_eint();
             }
             Dev::Uart(n) => self.uart[n as usize].write(off, size, v),
-            Dev::Intc => self.intc.write(off, size, v),
+            Dev::Intc => {
+                self.intc.write(off, size, v);
+                self.kbd_rearm();
+            }
             Dev::Lcd => self.lcd.write(off, size, v),
             Dev::Spi => {
-                let mut port = KbdPort {
-                    kbd: &mut self.kbd,
-                    intc: &mut self.intc,
-                };
+                let mut port = KbdPort { kbd: &mut self.kbd };
                 if let Some(ch) = self.spi.write(off, size, v, &mut port) {
                     self.intc.raise([INT_SPI0, INT_SPI1][ch]);
                 }
