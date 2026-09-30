@@ -111,7 +111,7 @@ function onWorker(d) {
     $("recText").hidden = false;
     $("recScript").hidden = false;
     $("recSnap").hidden = false;
-    $("recCards").hidden = !/^@\d+i card insert /m.test(d.recorded.script);
+    $("recCards").hidden = !/^@\d+i (card|share) insert /m.test(d.recorded.script);
     log(`記録を止めました: ${d.recorded.base}`);
   }
   if (d.download) download(d.download.bytes, d.download.name);
@@ -370,7 +370,7 @@ function renderCard(c) {
   }
   const has = !!c.meta;
   $("cardState").textContent = c.inserted
-    ? `挿しています（${has ? c.meta.name : "カード"}）。中身はエミュレータの中にあります。`
+    ? `挿しています（${has ? c.meta.name : "カード"}${c.share ? "・フォルダ共有の方式" : ""}）。中身はエミュレータの中にあります。`
     : has
       ? `抜いています: ${c.meta.name}（${fmtSize(c.meta.size)}・空き ${fmtSize(c.free ?? 0)}）`
       : "カードがありません。「作る」で空のカードを作るか、イメージを読み込んでください。";

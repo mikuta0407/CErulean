@@ -26,6 +26,22 @@ pub trait Devices<D> {
     /// 管理する）・バスからの書き込み・外部入力」以外では変わらない場合だけ。
     /// ポーリングで待たれるステータスレジスタ（変換完了フラグ等）が対象。
     fn stable_read(&mut self, dev: D, off: u32, size: u32) -> Option<u32>;
+    /// デバイスへの書き込みの直後に呼ぶ（書き込みを合図に RAM を読み書きする装置用。
+    /// 次の命令より前に済む。既定は何もしない）。
+    fn after_write(&mut self, _dev: D, _ram: &mut dyn RamAccess) {}
+}
+
+/// 装置から RAM を読み書きする口（[`Devices::after_write`] に渡す）。
+pub trait RamAccess {
+    /// 物理アドレス pa から len バイトの RAM（全部が 1 つの RAM 領域に入るときだけ）。
+    fn ram_slice_mut(&mut self, pa: u32, len: u32) -> Option<&mut [u8]>;
+}
+
+impl<D: Copy> RamAccess for Bus<D> {
+    fn ram_slice_mut(&mut self, pa: u32, len: u32) -> Option<&mut [u8]> {
+        let (ram, off) = self.ram_mut(pa)?;
+        ram.get_mut(off as usize..off as usize + len as usize)
+    }
 }
 
 /// 未マップアドレスへのアクセス。実機ならバスフォールト相当（エミュレーション停止）。
@@ -420,6 +436,7 @@ impl<D: Copy> Bus<D> {
             Kind::Mmio(d) => {
                 // Go の Write8/Write16 は引数の型で切り詰めてから渡す。
                 devs.write(d, o, size, v & size_mask(size));
+                devs.after_write(d, self);
                 Ok(())
             }
         }

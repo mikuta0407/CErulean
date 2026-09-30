@@ -7,6 +7,7 @@
 //! して持ち、`arm` の実行関数が両方を借りる。
 
 mod board;
+pub mod deshare;
 mod kbd;
 mod run;
 mod snapshot;
@@ -381,6 +382,33 @@ impl Machine {
         }
         self.entry_pa = va_to_pa(img.entry).map_err(|e| Error(format!("entry point: {}", e.0)))?;
         Ok(())
+    }
+
+    /// Device Emulator のフォルダ共有を挿す（「Storage Card」に見える。ソケットを使わないので
+    /// イーサネットカードと同時に使える）。既に挿していればエラー。入力として記録すること。
+    pub fn share_insert(&mut self, fs: deshare::ShareFs) -> Result<(), Error> {
+        let b = &mut self.sys.board;
+        if b.deshare.fs.is_some() {
+            return Err(Error("a shared folder is already inserted".into()));
+        }
+        b.deshare.insert(fs);
+        b.deshare_notify();
+        b.update_deadline();
+        Ok(())
+    }
+
+    /// フォルダ共有を抜いて中身を返す（挿していなければ None）。
+    pub fn share_eject(&mut self) -> Option<deshare::ShareFs> {
+        let b = &mut self.sys.board;
+        let fs = b.deshare.eject()?;
+        b.deshare_notify();
+        b.update_deadline();
+        Some(fs)
+    }
+
+    /// 挿している共有フォルダの中身（状態は変えない）。
+    pub fn share_fs(&self) -> Option<&deshare::ShareFs> {
+        self.sys.board.deshare.fs.as_ref()
     }
 
     /// 物理アドレス pa の RAM に data を書く（調査用。リセットの前に使う）。
@@ -771,10 +799,20 @@ fn map(b: &mut Bus<Dev>) -> Result<(), crate::bus::MapError> {
     // （初期化の読み返しが通れば十分）。
     // TODO: ホスト連携（フォルダ共有・ActiveSync 等）が必要になったら
     // レジスタの意味を観察から詰める。
+    // フォルダ共有（emulserv.dll・vcefsd.dll）は 0x500F4000〜0x500F5FFF を専用の装置にする
+    // （deshare.rs。2026-09-30）。その外は今までどおり値保持スタブ。
     b.map_mmio(
         "de-paravirt-500F0000",
         0x500F0000,
-        0x10000,
+        0x4000,
+        Dev::Stub(StubId::DeParavirt),
+    )?;
+    b.map_mmio("de-share", 0x500F4000, 0x2000, Dev::DeShare)?;
+    // 上の残り（アクセスは見ていない。スタブのオフセットは 0x500F6000 からになる）
+    b.map_mmio(
+        "de-paravirt-500F6000",
+        0x500F6000,
+        0xA000,
         Dev::Stub(StubId::DeParavirt),
     )?;
     Ok(())

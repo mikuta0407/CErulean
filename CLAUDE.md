@@ -116,6 +116,7 @@ mmu → bus::PhysMem、bus → bus::Devices（ボードが MMIO を振り分け�
   `ne2000.rs`。NE2000 互換のイーサネット。ソケットの中身は `Slot`）。
   SoC に依らない部品で、バンク2 の配置と EINT への配線は smdk2410 の board.rs。
   カードのイメージを外から読み書きするのは別クレート `rust/fat`（cerulean-fat。コアは使わない）。
+  Device Emulator のフォルダ共有（ソケットを使わない「Storage Card」）は `smdk2410/deshare.rs`。
   ゲストのイーサネットを外へつなぐ NAT（ARP・DHCP・DNS・TCP の終端）は別クレート `rust/net`
   （cerulean-net。sans-IO。コアは使わない）。設計は docs/network-design.md。
 - `jit`: JIT-to-wasm（段階5。設計は `docs/stage5-design.md`）。ブロックの切り出しと
@@ -286,6 +287,11 @@ mmu → bus::PhysMem、bus → bus::Devices（ボードが MMIO を振り分け�
   受信リング 4Ch〜80h（RAM 4000h〜7FFFh）。受信バイト数は FCS を含みヘッダを含まない。
   **IE で使うには WM5 の「設定 → 接続 → ネットワークカード」の接続先を「インターネット設定」に
   する**（既定の「社内」では接続できない）。詳細は docs/network-design.md。
+- **Device Emulator のフォルダ共有（2026-09-30。docs/folder-share-design.md）**:
+  emulserv.dll が PA 0x500F5004 の bit30 と EINT11（EINTPEND に直接）で挿抜を受け、vcefsd.dll が
+  PA 0x500F4000 のレジスタと共有バッファ PA 0x33EFF000・データ 0x33EEF000 でファイル操作を
+  送る（パスは先頭からのパス全体）。WM5 からは「Storage Card」。PC カードのソケットを使わない
+  ので NE2000 と同時に使える。約束は smdk2410/deshare.rs の先頭。
 - **OAL のアイドルは割り込み待ちのスピン**: 0x800AFDE4〜 の
   `LDR r3,[r4]`（r4=0x814C8708）/ `CMP r3,#0` / `BEQ` の 3 命令で、割り込み
   ハンドラが RAM の変数を書くまで回る（直前に 0x800AFDDC で変数を 0 にし、
@@ -317,7 +323,6 @@ mmu → bus::PhysMem、bus → bus::Devices（ボードが MMIO を振り分け�
 - 本体ストレージの永続化（2026-09-30 調査。docs/storage-persistence.md）: NOR フラッシュ
   （amdnord.dll の構成が実在のチップと合わない）・RAMFMD（OAL が毎回の起動で領域を上書きする）の
   どちらも無改変のイメージでは成り立たない。永続化はスナップショットで行う。ROM は書き換えない。
-- ネットワークとストレージの共存: vcefsd.dll のフォルダ共有の調査（2026-09-30 着手）。
 - **電源ボタン**（pwrbtn2410.dll、GPF0/EINT0）: 押すとサスペンド（OEMPowerOff・
   スリープ・起床要因）の実装が必要になり範囲が大きい。UI 操作には不要なので後回し。
 - 性能改善の続き: 段階4 は 4-2（IR）で区切った（2026-09-29。ネイティブ約 100M・Node の

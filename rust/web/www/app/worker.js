@@ -332,9 +332,9 @@ const fatTime = (t) => {
 };
 
 async function sendCard() {
-  const inserted = !!emu && emu.cardInserted();
+  const inserted = cardIn();
   if (!inserted) await loadCard();
-  const info = { inserted, sizes: CARD_SIZES_MB, path: cardPath };
+  const info = { inserted, share: !!emu && emu.shareInserted(), sizes: CARD_SIZES_MB, path: cardPath };
   if (cardMeta) info.meta = cardMeta;
   if (!inserted && card) {
     try {
@@ -350,9 +350,12 @@ async function sendCard() {
   post({ card: info });
 }
 
+// カードを挿しているか（PC カードのソケットか、ネットワークと同時に使うときのフォルダ共有）。
+const cardIn = () => !!emu && (emu.cardInserted() || emu.shareInserted());
+
 // 編集は抜いている間だけ（挿している間の中身はゲストのもの）。
 function editableCard() {
-  if (emu?.cardInserted()) throw new Error("カードを抜いてから編集してください");
+  if ((emu && cardIn())) throw new Error("カードを抜いてから編集してください");
   if (!card) throw new Error("カードがありません（先に作るか読み込んでください）");
   return card;
 }
@@ -585,7 +588,7 @@ function netApply() {
   if (!emu || stopped) return;
   if (netCfg.on) {
     if (emu.cardInserted()) {
-      netStatus("ストレージカードを抜いてからオンにしてください（PC カードのソケットは 1 つです）");
+      netStatus("ストレージカードを抜いてからオンにしてください（PC カードのソケットは 1 つです。オンにした後に挿すと、ネットワークと同時に使える方式で挿せます）");
       return;
     }
     emu.netEnable(true);
@@ -762,7 +765,7 @@ function start(e, id, name, turbo) {
   sendFrame(true);
   schedule();
   // スナップショットによってカードの有無が変わる（挿していれば中身はマシンの中）
-  if (emu.cardInserted()) {
+  if (cardIn()) {
     card?.free();
     card = null;
   } else if (cardMeta === false) {
@@ -909,7 +912,7 @@ const handlers = {
     await sendCard();
   },
   async cardNew({ mb }) {
-    if (emu?.cardInserted()) throw new Error("カードを抜いてから作り直してください");
+    if ((emu && cardIn())) throw new Error("カードを抜いてから作り直してください");
     const c = wasm.CardImage.format(mb, "STORAGECARD");
     card?.free();
     card = c;
@@ -919,7 +922,7 @@ const handlers = {
     await sendCard();
   },
   async cardImport({ bytes, name }) {
-    if (emu?.cardInserted()) throw new Error("カードを抜いてから読み込んでください");
+    if ((emu && cardIn())) throw new Error("カードを抜いてから読み込んでください");
     const c = new wasm.CardImage(bytes); // FAT として開けるものだけ受け付ける
     card?.free();
     card = c;
@@ -929,9 +932,9 @@ const handlers = {
   },
   async cardExport() {
     let bytes;
-    if (emu?.cardInserted()) {
+    if ((emu && cardIn())) {
       // 挿している間は今の中身（ゲストが書き込み中の途中の状態のこともある）
-      bytes = emu.cardDisk();
+      bytes = emu.shareInserted() ? emu.shareDisk() : emu.cardDisk();
     } else {
       bytes = editableCard().bytes();
     }
@@ -974,13 +977,19 @@ const handlers = {
   },
   async cardInsert() {
     if (!emu || stopped) throw new Error("エミュレータが動いていません");
-    if (emu.nicInserted()) throw new Error("ネットワークをオフにしてから挿してください（PC カードのソケットは 1 つです）");
     const c = editableCard();
     const bytes = c.bytes();
     // 記録中は再生に要るので、挿した時点のイメージを記録の置き場に残す
     const name = `cerulean-card-${(await sha256(bytes)).slice(0, 12) || emu.steps()}.img`;
     if (emu.recording()) await writeAtomic(await dir("rec"), name, bytes);
-    emu.cardInsert(bytes, name);
+    // イーサネットカードがソケットにあるときは、Device Emulator のフォルダ共有として挿す
+    // （WM5 からは同じ「Storage Card」に見える）
+    if (emu.nicInserted()) {
+      emu.shareInsert(bytes, name);
+      log("カードをフォルダ共有として挿した（ネットワークと同時に使える方式）");
+    } else {
+      emu.cardInsert(bytes, name);
+    }
     card.free();
     card = null;
     inputSinceSave = true;
@@ -988,8 +997,8 @@ const handlers = {
     await sendCard();
   },
   async cardEject() {
-    if (!emu || !emu.cardInserted()) return;
-    const bytes = emu.cardEject();
+    if (!emu || !cardIn()) return;
+    const bytes = emu.shareInserted() ? emu.shareEject() : emu.cardEject();
     card = new wasm.CardImage(bytes);
     await storeCard(bytes, cardMeta?.name ?? "カード");
     inputSinceSave = true;
@@ -1017,7 +1026,7 @@ const handlers = {
     const m = await readJson(d, "rec.json");
     if (what === "script") await sendFile(d, "script.txt", `${m.base}.txt`);
     else if (what === "cards") {
-      // スクリプトの card insert が参照するイメージ（記録中に挿したもの）
+      // スクリプトの card insert・share insert が参照するイメージ（記録中に挿したもの）
       for await (const [name] of d.entries()) if (name.startsWith("cerulean-card-") && name.endsWith(".img")) await sendFile(d, name, name);
     } else await sendFile(d, "start.snap.gz", `${m.base}.snap.gz`);
   },

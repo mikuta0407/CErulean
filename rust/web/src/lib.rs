@@ -16,6 +16,8 @@ use cerulean_core::script::{self, Event, Kind};
 use cerulean_core::smdk2410::{INSTRUCTIONS_PER_SECOND, Machine, SDRAM_BASE};
 use wasm_bindgen::prelude::*;
 
+mod share;
+
 /// 仮想時間 1 秒あたりの命令数。
 #[wasm_bindgen(js_name = instructionsPerSecond)]
 pub fn instructions_per_second() -> u64 {
@@ -207,6 +209,8 @@ pub struct Emu {
     sess: Session,
     /// ネットワーク（中継サーバー経由）がオンの間のスタック（cerulean-net）
     net: Option<cerulean_net::Stack>,
+    /// フォルダ共有に挿したカードのイメージの大きさ（抜くときに同じ大きさで作り直す）
+    share_size: u64,
     /// 最後に止まった理由（一致確認の stop の JSON。止まっていなければ空）
     stop: String,
     /// 最後に frame で作った画面の大きさ
@@ -228,6 +232,7 @@ impl Emu {
             m: Machine::new(),
             sess: Session::new(),
             net: None,
+            share_size: 0,
             stop: String::new(),
             frame_w: 0,
             frame_h: 0,
@@ -322,7 +327,7 @@ impl Emu {
                 Kind::Quit => Ok(true),
                 Kind::Shot | Kind::Snap => Ok(false),
                 // TODO(段階3 のカード): ブラウザ版のカードの挿抜はメニューから行う（未実装）
-                Kind::CardInsert | Kind::CardEject => {
+                Kind::CardInsert | Kind::CardEject | Kind::ShareInsert | Kind::ShareEject => {
                     Err("card: not supported in scripts here".into())
                 }
                 _ => emu::apply_input(m, ev),
@@ -398,6 +403,53 @@ impl Emu {
         self.sess
             .record_applied(&self.m, Event::new(0, Kind::CardEject));
         Some(disk)
+    }
+
+    /// ストレージカードのイメージをフォルダ共有（Device Emulator の「Storage Card」）として挿す
+    /// （ソケットを使わないので、イーサネットカードと同時に使える）。記録中なら
+    /// `share insert <name>` として記録する。
+    #[wasm_bindgen(js_name = shareInsert)]
+    pub fn share_insert(&mut self, disk: Vec<u8>, name: &str) -> Result<(), JsError> {
+        let fs = share::from_image(&disk).map_err(|e| JsError::new(&e))?;
+        self.m
+            .share_insert(fs)
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        self.share_size = disk.len() as u64;
+        let ev = Event {
+            path: name.into(),
+            ..Event::new(0, Kind::ShareInsert)
+        };
+        self.sess.record_applied(&self.m, ev);
+        Ok(())
+    }
+
+    /// フォルダ共有を抜いて中身をカードのイメージ（FAT）で返す。挿していなければ undefined。
+    #[wasm_bindgen(js_name = shareEject)]
+    pub fn share_eject(&mut self) -> Result<Option<Vec<u8>>, JsError> {
+        let Some(fs) = self.m.share_eject() else {
+            return Ok(None);
+        };
+        self.sess
+            .record_applied(&self.m, Event::new(0, Kind::ShareEject));
+        share::to_image(&fs, self.share_size.max(8 << 20))
+            .map(Some)
+            .map_err(|e| JsError::new(&e))
+    }
+
+    #[wasm_bindgen(js_name = shareInserted)]
+    pub fn share_inserted(&self) -> bool {
+        self.m.share_fs().is_some()
+    }
+
+    /// 挿しているフォルダ共有の今の中身（カードのイメージ。書き出し用）。
+    #[wasm_bindgen(js_name = shareDisk)]
+    pub fn share_disk(&self) -> Result<Option<Vec<u8>>, JsError> {
+        match self.m.share_fs() {
+            Some(fs) => share::to_image(fs, self.share_size.max(8 << 20))
+                .map(Some)
+                .map_err(|e| JsError::new(&e)),
+            None => Ok(None),
+        }
     }
 
     #[wasm_bindgen(js_name = cardInserted)]

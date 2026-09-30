@@ -511,6 +511,24 @@ pub fn cmd_blockstat(args: &[String]) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// disasm: スナップショットの時点の仮想アドレスから命令を逆アセンブルする（調査用）。
+/// 変換は保存時点の MMU（FCSE の PID を含む）で行う。
+pub fn cmd_disasm(args: &[String]) -> Result<ExitCode, String> {
+    let [snap, va, n] = args else {
+        return Err("usage: cerulean disasm <snapshot> <va> <count>".into());
+    };
+    let mut m = load_snap(snap)?;
+    let (va, n) = (parse_u64(va)? as u32, parse_u64(n)? as u32);
+    for i in 0..n {
+        let a = va.wrapping_add(i * 4);
+        match m.peek32(a) {
+            Some(w) => println!("{a:08X}  {w:08X}  {}", cerulean_core::arm::disasm(w, a)),
+            None => println!("{a:08X}  ????????"),
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -535,22 +553,4 @@ mod tests {
         let d = cpu_diff("k", &hex(&e), &hex(&a));
         assert_eq!(d, ["k:   r1         00000007, want 00000000"]);
     }
-}
-
-/// disasm: スナップショットの時点の仮想アドレスから命令を逆アセンブルする（調査用）。
-/// 変換は保存時点の MMU（FCSE の PID を含む）で行う。
-pub fn cmd_disasm(args: &[String]) -> Result<ExitCode, String> {
-    let [snap, va, n] = args else {
-        return Err("usage: cerulean disasm <snapshot> <va> <count>".into());
-    };
-    let mut m = load_snap(snap)?;
-    let (va, n) = (parse_u64(va)? as u32, parse_u64(n)? as u32);
-    for i in 0..n {
-        let a = va.wrapping_add(i * 4);
-        match m.peek32(a) {
-            Some(w) => println!("{a:08X}  {w:08X}  {}", cerulean_core::arm::disasm(w, a)),
-            None => println!("{a:08X}  ????????"),
-        }
-    }
-    Ok(ExitCode::SUCCESS)
 }

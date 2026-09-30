@@ -31,8 +31,9 @@ use crate::pccard::{CfCard, Ne2000, Pd6710, Slot};
 use crate::s3c2410::eint;
 
 /// machine チャンクの版数（2: PC カードのチャンクを足した。2026-09-29。
-/// 3: イーサネットカード（ne2000 チャンク）を足した。2026-09-30）。
-const MACHINE_VERSION: u16 = 3;
+/// 3: イーサネットカード（ne2000 チャンク）を足した。2026-09-30。
+/// 4: Device Emulator のフォルダ共有（deshare チャンク）を足した。2026-09-30）。
+const MACHINE_VERSION: u16 = 4;
 use super::{Machine, SDRAM_BASE, SDRAM_SIZE};
 
 const STUB_NAMES: [&str; NUM_STUBS] = [
@@ -82,6 +83,7 @@ impl Machine {
             kbd,
             pcic,
             card,
+            deshare,
             eint_levels: _,
             uart,
             dma,
@@ -139,6 +141,9 @@ impl Machine {
             }
             None => {}
         }
+        s.chunk("deshare", super::deshare::DeShare::STATE_VERSION, |e| {
+            deshare.save_state(e)
+        })?;
         s.finish()?;
         Ok(())
     }
@@ -220,6 +225,7 @@ impl Machine {
         }
         let mut pcic = Pd6710::new();
         let mut card = None;
+        let mut deshare = super::deshare::DeShare::default();
         if version >= 2 {
             let c = s.expect("pcic")?;
             let mut d = c.decoder(Pd6710::STATE_VERSION)?;
@@ -247,6 +253,15 @@ impl Machine {
                 next = s.next_chunk()?;
                 card = Some(Slot::Nic(n));
             }
+            if version >= 4 {
+                let Some(c) = next.as_ref().filter(|c| c.name == "deshare") else {
+                    return format_err("missing chunk deshare");
+                };
+                let mut d = c.decoder(super::deshare::DeShare::STATE_VERSION)?;
+                deshare = super::deshare::DeShare::load_state(&mut d)?;
+                d.finish()?;
+                next = s.next_chunk()?;
+            }
             if let Some(c) = next {
                 return format_err(format!("unexpected chunk {}", c.name));
             }
@@ -262,6 +277,7 @@ impl Machine {
         }
         b.pcic = pcic;
         b.card = card;
+        b.deshare = deshare;
         b.restore_eint();
 
         b.steps = steps;

@@ -18,6 +18,8 @@ pub enum Dev {
     OpenBus,
     /// バンク2（nGCS2）: PC カードコントローラ（ISA のメモリ空間と I/O 空間）
     Bank2,
+    /// 0x500F4000〜0x500F5FFF: Device Emulator のフォルダ共有（deshare.rs）
+    DeShare,
     /// GPIO（値保持スタブ＋外部割り込み。StubId::Gpio のスタブを使う）
     Gpio,
     Uart(u8),
@@ -67,6 +69,8 @@ pub struct Board {
     /// PC カードコントローラ（バンク2）とソケットのカード
     pub pcic: Pd6710,
     pub card: Option<Slot>,
+    /// Device Emulator のフォルダ共有（「Storage Card」。ソケットを使わない）
+    pub deshare: super::deshare::DeShare,
     /// 外部割り込みのピンのレベル（ビット n = EINTn。部品の状態から決まる派生情報。
     /// 保存しない）
     pub(crate) eint_levels: u32,
@@ -106,6 +110,7 @@ impl Board {
             kbd: KbdMcu::default(),
             pcic: Pd6710::new(),
             card: None,
+            deshare: Default::default(),
             eint_levels: EINT_IDLE,
             // UART1 がカーネルデバッグシリアル（2026-09 に実測。ブートバナーが
             // UART1 の UTXH に書かれた）。TODO: UART0/2 の出力先はアプリの
@@ -341,6 +346,15 @@ impl Board {
         }
     }
 
+    /// フォルダ共有の挿抜を emulserv に知らせる（EINT11）。emulserv は EINT11 を待つが
+    /// GPG3 を EINT11 の機能にしないので、EINTPEND に直接立てる（deshare.rs の先頭）。
+    pub(crate) fn deshare_notify(&mut self) {
+        let gpio = &mut self.stubs[StubId::Gpio as usize];
+        let p = gpio.read(eint::EINTPEND, 4);
+        gpio.write(eint::EINTPEND, 4, p | 1 << 11);
+        self.update_eint();
+    }
+
     /// カードを挿す（既に挿さっていればエラー）。
     pub(crate) fn insert_card(&mut self, card: Slot) -> Result<(), String> {
         if self.card.is_some() {
@@ -397,6 +411,7 @@ impl Devices<Dev> for Board {
         match dev {
             Dev::OpenBus => 0,
             Dev::Bank2 => self.bank2_read(off, size),
+            Dev::DeShare => self.deshare.read((off & !3) + 0x4000) >> ((off & 3) * 8),
             Dev::Gpio => self.stubs[StubId::Gpio as usize].read(off, size),
             Dev::Uart(n) => self.uart[n as usize].read(off, size),
             Dev::Intc => self.intc.read(off, size),
@@ -424,6 +439,8 @@ impl Devices<Dev> for Board {
         match dev {
             Dev::OpenBus => {}
             Dev::Bank2 => self.bank2_write(off, size, v),
+            // TODO: 32 ビット以外の書き込み（ゲストのドライバは 32 ビットだけを使う）
+            Dev::DeShare => self.deshare.write((off & !3) + 0x4000, v),
             Dev::Gpio => {
                 let gpio = &mut self.stubs[StubId::Gpio as usize];
                 if off & !3 == eint::EINTPEND {
@@ -470,6 +487,23 @@ impl Devices<Dev> for Board {
                 }
                 self.update_deadline();
             }
+        }
+    }
+
+    fn after_write(&mut self, dev: Dev, ram: &mut dyn crate::bus::RamAccess) {
+        if dev == Dev::DeShare {
+            // 新しい項目の日時はゲストの RTC の今の時刻（決定論的）
+            self.sync_time();
+            let t = self.rtc.now();
+            let now = super::deshare::dos_time(
+                t.year,
+                t.month as i64,
+                t.day as i64,
+                t.hour as i64,
+                t.minute as i64,
+                t.second as i64,
+            );
+            self.deshare.after_write(ram, now);
         }
     }
 

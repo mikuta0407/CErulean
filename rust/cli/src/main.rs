@@ -6,6 +6,7 @@ mod card;
 mod net;
 mod relay;
 mod result;
+mod share;
 mod tools;
 mod upstream;
 
@@ -64,6 +65,9 @@ run options:
   --card-out F          停止時に挿さっているカードのディスクイメージを F に書く
   --ram-preload PA:F    リセットの前に F の中身を物理アドレス PA の RAM に置く（調査用）
   --ram-dump PA:N:F     止めたときに物理アドレス PA から N バイトの RAM を F に書く（調査用）
+  --share F             開始時にフォルダ共有（Device Emulator の「Storage Card」）にカードの
+                        イメージ F の中身を挿す（ソケットを使わないので --nic と同時に使える）
+  --share-out F         止めたときに挿しているフォルダ共有の中身をカードのイメージで F に書く
   --nic                 開始時に PC カードのソケットにイーサネットカード（NE2000 互換）を挿す
   --net-pcap F          イーサネットカードが送受信したフレームを pcap で F に書く
   --net                 イーサネットカードを OS のソケットで外へつなぐ（NAT。実時間に合わせて
@@ -165,6 +169,8 @@ struct RunOpts {
     net_verbose: bool,
     net_ca: Option<String>,
     ram_preload: Vec<(u32, String)>,
+    share: Option<String>,
+    share_out: Option<String>,
     ram_dump: Vec<(u32, u32, String)>,
 }
 
@@ -239,6 +245,8 @@ fn parse_run_opts(args: &[String]) -> Result<RunOpts, String> {
             "--net-record" => o.net_record = Some(val()?),
             "--net-verbose" => o.net_verbose = true,
             "--net-ca" => o.net_ca = Some(val()?),
+            "--share" => o.share = Some(val()?),
+            "--share-out" => o.share_out = Some(val()?),
             "--ram-preload" => {
                 let v = val()?;
                 let (a, f) = v.split_once(':').ok_or("--ram-preload: want PA:FILE")?;
@@ -431,6 +439,15 @@ fn cmd_run(args: &[String]) -> Result<ExitCode, String> {
             .map_err(|e| format!("--nic: {e}"))?;
         eprintln!("cerulean: inserted network card at step {}", m.steps());
     }
+    if let Some(path) = &o.share {
+        let img = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+        let fs = share::from_image(&img).map_err(|e| format!("--share {path}: {e}"))?;
+        m.share_insert(fs).map_err(|e| format!("--share: {e}"))?;
+        eprintln!(
+            "cerulean: inserted shared folder {path} at step {}",
+            m.steps()
+        );
+    }
     m.cpu.set_history(o.history);
     // トレースはスキップした命令を表示できないので、アイドルスキップを切る
     // （監視中は MMU が RAM を直接持たないので元々スキップされない）。
@@ -538,6 +555,22 @@ fn cmd_run(args: &[String]) -> Result<ExitCode, String> {
             Kind::CardInsert => {
                 let disk = std::fs::read(&ev.path).map_err(|e| format!("{}: {e}", ev.path))?;
                 m.insert_card(disk).map_err(|e| e.to_string())?;
+                Ok(false)
+            }
+            Kind::ShareInsert => {
+                let img = std::fs::read(&ev.path).map_err(|e| format!("{}: {e}", ev.path))?;
+                let fs = share::from_image(&img).map_err(|e| format!("{}: {e}", ev.path))?;
+                m.share_insert(fs).map_err(|e| e.to_string())?;
+                Ok(false)
+            }
+            Kind::ShareEject => {
+                let fs = m
+                    .share_eject()
+                    .ok_or("share eject: no shared folder is inserted")?;
+                if !ev.path.is_empty() {
+                    let img = share::to_image(&fs, 64 << 20)?;
+                    std::fs::write(&ev.path, img).map_err(|e| format!("{}: {e}", ev.path))?;
+                }
                 Ok(false)
             }
             Kind::CardEject => {
@@ -711,6 +744,15 @@ fn cmd_run(args: &[String]) -> Result<ExitCode, String> {
         && let Err(e) = write_png(&mut m, f)
     {
         eprintln!("cerulean: {e}");
+    }
+    if let Some(f) = &o.share_out {
+        match m.share_fs() {
+            Some(fs) => {
+                let img = share::to_image(fs, 64 << 20)?;
+                std::fs::write(f, img).map_err(|e| format!("{f}: {e}"))?;
+            }
+            None => eprintln!("cerulean: --share-out: no shared folder is inserted"),
+        }
     }
     for (pa, n, f) in &o.ram_dump {
         let data = m

@@ -31,6 +31,9 @@
 //! rtc <YYYY-MM-DDTHH:MM:SS> RTC（ゲストの時計。ローカル時刻）をこの時刻に合わせる
 //! card insert <ファイル>   PC カードのソケットにストレージカード（ディスクイメージ）を挿す
 //! card eject [ファイル]    カードを抜く（ファイルを指定するとディスクイメージを書き出す）
+//! share insert <ファイル>  フォルダ共有（Device Emulator の「Storage Card」）にカードのイメージ
+//!                          （FAT）の中身を挿す（ソケットを使わないのでネットワークと同時に使える）
+//! share eject [ファイル]   フォルダ共有を抜く（ファイルを指定すると中身を FAT のイメージで書き出す）
 //! nic insert [MAC]         イーサネットカードを挿す（MAC は 02:43:52:4c:4e:01 の形。
 //!                          省略すると既定の局アドレス）
 //! nic eject                イーサネットカードを抜く
@@ -60,6 +63,9 @@ pub enum Kind {
     /// shot/snap と同じく呼び出し側が適用する。path はイメージのファイル）
     CardInsert,
     CardEject,
+    /// フォルダ共有を挿す・抜く（2026-09-30。path はカードのイメージ。呼び出し側が適用する）
+    ShareInsert,
+    ShareEject,
     /// イーサネットカードを挿す・抜く（2026-09-30。data は局アドレス 6 バイト）
     NicInsert,
     NicEject,
@@ -82,6 +88,8 @@ impl fmt::Display for Kind {
             Kind::Rtc => "rtc",
             Kind::CardInsert => "card insert",
             Kind::CardEject => "card eject",
+            Kind::ShareInsert => "share insert",
+            Kind::ShareEject => "share eject",
             Kind::NicInsert => "nic insert",
             Kind::NicEject => "nic eject",
             Kind::NetRx => "net rx",
@@ -250,6 +258,22 @@ pub fn parse(src: &str, steps_per_second: u64) -> Result<Vec<Event>, Error> {
                 };
                 if !ok {
                     return Err(errf("usage: card insert <file> | card eject [file]".into()));
+                }
+                events.push(Event {
+                    path: args.get(1).map(|s| s.to_string()).unwrap_or_default(),
+                    ..ev(kind)
+                });
+            }
+            "share" => {
+                let (kind, ok) = match args {
+                    ["insert", _] => (Kind::ShareInsert, true),
+                    ["eject"] | ["eject", _] => (Kind::ShareEject, true),
+                    _ => (Kind::ShareEject, false),
+                };
+                if !ok {
+                    return Err(errf(
+                        "usage: share insert <file> | share eject [file]".into(),
+                    ));
                 }
                 events.push(Event {
                     path: args.get(1).map(|s| s.to_string()).unwrap_or_default(),
@@ -502,11 +526,11 @@ pub fn format(header: &[String], events: &[Event]) -> Result<String, Error> {
                 check_word(&ev.key).map_err(|e| Error(format!("script: event {i}: key {e}")))?;
                 write!(b, " {}", ev.key).unwrap();
             }
-            Kind::Shot | Kind::Snap | Kind::CardInsert => {
+            Kind::Shot | Kind::Snap | Kind::CardInsert | Kind::ShareInsert => {
                 check_word(&ev.path).map_err(|e| Error(format!("script: event {i}: path {e}")))?;
                 write!(b, " {}", ev.path).unwrap();
             }
-            Kind::CardEject => {
+            Kind::CardEject | Kind::ShareEject => {
                 if !ev.path.is_empty() {
                     check_word(&ev.path)
                         .map_err(|e| Error(format!("script: event {i}: path {e}")))?;
