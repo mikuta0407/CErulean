@@ -402,6 +402,12 @@ function screenFor(name) {
     const [w, h] = v.split("x").map(Number);
     return w === 240 && h === 320 ? null : [w, h];
   }
+  // 名前に画面の大きさ（例 WM6_JPN_Phone_480x640.bin）があればそれを使う
+  const m = /(?:^|[^0-9])(\d{3})x(\d{3})(?:[^0-9]|$)/i.exec(name);
+  if (m) {
+    const [w, h] = [Number(m[1]), Number(m[2])];
+    return w === 240 && h === 320 ? null : [w, h];
+  }
   const vga = /vga/i.test(name) && !/qvga/i.test(name);
   const square = /square/i.test(name);
   if (vga) return square ? [480, 480] : [480, 640];
