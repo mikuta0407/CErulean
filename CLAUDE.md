@@ -207,7 +207,10 @@ mmu → bus::PhysMem、bus → bus::Devices（ボードが MMIO を振り分け�
   CLI の rustls で今の TLS につなぎ直す（docs/network-design.md の HTTPS）。
 - 対話フロントエンドは段階3 のブラウザ版（`rust/web/www/app`。Worker＋wasm、保存は OPFS、
   PWA）。Chrome での確認は `tools/browser/app-e2e.mjs`（完了条件の通し）と
-  `app-smoke.mjs`（配置・操作）・`app-audio.mjs`（音）。8000 番に別の `cerulean serve` が
+  `app-smoke.mjs`（配置・操作）・`app-audio.mjs`（音）・`app-profile.mjs`（プロファイル）。
+  **プロファイル**（2026-09-30）: OPFS の `profiles/<id>/` に保存・カード・記録を分ける（既定の
+  プロファイルは根。前からの保存をそのまま使うため）。イメージ・CA は共有。切り替えは今のマシンを
+  自動保存して止め、切り替え先の最新の保存から再開する（worker.js の先頭の配置の表）。8000 番に別の `cerulean serve` が
   居るときは `tools/serve-bench.py 8123` と `APP_URL` で別のポートにする。既定の判断は計画書の段階3 の「経過」。Go 版の serve の
   UI は `rust/web/www/legacy-serve/` に参考として置いてある（入力の対応表は app に移した）。
 

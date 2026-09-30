@@ -28,6 +28,13 @@
     <canvas id="screen" width="240" height="320" aria-label="WM5 の画面（タップで操作）"></canvas>
     <div id="start" class="overlay">
       <h1>Windows Mobile</h1>
+      <div class="profile">
+        <label>プロファイル <select id="profileSel"></select></label>
+        <button id="profileNew" class="small">新規</button>
+        <button id="profileRename" class="small">名前</button>
+        <button id="profileDel" class="small">削除</button>
+        <p class="fine" id="profileInfo"></p>
+      </div>
       <p id="startMsg">準備中…</p>
       <button id="resume" class="primary" hidden>続きから再開<small id="resumeInfo"></small></button>
       <ul id="saveList" class="list"></ul>
@@ -41,6 +48,9 @@
         <option value="240x240">240×240（正方形）</option>
         <option value="480x480">480×480（VGA 正方形）</option>
       </select></label>
+      <p class="fine">プロファイルごとに保存・ストレージカード・記録が分かれます（イメージは共有）。
+        OS や画面の大きさの違う環境を使い分けるときは、プロファイルを作って切り替えてください。
+        切り替えると今の状態を自動保存し、切り替え先の続きから再開します。</p>
       <p class="fine">WM5・WM6 のエミュレータ用イメージ（<code>PPC_USA.bin</code>・<code>PPC_JPN.bin</code> など）を選ぶと、
         Today 画面まで早送りで起動し、着いたら自動で保存します。画面の大きさはイメージに合わせて選んでください
         （「自動」は名前に VGA・Square があるかで決めます）。イメージ・保存はこの端末の中だけで使い、外部には送りません。</p>
@@ -102,7 +112,8 @@
       <button id="clockNow">時計を今に合わせる</button>
     </div>
     <div class="row">
-      <button id="toStart">最初の画面へ（イメージ・保存を選ぶ）</button>
+      <span>プロファイル: <strong id="profileName">-</strong></span>
+      <button id="toStart">最初の画面へ（プロファイル・イメージ・保存を選ぶ）</button>
     </div>
   </section>
   <section>

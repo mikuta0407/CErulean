@@ -102,6 +102,7 @@ function onWorker(d) {
   if (d.images) {
     images = d.images;
     saves = d.saves;
+    if (d.profiles) renderProfiles(d.profiles, d.profile);
     renderLists(d.estimate);
     if (autoResume) {
       autoResume = false;
@@ -124,6 +125,17 @@ function onWorker(d) {
     if (cardInfo) renderCard(cardInfo);
     // 保存を消されにくくする（§7.3。許可されるかはブラウザが決める）
     navigator.storage?.persist?.().catch(() => {});
+  }
+  if (d.unbooted) {
+    // プロファイルの切り替えなどでマシンを止めた（続きは切り替え先の保存から）
+    booted = false;
+    stopped = false;
+    $("pause").disabled = true;
+    $("stopBanner").hidden = true;
+    $("start").hidden = false;
+    sawPicture = true;
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
   }
   if (d.frame) drawFrame(d.frame, d.w, d.h);
   if (d.audio) playAudio(d.audio, d.rate);
@@ -428,6 +440,60 @@ function smallButton(text, title, onclick) {
   b.onclick = onclick;
   return b;
 }
+
+// ---- プロファイル ----
+let profiles = [];
+let profile = null;
+function renderProfiles(list, cur) {
+  profiles = list;
+  profile = cur;
+  const sel = $("profileSel");
+  sel.replaceChildren(...list.map((p) => new Option(p.name, p.id, false, p.id === cur.id)));
+  sel.add(new Option("＋ 新しいプロファイル…", "__new"));
+  $("profileName").textContent = cur.name;
+  $("profileDel").disabled = cur.id === "default";
+  const info = [];
+  if (cur.imageName) info.push(`イメージ ${cur.imageName}`);
+  if (cur.screen) info.push(`画面 ${cur.screen[0]}×${cur.screen[1]}`);
+  $("profileInfo").textContent = info.length ? info.join("・") : "まだ起動していません（下のイメージから起動します）";
+  // 画面の大きさの選択は、このプロファイルで前に使った大きさを既定にする（まだ起動して
+  // いないプロファイルでは端末の設定 = 既定は「自動」）
+  let v = cur.screen ? `${cur.screen[0]}x${cur.screen[1]}` : null;
+  if (!v || ![...$("screenSize").options].some((o) => o.value === v)) {
+    try {
+      v = localStorage.getItem("cerulean-screen") ?? "auto";
+    } catch {
+      v = "auto";
+    }
+  }
+  $("screenSize").value = v;
+}
+function newProfile() {
+  const name = prompt("新しいプロファイルの名前（例: WM6 VGA）");
+  if (name) send("createProfile", { name: name.trim() });
+}
+$("profileSel").onchange = () => {
+  const id = $("profileSel").value;
+  if (id === "__new") {
+    $("profileSel").value = profile.id;
+    return newProfile();
+  }
+  if (id !== profile?.id) send("switchProfile", { id });
+};
+$("profileNew").onclick = newProfile;
+$("profileRename").onclick = () => {
+  const name = prompt("プロファイルの名前", profile?.name ?? "");
+  if (name) send("renameProfile", { id: profile.id, name: name.trim() });
+};
+$("profileDel").onclick = () => {
+  const others = profiles.filter((p) => p.id !== profile.id);
+  if (!others.length) return;
+  const target = profile;
+  if (!confirm(`プロファイル「${target.name}」を消しますか？（保存・ストレージカード・記録ごと消えます。イメージは残ります）`)) return;
+  // 使っているプロファイルは消せないので、既定に切り替えてから消す
+  send("switchProfile", { id: "default" });
+  send("deleteProfile", { id: target.id });
+};
 
 function renderLists(estimate) {
   const manual = saves.filter((s) => s.kind === "manual");

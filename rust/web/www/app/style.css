@@ -57,6 +57,11 @@ canvas {
 .primary small { display: block; font-weight: 400; font-size: 11px; opacity: .85; }
 .secondary { border: 1px solid var(--line); background: transparent; color: var(--fg); font-size: 13px; }
 .fine { font-size: 11px !important; }
+.profile { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 13px; }
+.profile select { max-width: 150px; }
+.profile p { flex-basis: 100%; }
+button.small { padding: 3px 8px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--fg); font-size: 12px; cursor: pointer; }
+button.small:disabled { opacity: .4; }
 .list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
 .list:empty { display: none; }
 .list li { display: flex; gap: 4px; align-items: center; }

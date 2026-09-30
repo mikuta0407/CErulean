@@ -8,11 +8,19 @@
 //
 // 保存は OPFS（Worker の同期アクセスハンドル）。スナップショットは gzip して置く
 // （無圧縮 約 134MB → 約 25MB。計画書の段階2 の計測）。
-//   images/<sha256>.bin・.json   読み込んだイメージ（SHA-256 がキー）
-//   saves/<名前>.snap.gz・.json  自動保存（auto-0〜2 のリング）と手動保存
-//   rec/start.snap.gz・script.txt  最後の記録（起点スナップショットとスクリプト）
-//   rec/cerulean-card-*.img     記録中に挿したストレージカードのイメージ（再生に要る）
-//   cards/card.img・card.json   ストレージカードのイメージ（抜いている間の中身）
+//   images/<sha256>.bin・.json   読み込んだイメージ（SHA-256 がキー。プロファイルで共有）
+//   profiles/<id>.json          プロファイル（名前・使ったイメージ・画面の大きさ）
+//   profiles/current.json       今のプロファイル
+//   <プロファイルの場所>/        既定のプロファイル（id "default"）は根、他は profiles/<id>/
+//     saves/<名前>.snap.gz・.json  自動保存（auto-0〜2 のリング）と手動保存
+//     rec/start.snap.gz・script.txt  最後の記録（起点スナップショットとスクリプト）
+//     rec/cerulean-card-*.img     記録中に挿したストレージカードのイメージ（再生に要る）
+//     cards/card.img・card.json   ストレージカードのイメージ（抜いている間の中身）
+//   net/ca.bin                  HTTPS の中継の CA（プロファイルで共有）
+// プロファイル（2026-09-30）は OS・解像度などの違う仮想環境を 1 つの PWA で使い分けるための
+// もので、動かすのは 1 台だけ。切り替えると今のマシンを自動保存して止め、切り替え先の最新の
+// 保存から再開する。既定のプロファイルの場所を根にしたのは、プロファイルより前の保存を
+// 移し替えずにそのまま使うため。
 // ネットワーク（中継サーバー経由）はメニューでオンにしたときだけ、指定された中継
 // サーバーと WebSocket でつなぐ（それ以外にサイトは外と通信しない。計画書 §7.5）。
 // 書き込みは一時ファイルに書き終えてから名前を変える（書きかけを残さない。§7.3）。
@@ -129,6 +137,69 @@ async function writeAtomic(d, name, data) {
   return size;
 }
 
+// ---- プロファイル ----
+
+const DEFAULT_PROFILE = { id: "default", name: "既定", created: 0 };
+let profile = DEFAULT_PROFILE;
+
+// 今のプロファイルの中のフォルダ（saves・cards・rec）。
+async function pdir(name) {
+  let base = await navigator.storage.getDirectory();
+  if (profile.id !== "default") {
+    base = await (await base.getDirectoryHandle("profiles", { create: true })).getDirectoryHandle(profile.id, { create: true });
+  }
+  return base.getDirectoryHandle(name, { create: true });
+}
+
+async function listProfiles() {
+  const d = await dir("profiles");
+  const out = [];
+  for await (const [name] of d.entries()) {
+    if (!name.endsWith(".json") || name === "current.json") continue;
+    try {
+      out.push(await readJson(d, name));
+    } catch {}
+  }
+  if (!out.some((p) => p.id === "default")) out.push({ ...DEFAULT_PROFILE });
+  return out.sort((a, b) => a.created - b.created);
+}
+
+async function saveProfile(p) {
+  await writeJson(await dir("profiles"), `${p.id}.json`, p);
+}
+
+async function loadCurrentProfile() {
+  let id = "default";
+  try {
+    id = (await readJson(await dir("profiles"), "current.json")).id;
+  } catch {}
+  const ps = await listProfiles();
+  profile = ps.find((p) => p.id === id) ?? ps.find((p) => p.id === "default");
+}
+
+// 今のマシンを（動いていれば自動保存して）止める。プロファイルの切り替え・削除の前に呼ぶ。
+async function leaveMachine(reason) {
+  if (!emu) return;
+  if (emu.recording() && !broken) await finishRecording();
+  if (!broken && !stopped) await autosave(reason);
+  wsClose();
+  emu.free();
+  emu = null;
+  stopped = false;
+  broken = false;
+  turboUntil = 0n;
+  lastFrame = null;
+  post({ unbooted: true });
+}
+
+// カードの編集の状態はプロファイルごと（cards/ を読み直す）。
+function resetCardState() {
+  card?.free();
+  card = null;
+  cardMeta = null;
+  cardPath = "";
+}
+
 const writeJson = (d, name, v) => writeAtomic(d, name, new TextEncoder().encode(JSON.stringify(v)));
 
 async function readJson(d, name) {
@@ -236,7 +307,7 @@ function machineFromSnapshot(raw) {
 }
 
 async function listSaves() {
-  const d = await dir("saves");
+  const d = await pdir("saves");
   const out = [];
   for await (const [name] of d.entries()) {
     if (!name.endsWith(".json")) continue;
@@ -250,17 +321,20 @@ async function listSaves() {
 }
 
 async function sendLists() {
+  const cur = profile; // 一覧を作った時点のプロファイル（保存の一覧と組にして送る）
   let images = [];
   let saves = [];
+  let profiles = [cur];
   let estimate = null;
   try {
     images = await listImages();
     saves = await listSaves();
+    profiles = await listProfiles();
     estimate = await navigator.storage.estimate?.();
   } catch (e) {
     log(`OPFS を使えません: ${e.message}`);
   }
-  post({ images, saves, estimate: estimate && { usage: estimate.usage, quota: estimate.quota } });
+  post({ images, saves, profiles, profile: cur, estimate: estimate && { usage: estimate.usage, quota: estimate.quota } });
 }
 
 async function autosave(reason) {
@@ -268,7 +342,7 @@ async function autosave(reason) {
   saving = true;
   post({ saving: true });
   try {
-    const d = await dir("saves");
+    const d = await pdir("saves");
     const saves = (await listSaves()).filter((s) => s.kind === "auto");
     // 空いている枠か、いちばん古い枠に書く
     const used = new Map(saves.map((s) => [s.name, s.savedAt]));
@@ -310,7 +384,7 @@ let cardPath = ""; // 一覧を見ているフォルダ
 async function loadCard() {
   if (card || cardMeta === false) return;
   try {
-    const d = await dir("cards");
+    const d = await pdir("cards");
     cardMeta = await readJson(d, "card.json");
     const bytes = new Uint8Array(await (await (await d.getFileHandle("card.img")).getFile()).arrayBuffer());
     if (bytes.length !== cardMeta.size) throw new Error("大きさが合いません");
@@ -324,7 +398,7 @@ async function loadCard() {
 }
 
 async function storeCard(bytes, name) {
-  const d = await dir("cards");
+  const d = await pdir("cards");
   await writeAtomic(d, "card.img", bytes);
   cardMeta = { name, size: bytes.length, updated: Date.now() };
   await writeJson(d, "card.json", cardMeta);
@@ -801,7 +875,7 @@ function start(e, id, name, turbo) {
 }
 
 // screen: ゲストに渡す画面の大きさ [幅, 高さ]（null なら渡さない = 240×320）
-function bootImage(bytes, name, id, rtc, screen) {
+async function bootImage(bytes, name, id, rtc, screen) {
   const e = new wasm.Emu();
   try {
     if (screen) e.setScreen(screen[0], screen[1]);
@@ -811,6 +885,9 @@ function bootImage(bytes, name, id, rtc, screen) {
     throw err;
   }
   start(e, id, name, true);
+  // プロファイルに、どのイメージをどの画面で起動したかを覚える（表示用）
+  profile = { ...profile, imageId: id, imageName: name, screen: screen ?? [240, 320], used: Date.now() };
+  await saveProfile(profile);
 }
 
 // 記録の終わり: スクリプトに、終わりの時点のゲストから見える値（一致確認と同じ
@@ -832,7 +909,7 @@ async function finishRecording() {
     `# replay: gunzip ${base}.snap.gz && cerulean run --snap-load ${base}.snap --script ${base}.txt --result result.jsonl <image>\n` +
     `@${steps}i shot ${base}-end.png\n` +
     `@${steps}i quit\n`;
-  const d = await dir("rec");
+  const d = await pdir("rec");
   await writeAtomic(d, "script.txt", new TextEncoder().encode(script));
   await writeJson(d, "rec.json", { base, startSteps: recStartSteps.toString(), steps: steps.toString(), imageId });
   recStartSteps = null;
@@ -849,18 +926,63 @@ const handlers = {
   async init() {
     wasmMemory = (await init()).memory;
     wasm.installPanicHook();
+    try {
+      await loadCurrentProfile();
+    } catch (e) {
+      log(`プロファイルを読めません: ${e.message}`);
+    }
     post({ ready: true });
     await sendLists();
     await sendCard();
   },
   async bootFile({ bytes, name, rtc, screen }) {
     const id = await storeImage(bytes, name);
-    bootImage(bytes, name, id, rtc, screen);
+    await bootImage(bytes, name, id, rtc, screen);
     await sendLists();
   },
   async bootStored({ id, rtc, screen }) {
     const { bytes, name } = await loadStoredImage(id);
-    bootImage(bytes, name, id, rtc, screen);
+    await bootImage(bytes, name, id, rtc, screen);
+    await sendLists();
+  },
+  // ---- プロファイル ----
+  // 切り替える: 今のマシンを自動保存して止め、切り替え先の最新の保存から再開する
+  // （保存がなければ最初の画面で起動するイメージを選んでもらう）。
+  async switchProfile({ id }) {
+    if (id === profile.id) return;
+    const p = (await listProfiles()).find((x) => x.id === id);
+    if (!p) throw new Error("そのプロファイルはありません");
+    await leaveMachine("プロファイルの切り替え");
+    profile = { ...p, used: Date.now() };
+    await saveProfile(profile);
+    await writeJson(await dir("profiles"), "current.json", { id });
+    resetCardState();
+    log(`プロファイル「${profile.name}」に切り替えた`);
+    await sendLists();
+    await sendCard();
+    if ((await listSaves()).length) await handlers.resume({});
+  },
+  async createProfile({ name }) {
+    const p = { id: `p${Date.now().toString(36)}`, name: name || "新しいプロファイル", created: Date.now() };
+    await saveProfile(p);
+    await handlers.switchProfile({ id: p.id });
+  },
+  async renameProfile({ id, name }) {
+    const p = (await listProfiles()).find((x) => x.id === id);
+    if (!p || !name) return;
+    p.name = name;
+    await saveProfile(p);
+    if (id === profile.id) profile = { ...profile, name };
+    await sendLists();
+  },
+  // 消す（保存・カード・記録ごと）。今のプロファイルと既定のプロファイルは消せない。
+  async deleteProfile({ id }) {
+    if (id === profile.id) throw new Error("使っているプロファイルは消せません（先に切り替えてください）");
+    if (id === "default") throw new Error("既定のプロファイルは消せません");
+    const d = await dir("profiles");
+    await d.removeEntry(id, { recursive: true }).catch(() => {});
+    await d.removeEntry(`${id}.json`).catch(() => {});
+    await sendLists();
   },
   async deleteImage({ id }) {
     const d = await dir("images");
@@ -870,7 +992,7 @@ const handlers = {
   // 保存から再開する。name を省くと、自動・手動を問わず新しい順に試し、壊れたものは
   // 飛ばす（1 つ前の世代に戻る。§7.3）。
   async resume({ name }) {
-    const d = await dir("saves");
+    const d = await pdir("saves");
     const cands = name ? [name] : (await listSaves()).map((s) => s.name);
     if (!cands.length) throw new Error("保存がありません");
     for (const n of cands) {
@@ -891,7 +1013,7 @@ const handlers = {
     saving = true;
     post({ saving: true });
     try {
-      const d = await dir("saves");
+      const d = await pdir("saves");
       await saveState(d, `save-${Date.now()}`, { kind: "manual", label: "手動" });
       await sendLists();
     } finally {
@@ -904,19 +1026,19 @@ const handlers = {
     await autosave(reason);
   },
   async deleteSave({ name }) {
-    const d = await dir("saves");
+    const d = await pdir("saves");
     for (const n of [`${name}.snap.gz`, `${name}.json`]) await d.removeEntry(n).catch(() => {});
     await sendLists();
   },
   async exportSave({ name }) {
-    const d = await dir("saves");
+    const d = await pdir("saves");
     const m = await readJson(d, `${name}.json`);
     await sendFile(d, `${name}.snap.gz`, `cerulean-${m.steps}.snap.gz`);
   },
   // 今の状態を手動保存に加えて書き出す（止まったときの不具合報告用）。
   async exportCurrent() {
     if (!emu || broken) return;
-    const d = await dir("saves");
+    const d = await pdir("saves");
     const m = await saveState(d, `save-${Date.now()}`, { kind: "manual", label: "停止時" });
     await sendLists();
     await sendFile(d, `${m.name}.snap.gz`, `cerulean-${m.steps}.snap.gz`);
@@ -1003,7 +1125,7 @@ const handlers = {
     const bytes = c.bytes();
     // 記録中は再生に要るので、挿した時点のイメージを記録の置き場に残す
     const name = `cerulean-card-${(await sha256(bytes)).slice(0, 12) || emu.steps()}.img`;
-    if (emu.recording()) await writeAtomic(await dir("rec"), name, bytes);
+    if (emu.recording()) await writeAtomic(await pdir("rec"), name, bytes);
     // イーサネットカードがソケットにあるときは、Device Emulator のフォルダ共有として挿す
     // （WM5 からは同じ「Storage Card」に見える）
     if (emu.nicInserted()) {
@@ -1029,7 +1151,7 @@ const handlers = {
   },
   async recordStart() {
     if (!emu || stopped || emu.recording()) return;
-    const d = await dir("rec");
+    const d = await pdir("rec");
     // 起点のスナップショットと記録の開始を同じ命令境界にする
     for await (const [name] of d.entries()) if (name.startsWith("cerulean-card-")) await d.removeEntry(name).catch(() => {});
     await saveState(d, "start", { kind: "rec" }, () => {
@@ -1044,7 +1166,7 @@ const handlers = {
     sendStatus(performance.now());
   },
   async exportRecording({ what }) {
-    const d = await dir("rec");
+    const d = await pdir("rec");
     const m = await readJson(d, "rec.json");
     if (what === "script") await sendFile(d, "script.txt", `${m.base}.txt`);
     else if (what === "cards") {
