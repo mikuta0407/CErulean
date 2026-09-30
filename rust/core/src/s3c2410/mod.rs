@@ -13,6 +13,7 @@
 mod adc;
 mod dma;
 pub mod eint;
+mod iis;
 mod intc;
 mod lcd;
 mod rtc;
@@ -26,7 +27,8 @@ mod uart;
 mod tests;
 
 pub use adc::Adc;
-pub use dma::DmaStub;
+pub use dma::{Dma, Segment};
+pub use iis::Iis;
 pub use intc::*;
 pub use lcd::{Frame, FrameError, Lcd, LcdConfig};
 pub use rtc::Rtc;

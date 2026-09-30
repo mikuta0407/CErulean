@@ -35,6 +35,9 @@ impl Machine {
             b.in_run = false;
             if b.pending >= b.deadline {
                 b.sync_time();
+                // 期限のイベント（DMA の区切り）で積んだ転送を、この命令境界で読む。
+                let super::Sys { bus, board, .. } = &mut self.sys;
+                board.flush_audio(bus);
             }
             r?;
             if self.cpu.take_spin_hint() && self.idle_skip {

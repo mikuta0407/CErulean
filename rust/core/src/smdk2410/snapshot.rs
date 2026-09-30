@@ -8,12 +8,15 @@
 //! mmu          CP15 とソフト TLB
 //! ram          SDRAM の中身（128MB）
 //! kbd          SPI1 のキーボード用マイコン（バス外のボード部品）
-//! intc timer lcd rtc adc spi uart0 uart1 uart2 dma   周辺機器
+//! intc timer lcd rtc adc spi uart0 uart1 uart2 dma iis   周辺機器（iis は machine の版数 5 から）
 //! stub:<名前>  値保持スタブ（board.rs の StubId の順）
 //! pcic         PC カードコントローラ（machine の版数 2 から）
 //! cf           ソケットの CompactFlash の状態（カードが挿さっているときだけ）
 //! cf:blk       カードのディスクの 64KB の区画（番号 u32 と中身。0 でない区画だけ）
 //! ```
+//!
+//! machine の版数 4 までは IIS が値保持スタブ（stub:iis。gpio と de-paravirt の間）で、
+//! dma チャンクは版数 1（値保持スタブ）。読み込むときにレジスタだけを引き継ぐ。
 //!
 //! machine の版数 1（PC カードの前）は読み込める: コントローラは初期状態・カードなし、
 //! GPIO の EINTPEND は 0 にする（版数 1 では値保持スタブで、意味のある値ではない）。
@@ -32,8 +35,10 @@ use crate::s3c2410::eint;
 
 /// machine チャンクの版数（2: PC カードのチャンクを足した。2026-09-29。
 /// 3: イーサネットカード（ne2000 チャンク）を足した。2026-09-30。
-/// 4: Device Emulator のフォルダ共有（deshare チャンク）を足した。2026-09-30）。
-const MACHINE_VERSION: u16 = 4;
+/// 4: Device Emulator のフォルダ共有（deshare チャンク）を足した。2026-09-30。
+/// 5: DMA と IIS を実装した（dma チャンクの版数 2・iis チャンク。stub:iis をなくした）。
+/// 2026-09-30）。
+const MACHINE_VERSION: u16 = 5;
 use super::{Machine, SDRAM_BASE, SDRAM_SIZE};
 
 const STUB_NAMES: [&str; NUM_STUBS] = [
@@ -46,7 +51,6 @@ const STUB_NAMES: [&str; NUM_STUBS] = [
     "usbdev",
     "sdi",
     "gpio",
-    "iis",
     "de-paravirt",
 ];
 
@@ -57,6 +61,8 @@ impl Machine {
     pub fn save_snapshot(&mut self, w: impl Write, image_id: &str) -> Result<(), Error> {
         // 溜めたティックをデバイスに渡す（同期は状態の見え方を変えない）。
         self.sys.board.sync_time();
+        let super::Sys { bus, board, .. } = &mut self.sys;
+        board.flush_audio(bus);
         let mut s = Writer::new(w, self.name(), image_id)?;
         let Machine {
             cpu,
@@ -87,6 +93,8 @@ impl Machine {
             eint_levels: _,
             uart,
             dma,
+            iis,
+            audio: _,
             stubs,
             tick_acc,
             steps,
@@ -119,7 +127,12 @@ impl Machine {
         for (i, u) in uart.iter().enumerate() {
             s.chunk(&format!("uart{i}"), 1, |e| u.save_state(e))?;
         }
-        s.chunk("dma", 1, |e| dma.save_state(e))?;
+        s.chunk("dma", crate::s3c2410::Dma::STATE_VERSION, |e| {
+            dma.save_state(e)
+        })?;
+        s.chunk("iis", crate::s3c2410::Iis::STATE_VERSION, |e| {
+            iis.save_state(e)
+        })?;
         for (name, st) in STUB_NAMES.iter().zip(stubs.iter()) {
             s.chunk(&format!("stub:{name}"), 1, |e: &mut Encoder| {
                 st.save_state(e)
@@ -217,8 +230,26 @@ impl Machine {
             dev!(&format!("uart{i}"), |d: &mut snapshot::Decoder| b.uart[i]
                 .load_state(d));
         }
-        dev!("dma", |d: &mut snapshot::Decoder| b.dma.load_state(d));
+        {
+            let c = s.expect("dma")?;
+            let mut d = c.decoder(if version >= 5 { 2 } else { 1 })?;
+            if version >= 5 {
+                b.dma.load_state(&mut d)?;
+            } else {
+                b.dma.load_state_v1(&mut d)?;
+            }
+            d.finish()?;
+        }
+        if version >= 5 {
+            dev!("iis", |d: &mut snapshot::Decoder| b.iis.load_state(d));
+        }
         for (i, name) in STUB_NAMES.iter().enumerate() {
+            if version < 5 && *name == "de-paravirt" {
+                // 版数 4 までは gpio と de-paravirt の間に IIS の値保持スタブがある
+                dev!("stub:iis", |d: &mut snapshot::Decoder| b
+                    .iis
+                    .load_state_stub(d));
+            }
             dev!(&format!("stub:{name}"), |d: &mut snapshot::Decoder| b.stubs
                 [i]
                 .load_state(d));

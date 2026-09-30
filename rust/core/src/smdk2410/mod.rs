@@ -27,7 +27,7 @@ use crate::mmu::Mmu;
 use crate::pccard::Slot;
 use crate::s3c2410::{Frame, FrameError, LcdConfig};
 
-pub use board::{Board, Dev, StubId};
+pub use board::{AudioChunk, Board, Dev, StubId};
 pub use kbd::{KEY_SCAN_CODES, KbdMcu, scan_code};
 
 // S3C2410 の物理メモリマップ（データシート Figure 5-1）:
@@ -62,7 +62,7 @@ pub(crate) const PCLK_TICKS_NUM: u64 = 3;
 /// がこれで約 1ms 周期になることとも整合する。PLL の式は User's Manual Rev 1.1 の
 /// Ch.7 で確認済み（推奨値表にも Fin=12MHz・MDIV=161/PDIV=3/SDIV=1 → 202.80MHz）。
 /// TODO: Fin=12MHz はボード資料で未確認（推奨値表と整合するので妥当）。
-pub(crate) const PCLK_HZ: i64 = 50_700_000;
+pub const PCLK_HZ: i64 = 50_700_000;
 
 /// 仮想時間 1 秒あたりの命令数（PCLK_HZ / (PCLK_TICKS_NUM/8) = 135.2M）。
 /// 入力スクリプトの時刻（ms 等）を命令数に換算するのに使う。
@@ -489,6 +489,22 @@ impl Machine {
         &self.sys.jit
     }
 
+    /// 音（IIS から送り出したサンプル）を溜めるか（既定は溜めない）。溜めても
+    /// ゲストの状態は変わらない。溜めたものは [`take_audio`](Self::take_audio) で取り出す。
+    pub fn set_audio_capture(&mut self, on: bool) {
+        let a = &mut self.sys.board.audio;
+        a.capture = on;
+        if !on {
+            a.chunks.clear();
+        }
+    }
+
+    /// 溜めた音を取り出す（中身は空になる）。取り出さないと約 1 分分で古いものから
+    /// 捨てる。
+    pub fn take_audio(&mut self) -> Vec<AudioChunk> {
+        std::mem::take(&mut self.sys.board.audio.chunks)
+    }
+
     /// UART1（カーネルデバッグシリアル）が送信したバイトを取り出す。
     pub fn take_uart1(&mut self) -> Vec<u8> {
         self.sys.board.uart[1].take_tx()
@@ -779,10 +795,10 @@ fn map(b: &mut Bus<Dev>) -> Result<(), crate::bus::MapError> {
     }
     // GPIO: 値保持スタブ＋外部割り込み（EINTPEND・EINTMASK。s3c2410::eint）
     b.map_mmio("gpio", 0x56000000, 0x1000, Dev::Gpio)?;
-    // DMA コントローラ: 転送は即完了に見せる最小スタブ（s3c2410::DmaStub）。
+    // DMA コントローラと IIS（オーディオ）: 音声ドライバがチャネル 2 で RAM から
+    // IIS の送信 FIFO へ送る（s3c2410 の dma.rs・iis.rs）。
     b.map_mmio("dma", 0x4B000000, 0x1000, Dev::Dma)?;
-    // IIS（オーディオ）: 値保持スタブ＋ TX FIFO ready の常時ビット（board.rs）。
-    b.map_mmio("iis", 0x55000000, 0x1000, Dev::Stub(StubId::Iis))?;
+    b.map_mmio("iis", 0x55000000, 0x1000, Dev::Iis)?;
     // 0x500F0000: S3C2410 のデータシートにない領域。Device Emulator 固有の
     // 準仮想デバイス群と判断した（ROM の TOC からアクセス元モジュールを特定。
     // 2026-09 の実イメージ観察。いずれもブートを止める要因ではなかった）:

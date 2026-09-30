@@ -9,6 +9,12 @@ const ctx = canvas.getContext("2d");
 try {
   $("clockSync").checked = localStorage.getItem("cerulean-clock-sync") !== "0";
 } catch {}
+// 音の設定も端末ごと（既定はオフ）
+try {
+  const a = JSON.parse(localStorage.getItem("cerulean-audio") ?? "{}");
+  $("audioOn").checked = !!a.on;
+  if (typeof a.vol === "number") $("audioVol").value = a.vol;
+} catch {}
 // ネットワークの設定も端末ごと（既定はオフ）。中継サーバーの URL の既定は、このページを
 // 配信しているサイトの /relay（`cerulean serve --with-relay` が置く）。
 const defaultRelay = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/relay`;
@@ -84,6 +90,7 @@ function startWorker() {
   };
   send("init");
   send("clockOption", { on: $("clockSync").checked });
+  send("audio", { on: $("audioOn").checked });
   sendNet(false);
   return new Promise(() => {});
 }
@@ -115,6 +122,7 @@ function onWorker(d) {
     navigator.storage?.persist?.().catch(() => {});
   }
   if (d.frame) drawFrame(d.frame, d.w, d.h);
+  if (d.audio) playAudio(d.audio, d.rate);
   if (d.status) showStatus(d.status);
   if (d.uart) {
     const el = $("uart");
@@ -191,6 +199,75 @@ function fitScreen() {
 }
 new ResizeObserver(fitScreen).observe($("screenBox"));
 window.addEventListener("resize", fitScreen);
+
+// ---- 音 ----
+// Worker から届いたサンプル（16 ビット・左右交互）を、前の続きの時刻に並べて鳴らす。
+// 届く間隔は DMA の 1 区切り（約 12ms）と Worker の実行の単位でばらつくので、少し先
+// （AUDIO_LEAD）から始めて吸収する。遅れて前の続きが過ぎていたら（間の無音・実行の
+// 遅れ）、今から AUDIO_LEAD 先に置き直す。先へ行き過ぎたら（Worker が実時間より速く
+// 進めた分）置き直して追いつかせる。
+const AUDIO_LEAD = 0.08;
+const AUDIO_MAX_AHEAD = 0.5;
+let actx = null;
+let gain = null;
+let audioNext = 0;
+
+// AudioContext はユーザーの操作の中でしか始められない（自動再生の制限）ので、
+// オンにしたときと、画面・ボタンの操作のたびに作る・再開する。
+function audioStart() {
+  if (!$("audioOn").checked) return;
+  if (!actx) {
+    try {
+      actx = new AudioContext();
+    } catch (e) {
+      log(`音を出せません: ${e.message}`);
+      $("audioOn").checked = false;
+      return;
+    }
+    gain = actx.createGain();
+    gain.connect(actx.destination);
+  }
+  gain.gain.value = +$("audioVol").value;
+  if (actx.state === "suspended") actx.resume().catch(() => {});
+}
+
+function playAudio(buf, rate) {
+  if (!actx || actx.state !== "running" || !$("audioOn").checked || !rate) return;
+  const s = new Int16Array(buf);
+  const n = s.length >> 1;
+  if (!n) return;
+  const ab = actx.createBuffer(2, n, rate);
+  const l = ab.getChannelData(0);
+  const r = ab.getChannelData(1);
+  for (let i = 0; i < n; i++) {
+    l[i] = s[2 * i] / 32768;
+    r[i] = s[2 * i + 1] / 32768;
+  }
+  const now = actx.currentTime;
+  if (audioNext < now + 0.01 || audioNext > now + AUDIO_MAX_AHEAD) audioNext = now + AUDIO_LEAD;
+  const src = actx.createBufferSource();
+  src.buffer = ab;
+  src.connect(gain);
+  src.start(audioNext);
+  audioNext += n / rate;
+}
+
+function saveAudioCfg() {
+  try {
+    localStorage.setItem("cerulean-audio", JSON.stringify({ on: $("audioOn").checked, vol: +$("audioVol").value }));
+  } catch {}
+}
+$("audioOn").onchange = () => {
+  saveAudioCfg();
+  send("audio", { on: $("audioOn").checked });
+  if ($("audioOn").checked) audioStart();
+  else actx?.suspend().catch(() => {});
+};
+$("audioVol").oninput = () => {
+  saveAudioCfg();
+  if (gain) gain.gain.value = +$("audioVol").value;
+};
+for (const ev of ["pointerdown", "keydown"]) window.addEventListener(ev, audioStart, { capture: true });
 
 // ---- 状態表示 ----
 function fmtTime(sec) {

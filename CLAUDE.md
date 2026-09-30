@@ -106,6 +106,7 @@ mmu → bus::PhysMem、bus → bus::Devices（ボードが MMIO を振り分け�
 - `mmu`: CP15・ソフト TLB（ゲストから見える状態として埋める・捨てる規則まで固定）・
   フェッチ猶予・デコードキャッシュの支援。フォルトは `MemError::Abort`（ゲストに配送）。
 - `s3c2410`: 周辺機器。割り込みは戻り値でボードに返し、ボードが INTC に渡す。
+  DMA（`dma.rs`）と IIS（`iis.rs`）は音声ドライバが使う形（チャネル 2・I2SSDO）を実装。
   INTC が割り込み線のレベルを持つ。**S3C2410 固有の知識は `s3c2410` と `smdk2410` だけが
   持つ**（arm・bus・mmu に SoC 固有の定数を入れない。将来 PXA27x 構成を足す）。
 - `smdk2410`: ボード構成（メモリマップ・スタブの初期値・OEMAddressTable 相当のロード時
@@ -142,6 +143,13 @@ mmu → bus::PhysMem、bus → bus::Devices（ボードが MMIO を振り分け�
   CPU に渡し、ブロック途中の MMIO では実行済み命令数から追いつかせ（catch_up）、期限が
   早まれば `RunCtl` の上限を下げる。時間を持つデバイスを足したら next_event を実装し、
   board.rs の同期（sync_time・update_deadline・MMIO の振り分け）に加えること。
+- **音（2026-09-30）**: IIS の送り出し（1 項目 = (A+1)×384/2 PCLK）が FIFO に空きを作り、
+  DMA が瞬時に埋める。期限は DMA の CURR_TC が 0 になる時刻（INT の有無によらない）。
+  転送した中身（RAM のサンプル）はその区切りの命令境界で読む（実行ループの同期の直後か、
+  DMA・IIS の書き込みの after_write。ボードの flush_audio）。デバイスのアクセスの中の同期は
+  期限の手前までなので区切りは生まれない（debug_assert で守る。バスの読み出しに後処理を
+  足すと 4〜5% 遅くなった）。音はゲストから見えない出力で、`set_audio_capture` で溜め
+  `take_audio` で取り出す（CLI の `--audio-out`、ブラウザ版はメニューで等速のときだけ）。
 - **頻出命令の特化**: 専用の Op（レジスタ番号とデコード時の即値を持つ）。それ以外は
   汎用の Op（imm = 命令語）で汎用の実行関数に回す。特化を足したら、差分テストの
   命令語の生成が新しい形を含むこと（全 Op を試したかをテストが確かめる）。
@@ -193,7 +201,8 @@ mmu → bus::PhysMem、bus → bus::Devices（ボードが MMIO を振り分け�
   CLI の rustls で今の TLS につなぎ直す（docs/network-design.md の HTTPS）。
 - 対話フロントエンドは段階3 のブラウザ版（`rust/web/www/app`。Worker＋wasm、保存は OPFS、
   PWA）。Chrome での確認は `tools/browser/app-e2e.mjs`（完了条件の通し）と
-  `app-smoke.mjs`（配置・操作）。既定の判断は計画書の段階3 の「経過」。Go 版の serve の
+  `app-smoke.mjs`（配置・操作）・`app-audio.mjs`（音）。8000 番に別の `cerulean serve` が
+  居るときは `tools/serve-bench.py 8123` と `APP_URL` で別のポートにする。既定の判断は計画書の段階3 の「経過」。Go 版の serve の
   UI は `rust/web/www/legacy-serve/` に参考として置いてある（入力の対応表は app に移した）。
 
 ## 実イメージについて確認済みの事実（2026-09 検証）
@@ -278,6 +287,15 @@ mmu → bus::PhysMem、bus → bus::Devices（ボードが MMIO を振り分け�
   Period・Slash 等で押せる（2026-09-30 に RAM から表を読んで追加）。JPN 版の IE のアドレス欄は
   画面のキーボードが「かな」でローマ字変換されるので、先に「英数」(10,249) をタップする。
 - 電源ボタン pwrbtn2410.dll は GPF0（EINT0）を設定する（未実装）。
+- **音（2026-09-30）**: s3c2410x_wavedev.dll（VA 0x014F0000〜）が IIS と DMA チャネル 2 を使う。
+  DISRC2 = RAM のバッファ（PA 0x339D0000・0x339D0800 の 2 枚を交互）、DIDST2 = IISFIFO、
+  DCON2 = 0xA0900400（割り込みあり・単位転送・I2SSDO・H/W 要求・自動リロード・ハーフワード・
+  TC=0x400）、IISMOD=0xAD・IISPSR=0x42 → 16 ビット・ステレオ・fs≒44.0kHz（PCLK/1152）。
+  始めるとき DMA を ON にして CURR_TC≠0 を待ち（8-14 の S/W Work-Around）、TXFR を見て IIS を
+  始める。割り込みごとに次の DISRC を書く。止めるとき DMA を STOP → TXIDLE → TXEN=0 →
+  送信なし。**起動音が約 22.16 億命令目**（約 0.37 秒）に鳴る。「Screen taps」を有効にすると
+  タップ音も鳴る。以前の DMA のスタブ（ON で即完了の割り込み 1 回）では起動音でドライバが
+  止まり、以後の音が鳴らなかった。
 - **PC カード（ストレージカード。2026-09-29）**: バンク2 に CL-PD6710（82365SL 互換）。
   I/O は PA 0x11000000+ポート、メモリは PA 0x10000000+ISA アドレス。-INTR（管理割り込み）が
   EINT3（立ち下がり）、カードの IRQ3 が EINT8（High レベル）。pcc_smdk2410.dll が約 4.4 億
@@ -364,8 +382,9 @@ mmu → bus::PhysMem、bus → bus::Devices（ボードが MMIO を振り分け�
   ポーリングが現れたら仮想時間から生成する。STN モード・パレット形式は未検証。
 - RTC: アラーム・ティック割り込み（TICNT）・RTCRST は値保持のみ。BCDDAY は
   1〜7 だが起点曜日はマニュアルに記載なし（1=日曜としている）。
-- オーディオ系スタブの妥当性: DMA「即完了」モデルは CURR_TC==0 の完了
-  ポーリングが現れると破綻する。
+- 音: 送信 FIFO を無効にしたとき（TXEN=0）に中身を捨てるのは判断（データシートに記載なし。
+  捨てないとドライバの 2 回目の再生が CURR_TC の待ちから抜けない）。左右の順（先頭を左）・
+  コーデック（UDA1341TS。L3 は GPIO）の音量・IIS の受信・I2SSDO 以外の DMA は未実装。
 - ARM920T のキャッシュタイプレジスタ 0x0D172172 は記憶ベース（S3C2410 の
   マニュアルには無い。ARM920T TRM で要照合）。
 - MMU: アライメントフォルト（A ビット）未実装（CPU がアドレスをマスクしてから

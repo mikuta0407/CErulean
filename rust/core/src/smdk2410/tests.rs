@@ -681,6 +681,13 @@ fn snapshot_version_1_loads_without_pc_card() {
 
 /// スナップショットを読み直し、machine を版数 1 に、pcic 以降を除いて書き直す。
 fn rewrite_as_v1(buf: &[u8]) -> Vec<u8> {
+    rewrite_as(buf, 1)
+}
+
+/// スナップショットを machine の版数 v（4 以下）の形に書き直す。DMA と IIS は値保持
+/// スタブの形（書かれたレジスタ）にし、版数 1 なら pcic 以降を除く。
+fn rewrite_as(buf: &[u8], v: u16) -> Vec<u8> {
+    use crate::s3c2410::{Dma, Iis, Stub};
     use crate::snapshot::{Reader, Writer};
     let mut rd = Reader::new(buf).unwrap();
     let mut w = Writer::new(
@@ -689,12 +696,93 @@ fn rewrite_as_v1(buf: &[u8]) -> Vec<u8> {
         &rd.header.image_id.clone(),
     )
     .unwrap();
+    let mut iis_stub = Stub::new(&[]);
     while let Some(c) = rd.next_chunk().unwrap() {
-        if c.name == "pcic" {
-            break;
+        match c.name.as_str() {
+            "pcic" if v == 1 => break,
+            "machine" => w.raw_chunk(&c.name, v, &c.body).unwrap(),
+            "dma" => {
+                let mut dma = Dma::new();
+                let mut d = c.decoder(Dma::STATE_VERSION).unwrap();
+                dma.load_state(&mut d).unwrap();
+                let mut st = Stub::new(&[]);
+                for (n, ch) in dma.ch.iter().enumerate() {
+                    let b = n as u32 * 0x40;
+                    for (o, x) in [
+                        (0x00, ch.disrc),
+                        (0x04, ch.disrcc),
+                        (0x08, ch.didst),
+                        (0x0C, ch.didstc),
+                        (0x10, ch.dcon),
+                        (0x20, (ch.on as u32) << 1),
+                    ] {
+                        if x != 0 {
+                            st.write(b + o, 4, x);
+                        }
+                    }
+                }
+                w.chunk("dma", 1, |e| st.save_state(e)).unwrap();
+            }
+            "iis" => {
+                let mut iis = Iis::new();
+                let mut d = c.decoder(Iis::STATE_VERSION).unwrap();
+                iis.load_state(&mut d).unwrap();
+                for (o, x) in [
+                    (0x00, iis.con),
+                    (0x04, iis.mode),
+                    (0x08, iis.psr),
+                    (0x0C, iis.fcon),
+                ] {
+                    if x != 0 {
+                        iis_stub.write(o, 4, x);
+                    }
+                }
+            }
+            "stub:de-paravirt" => {
+                w.chunk("stub:iis", 1, |e| iis_stub.save_state(e)).unwrap();
+                w.raw_chunk(&c.name, c.version, &c.body).unwrap();
+            }
+            _ => w.raw_chunk(&c.name, c.version, &c.body).unwrap(),
         }
-        let v = if c.name == "machine" { 1 } else { c.version };
-        w.raw_chunk(&c.name, v, &c.body).unwrap();
     }
     w.finish().unwrap()
+}
+
+/// DMA と IIS が値保持スタブだった版（machine の版数 4）のスナップショットを読める
+/// （書かれたレジスタを引き継ぎ、転送は始まっていない・FIFO は空とする）。
+#[test]
+fn snapshot_version_4_converts_dma_and_iis() {
+    let mut m = synthetic("idle.words");
+    m.run_until(1000).unwrap();
+    // 音声ドライバと同じ設定で DMA を ON にし、IIS はまだ始めない
+    for (a, v) in [
+        (0x5500_0000, 0xA2),
+        (0x5500_0004, 0xAD),
+        (0x5500_0008, 0x42),
+        (0x5500_000C, 0xA000),
+        (0x4B00_0080, 0x3000_0000),
+        (0x4B00_0088, 0x5500_0010),
+        (0x4B00_008C, 3),
+        (0x4B00_0090, 0xA090_0400),
+        (0x4B00_00A0, 2),
+    ] {
+        bus_w(&mut m, a, 4, v);
+    }
+    assert_eq!(bus_r(&mut m, 0x4B00_0094, 4), 1 << 20 | (0x400 - 32));
+    let mut buf = vec![];
+    m.save_snapshot(&mut buf, "id").unwrap();
+    let mut r = Machine::new();
+    r.load_snapshot(&rewrite_as(&buf, 4)[..]).unwrap();
+    assert_eq!(r.sys.board.iis.read(0x04, 4), 0xAD);
+    let c = &r.sys.board.dma.ch[2];
+    assert_eq!(
+        (c.disrc, c.dcon, c.on, c.curr_tc),
+        (0x3000_0000, 0xA090_0400, true, 0)
+    );
+    // 新しい版で保存し直すと、スタブの版にない FIFO・カウンタの分だけが違う
+    // （次の DMA の要求で埋まる）。
+    let b = &mut r.sys.board;
+    let ints = b.dma.service_iis_tx(&mut b.iis);
+    assert_eq!(ints, 0);
+    assert_eq!(b.dma.read(0x94, 4), 1 << 20 | (0x400 - 32));
 }

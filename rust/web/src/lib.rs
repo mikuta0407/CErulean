@@ -13,7 +13,7 @@ use cerulean_core::arm::StopError;
 use cerulean_core::emu::{self, RunError, Session};
 use cerulean_core::jit::{self, JitHost};
 use cerulean_core::script::{self, Event, Kind};
-use cerulean_core::smdk2410::{INSTRUCTIONS_PER_SECOND, Machine, SDRAM_BASE};
+use cerulean_core::smdk2410::{INSTRUCTIONS_PER_SECOND, Machine, PCLK_HZ, SDRAM_BASE};
 use wasm_bindgen::prelude::*;
 
 mod share;
@@ -216,6 +216,8 @@ pub struct Emu {
     /// 最後に frame で作った画面の大きさ
     frame_w: u32,
     frame_h: u32,
+    /// 最後に takeAudio で取り出した音のサンプリング周波数（Hz。0 = まだない）
+    audio_rate: u32,
 }
 
 impl Default for Emu {
@@ -236,6 +238,7 @@ impl Emu {
             stop: String::new(),
             frame_w: 0,
             frame_h: 0,
+            audio_rate: 0,
         }
     }
 
@@ -736,6 +739,31 @@ impl Emu {
     #[wasm_bindgen(js_name = codePages)]
     pub fn code_pages(&self) -> usize {
         self.m.sys.code.page_count()
+    }
+
+    /// 音（IIS から送り出したサンプル）を溜めるか（既定は溜めない）。ゲストの状態は
+    /// 変わらない。
+    #[wasm_bindgen(js_name = setAudio)]
+    pub fn set_audio(&mut self, on: bool) {
+        self.m.set_audio_capture(on);
+    }
+
+    /// 溜めた音を取り出す（左右交互の 16 ビット）。サンプリング周波数は audioRate
+    /// （途中で変わっていたら最後のもの。ドライバは 1 つの周波数しか使わない）。
+    #[wasm_bindgen(js_name = takeAudio)]
+    pub fn take_audio(&mut self) -> Vec<i16> {
+        let chunks = self.m.take_audio();
+        let mut out = vec![];
+        for c in chunks {
+            self.audio_rate = (PCLK_HZ as u64 / c.frame_ticks.max(1) as u64) as u32;
+            out.extend_from_slice(&c.samples);
+        }
+        out
+    }
+
+    #[wasm_bindgen(js_name = audioRate)]
+    pub fn audio_rate(&self) -> u32 {
+        self.audio_rate
     }
 
     /// UART1 が送信したバイトを取り出す。

@@ -84,6 +84,12 @@
       <button id="skipTurbo" hidden>起動の早送りをやめる</button>
     </div>
     <div class="row">
+      <label><input type="checkbox" id="audioOn"> 音を出す</label>
+      <label>音量 <input type="range" id="audioVol" min="0" max="1" step="0.05" value="0.8"></label>
+    </div>
+    <p class="note">音は等速のときだけ鳴らします（早送り・2 倍・最高速の間は鳴らしません）。
+      エミュレーションが実時間に追いつかない区間では途切れます。</p>
+    <div class="row">
       <label><input type="checkbox" id="clockSync" checked> 再開・復帰時にゲストの時計を今に合わせる</label>
       <button id="clockNow">時計を今に合わせる</button>
     </div>

@@ -30,6 +30,8 @@ pub enum Dev {
     Adc,
     Spi,
     Dma,
+    /// IIS（オーディオ）
+    Iis,
     Stub(StubId),
 }
 
@@ -48,13 +50,11 @@ pub enum StubId {
     UsbDev,
     Sdi,
     Gpio,
-    /// IIS（オーディオ）
-    Iis,
     /// 0x500F0000: Device Emulator 固有の準仮想デバイス群（smdk2410 の構成のコメント参照）
     DeParavirt,
 }
 
-pub const NUM_STUBS: usize = 11;
+pub const NUM_STUBS: usize = 10;
 
 /// ボード上のデバイス群と仮想時間（Go の Machine のデバイスと時間のフィールド）。
 /// バスとは別のフィールドなので、バスの読み書きに `&mut Board` を渡せる。
@@ -75,7 +75,10 @@ pub struct Board {
     /// 保存しない）
     pub(crate) eint_levels: u32,
     pub uart: [Uart; 3],
-    pub dma: DmaStub,
+    pub dma: Dma,
+    pub iis: Iis,
+    /// 音の出力（出力側の都合: 保存しない）
+    pub(crate) audio: AudioOut,
     pub stubs: [Stub; NUM_STUBS],
 
     /// 仮想時間: 命令数から PCLK ティックを固定比で生成する（決定論的。
@@ -116,7 +119,9 @@ impl Board {
             // UART1 の UTXH に書かれた）。TODO: UART0/2 の出力先はアプリの
             // シリアル対応時に決める。
             uart: [Uart::new(false), Uart::new(true), Uart::new(false)],
-            dma: DmaStub::new(),
+            dma: Dma::new(),
+            iis: Iis::new(),
+            audio: AudioOut::default(),
             stubs: [
                 stub(&[]), // memc
                 stub(&[]), // usbhost
@@ -139,11 +144,6 @@ impl Board {
                 // 0x32410000（User's Manual Rev 1.1 で確認済み）
                 // EINTMASK のリセット値（データシート 9-26）
                 stub(&[(0xB0, 0x32410000), (eint::EINTMASK, eint::EINTMASK_RESET)]),
-                // IIS（オーディオ）: 値保持スタブだが、IISCON(0x00) の bit7
-                // （TX FIFO ready）は常に立てる。FIFO は無限シンク扱いで、オーディオ
-                // ドライバの送信 ready 待ちポーリングを通すため（2026-09 に実測）。
-                // TODO: 音を出すときは FIFO・DMA 込みの実装に置き換える。
-                stub(&[]).force_read_bits(0x00, 1 << 7),
                 stub(&[]), // de-paravirt
             ],
             tick_acc: 0,
@@ -212,6 +212,8 @@ impl Board {
             self.rtc.advance(t);
             let subs = self.adc.advance(t);
             self.intc.raise_sub_mask(subs);
+            let dma = self.dma.advance(&mut self.iis, t);
+            self.intc.raise_mask(dma << INT_DMA0);
         }
         self.update_deadline();
     }
@@ -221,7 +223,11 @@ impl Board {
     /// 新しい期限を生む命令で止まるよう CPU の上限を下げる（実行中の命令も
     /// 1 命令目に数える: その命令のティックも期限に向けて進むため）。
     pub(crate) fn update_deadline(&mut self) {
-        self.deadline = self.timer.next_event().min(self.adc.next_event());
+        self.deadline = self
+            .timer
+            .next_event()
+            .min(self.adc.next_event())
+            .min(self.dma.next_event(&self.iis));
         if self.in_run && self.deadline != NO_EVENT {
             let lim = self.accounted + self.steps_to_deadline();
             self.run.limit(lim);
@@ -401,6 +407,104 @@ impl Board {
     }
 }
 
+/// IIS から送り出した音（16 ビット・左右交互）。フロントエンドが
+/// [`Machine::take_audio`](super::Machine::take_audio) で取り出す。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AudioChunk {
+    /// 1 フレーム（左右 1 組）の PCLK ティック数（サンプリング周波数 = PCLK_HZ / これ）
+    pub frame_ticks: u32,
+    /// 左右交互のサンプル（IIS に送った順。先頭を左とする。TODO: 実機で左右の順を
+    /// 確かめていない）
+    pub samples: Vec<i16>,
+}
+
+/// 音の出力の溜め。capture が false の間は RAM を読まずに捨てる（出力はゲストから
+/// 見えないので、取り出すかどうかで状態は変わらない）。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct AudioOut {
+    pub(crate) capture: bool,
+    pub(crate) chunks: Vec<AudioChunk>,
+}
+
+impl AudioOut {
+    /// 溜めの上限（サンプル数。約 1 分の 44.1kHz ステレオ）。フロントエンドが取り出さ
+    /// ないまま溜まり続けないように、超えたら古いものから捨てる。
+    const LIMIT: usize = 44_100 * 2 * 60;
+
+    fn chunk(&mut self, frame_ticks: u32) -> &mut Vec<i16> {
+        if self
+            .chunks
+            .last()
+            .is_none_or(|c| c.frame_ticks != frame_ticks)
+        {
+            self.chunks.push(AudioChunk {
+                frame_ticks,
+                samples: vec![],
+            });
+        }
+        &mut self.chunks.last_mut().expect("pushed above").samples
+    }
+
+    /// CPU が IISFIFO に書いたサンプル。
+    pub(crate) fn push_cpu(&mut self, s: u16, frame_ticks: u32) {
+        if self.capture {
+            self.chunk(frame_ticks).push(s as i16);
+            self.trim();
+        }
+    }
+
+    fn trim(&mut self) {
+        let mut total: usize = self.chunks.iter().map(|c| c.samples.len()).sum();
+        while total > Self::LIMIT && !self.chunks.is_empty() {
+            let over = total - Self::LIMIT;
+            let c = &mut self.chunks[0];
+            if c.samples.len() <= over {
+                total -= c.samples.len();
+                self.chunks.remove(0);
+            } else {
+                c.samples.drain(..over);
+                total -= over;
+            }
+        }
+    }
+}
+
+impl Board {
+    /// DMA が区切りを迎えた転送の中身を RAM から読んで音にする。区切りは DMA の
+    /// イベント（CURR_TC が 0 になる期限。実行ループがその命令の直後に同期して読む）か、
+    /// DMA・IIS のレジスタの書き込み（同じ命令のバスの書き込みの後、after_write で読む）で
+    /// 生まれる。デバイスのアクセスの中の同期は期限の手前までしか進めない（CPU は実行中の
+    /// 命令を数えない）ので、読み出しの中では生まれない（バスの読み出しに後処理を足すと
+    /// 実行ループが 4〜5% 遅くなった。2026-09-30 の計測）。
+    #[inline(always)]
+    pub(crate) fn flush_audio(&mut self, ram: &mut dyn crate::bus::RamAccess) {
+        if !self.dma.ready.is_empty() {
+            self.flush_audio_segments(ram);
+        }
+    }
+
+    #[inline(never)]
+    fn flush_audio_segments(&mut self, ram: &mut dyn crate::bus::RamAccess) {
+        for seg in std::mem::take(&mut self.dma.ready) {
+            if !self.audio.capture || seg.size != 2 {
+                continue; // TODO: バイト・ワードの転送の音（dma.rs の TODO）
+            }
+            let len = if seg.inc { seg.units * 2 } else { 2 };
+            let Some(m) = ram.ram_slice_mut(seg.src, len) else {
+                continue; // TODO: RAM 以外からの転送（今の構成では起きない）
+            };
+            let out = self.audio.chunk(seg.frame_ticks);
+            if seg.inc {
+                out.extend(m.as_chunks::<2>().0.iter().map(|&b| i16::from_le_bytes(b)));
+            } else {
+                let s = i16::from_le_bytes([m[0], m[1]]);
+                out.extend(std::iter::repeat_n(s, seg.units as usize));
+            }
+        }
+        self.audio.trim();
+    }
+}
+
 /// SPI1 のキーボード用マイコン（SPI の転送中に使う）。
 struct KbdPort<'a> {
     kbd: &'a mut KbdMcu,
@@ -426,19 +530,23 @@ impl Devices<Dev> for Board {
             Dev::Intc => self.intc.read(off, size),
             Dev::Lcd => self.lcd.read(off, size),
             Dev::Spi => self.spi.read(off, size),
-            Dev::Dma => self.dma.read(off, size),
             Dev::Stub(s) => self.stubs[s as usize].read(off, size),
             // 時間を持つデバイス（Go の timedDev）: アクセスの前に溜めたティックを
             // 渡し、後で期限を求め直す（読み出しで変換が始まる ADC の READ_START の
             // ように、読み出しも状態を変え得るため）。
-            Dev::Timer | Dev::Rtc | Dev::Adc => {
+            Dev::Timer | Dev::Rtc | Dev::Adc | Dev::Dma | Dev::Iis => {
                 self.sync_time();
                 let v = match dev {
                     Dev::Timer => self.timer.read(off, size),
                     Dev::Rtc => self.rtc.read(off, size),
+                    Dev::Dma => self.dma.read(off, size),
+                    Dev::Iis => self.iis.read(off, size),
                     _ => self.adc.read(off, size),
                 };
                 self.update_deadline();
+                // 読み出しの中で進める時間は期限の手前まで（実行中の命令は数えない）
+                // なので、DMA の区切り（RAM を読む）はここでは生まれない（flush_audio）。
+                debug_assert!(self.dma.ready.is_empty());
                 v
             }
         }
@@ -478,17 +586,25 @@ impl Devices<Dev> for Board {
                     self.intc.raise([INT_SPI0, INT_SPI1][ch]);
                 }
             }
-            Dev::Dma => {
-                if let Some(ch) = self.dma.write(off, size, v) {
-                    self.intc.raise(INT_DMA0 + ch as u32);
-                }
-            }
             Dev::Stub(s) => self.stubs[s as usize].write(off, size, v),
-            Dev::Timer | Dev::Rtc | Dev::Adc => {
+            Dev::Timer | Dev::Rtc | Dev::Adc | Dev::Dma | Dev::Iis => {
                 self.sync_time();
                 match dev {
                     Dev::Timer => self.timer.write(off, size, v),
                     Dev::Rtc => self.rtc.write(off, size, v),
+                    // DMA と IIS の書き込みは転送の要求を変え得るので、続けて処理する
+                    // （FIFO に空きがあれば瞬時に埋まる）。
+                    Dev::Dma | Dev::Iis => {
+                        if dev == Dev::Dma {
+                            let ft = self.iis.frame_ticks();
+                            self.dma.write(off, size, v, ft);
+                        } else if let Some(s) = self.iis.write(off, size, v) {
+                            let ft = self.iis.frame_ticks();
+                            self.audio.push_cpu(s, ft);
+                        }
+                        let ints = self.dma.service_iis_tx(&mut self.iis);
+                        self.intc.raise_mask(ints << INT_DMA0);
+                    }
                     _ => {
                         let subs = self.adc.write(off, size, v);
                         self.intc.raise_sub_mask(subs);
@@ -500,6 +616,7 @@ impl Devices<Dev> for Board {
     }
 
     fn after_write(&mut self, dev: Dev, ram: &mut dyn crate::bus::RamAccess) {
+        self.flush_audio(ram);
         if dev == Dev::DeShare {
             // 新しい項目の日時はゲストの RTC の今の時刻（決定論的）
             self.sync_time();

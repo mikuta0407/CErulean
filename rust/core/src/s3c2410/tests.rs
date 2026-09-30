@@ -781,15 +781,152 @@ fn spi_transfer_and_interrupt() {
     assert_eq!(s.read(0x14, 4), 0);
 }
 
+/// 音声ドライバ（s3c2410x_wavedev.dll）と同じ設定（2026-09-30 の --watch）で
+/// DMA チャネル 2 と IIS を動かす。
+fn wavedev_setup() -> (Dma, Iis) {
+    let (mut d, mut i) = (Dma::new(), Iis::new());
+    let ft = i.frame_ticks();
+    i.write(0x00, 4, 0x02); // IISCON: PSEN
+    i.write(0x04, 4, 0xAD); // IISMOD: 送信・16 ビット・384fs・32fs
+    i.write(0x08, 4, 0x42); // IISPSR: A=B=2
+    i.write(0x0C, 4, 0xA000); // IISFCON: 送信 FIFO・DMA
+    i.write(0x00, 4, 0xA2); // IISCON: 送信の DMA 要求
+    d.write(0x80, 4, 0x339D_0000, ft); // DISRC2
+    d.write(0x80 + 0x04, 4, 0, ft); // DISRCC2: AHB・増加
+    d.write(0x80 + 0x08, 4, 0x5500_0010, ft); // DIDST2: IISFIFO
+    d.write(0x80 + 0x0C, 4, 3, ft); // DIDSTC2: APB・固定
+    d.write(0x80 + 0x10, 4, 0xA090_0400, ft); // DCON2
+    (d, i)
+}
+
 #[test]
-fn dma_stub() {
-    let mut d = DmaStub::new();
-    d.write(0x40 + 0x10, 4, 0xABC12345); // チャネル 1 の DCON
+fn iis_dma_playback() {
+    let (mut d, mut i) = wavedev_setup();
+    assert_eq!(i.half_ticks(), 576, "(A+1)*384/2");
+    assert_eq!(d.read(0x94, 4), 0, "CURR_TC before ON");
+    // ON: IIS が止まっていても FIFO の空きで要求が出て 32 項目埋まる
+    d.write(0xA0, 4, 2, i.frame_ticks());
+    assert_eq!(d.service_iis_tx(&mut i), 0);
+    assert_eq!(i.read(0x0C, 4) >> 6 & 0x3F, 32, "TX FIFO count");
+    assert_ne!(i.read(0x00, 4) & 0x80, 0, "TXFR (not empty)");
     assert_eq!(
-        d.read(0x40 + 0x14, 4),
-        0x12345,
-        "DSTAT の CURR_TC は DCON の TC"
+        d.read(0x94, 4),
+        1 << 20 | (0x400 - 32),
+        "DSTAT busy + CURR_TC"
     );
-    assert_eq!(d.write(0x40 + 0x20, 4, 2), Some(1), "ON_OFF で即完了");
-    assert_eq!(d.write(0x40 + 0x20, 4, 1), None);
+    assert_eq!(d.read(0x98, 4), 0x339D_0000 + 64, "DCSRC");
+    assert_eq!(d.next_event(&i), NO_EVENT, "IIS not started");
+    // 次のバッファを設定して IIS を始める
+    d.write(0x80, 4, 0x339D_0800, i.frame_ticks());
+    i.write(0x00, 4, 0xA3);
+    let due = d.next_event(&i);
+    assert_eq!(due, 576 * (0x400 - 32));
+    assert_eq!(d.advance(&mut i, due - 1), 0);
+    assert_eq!(d.read(0x94, 4) & 0xFFFFF, 1);
+    assert_eq!(d.advance(&mut i, 1), 1 << 2, "INT_DMA2 at CURR_TC=0");
+    assert_eq!(d.read(0x94, 4), 0, "CURR_TC=0 until the next request");
+    assert_eq!(
+        d.ready,
+        vec![Segment {
+            src: 0x339D_0000,
+            units: 0x400,
+            size: 2,
+            inc: true,
+            frame_ticks: 1152,
+        }]
+    );
+    assert!(d.read(0xA0, 4) & 2 != 0, "auto reload keeps ON");
+    // 次の送り出しで自動リロード（新しい DISRC から）
+    assert_eq!(d.next_event(&i), 576 * 0x400);
+    assert_eq!(d.advance(&mut i, 576), 0);
+    assert_eq!(d.read(0x94, 4) & 0xFFFFF, 0x3FF);
+    assert_eq!(d.read(0x98, 4), 0x339D_0802);
+    // STOP: 直ちに止まり、そこまでの転送を区切る
+    d.ready.clear();
+    d.write(0xA0, 4, 4, i.frame_ticks());
+    assert_eq!(d.read(0xA0, 4), 0);
+    assert_eq!(d.read(0x94, 4), 0);
+    assert_eq!(d.ready.len(), 1);
+    assert_eq!((d.ready[0].src, d.ready[0].units), (0x339D_0800, 1));
+    assert_eq!(d.next_event(&i), NO_EVENT);
+    // FIFO は送り出しで空になり、以後は何も起きない
+    d.advance(&mut i, 576 * 1000);
+    assert_eq!(i.read(0x00, 4) & 0x80, 0, "TXFR (empty)");
+}
+
+/// ドライバが再生を止める手順（2026-09-30 の --watch）の後、次の再生で DMA を ON に
+/// すると CURR_TC が読み込まれる（送信 FIFO を無効にしたときに中身を捨てるので、
+/// S/W Work-Around の待ちが終わる）。
+#[test]
+fn iis_dma_stop_then_replay() {
+    let (mut d, mut i) = wavedev_setup();
+    let ft = i.frame_ticks();
+    d.write(0xA0, 4, 2, ft);
+    d.service_iis_tx(&mut i);
+    i.write(0x00, 4, 0xA3);
+    d.advance(&mut i, 576 * 100);
+    // 止める: STOP → TXIDLE → TXEN=0・TXDMA=0 → 送信なし
+    d.write(0xA0, 4, 6, ft);
+    d.write(0xA0, 4, 0, ft);
+    i.write(0x00, 4, 0x18B);
+    i.write(0x0C, 4, 0x0800);
+    i.write(0x04, 4, 0x2D);
+    assert_eq!(i.read(0x0C, 4) >> 6 & 0x3F, 0, "TX FIFO flushed");
+    // 次の再生（ブートの初回と同じ手順）
+    i.write(0x04, 4, 0xAD);
+    i.write(0x0C, 4, 0xA000);
+    i.write(0x00, 4, 0xA2);
+    d.write(0xA0, 4, 2, ft);
+    assert_eq!(d.service_iis_tx(&mut i), 0);
+    assert_eq!(d.read(0x94, 4) & 0xFFFFF, 0x400 - 32, "CURR_TC loaded");
+}
+
+/// RELOAD=1 は CURR_TC=0 で ON_OFF を落とす。INT=0 なら割り込みはないが、区切りの
+/// 期限はある（RAM を読む時機を固定するため）。
+#[test]
+fn dma_no_reload_no_int() {
+    let (mut d, mut i) = wavedev_setup();
+    let ft = i.frame_ticks();
+    d.write(0x90, 4, 0x00D0_0040, ft); // INT=0・H/W 要求・RELOAD=1・ハーフワード・TC=64
+    d.write(0xA0, 4, 2, ft);
+    d.service_iis_tx(&mut i);
+    i.write(0x00, 4, 0xA3);
+    assert_eq!(d.next_event(&i), 576 * 32);
+    assert_eq!(d.advance(&mut i, 576 * 32), 0);
+    assert_eq!(d.next_event(&i), NO_EVENT);
+    assert_eq!(d.read(0xA0, 4), 0, "ON_OFF cleared");
+    assert_eq!(d.ready.len(), 1);
+}
+
+/// advance は加算的（期限の手前でどう区切っても、まとめて進めた場合と同じ状態）。
+#[test]
+fn dma_advance_additive() {
+    let (mut d, mut i) = wavedev_setup();
+    let ft = i.frame_ticks();
+    d.write(0xA0, 4, 2, ft);
+    d.service_iis_tx(&mut i);
+    i.write(0x00, 4, 0xA3);
+    let mut seed = 12345u32;
+    for _ in 0..20 {
+        let due = d.next_event(&i);
+        let (mut a, mut ai) = (d.clone(), i.clone());
+        let whole = a.advance(&mut ai, due);
+        let (mut b, mut bi) = (d.clone(), i.clone());
+        let mut left = due;
+        let mut got = 0;
+        while left > 0 {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            let n = ((seed >> 8) as i64 % 5000 + 1).min(left);
+            got |= b.advance(&mut bi, n);
+            left -= n;
+            if left > 0 {
+                assert_eq!(got, 0, "interrupt before the deadline");
+                assert_eq!(b.next_event(&bi), left, "deadline is exact");
+            }
+        }
+        assert_eq!((got, &b, &bi), (whole, &a, &ai));
+        assert_eq!(whole, 1 << 2);
+        (d, i) = (a, ai);
+        d.ready.clear();
+    }
 }

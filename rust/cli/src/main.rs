@@ -10,6 +10,7 @@ mod serve;
 mod share;
 mod tools;
 mod upstream;
+mod wav;
 
 use std::io::Write;
 use std::process::ExitCode;
@@ -63,6 +64,7 @@ run options:
   --trace-hash-ram N    N 命令ごとに RAM の SHA-256 も加える
   --trace-hash-out F    --trace-hash の出力先（既定は標準エラー）
   --quiet-uart          UART1 の出力を標準出力に流さない
+  --audio-out F.wav     ゲストの音（IIS）を WAV に書く（音の間は仮想時間に合わせて無音で埋める）
   --card F              開始時に PC カードのソケットに CompactFlash を挿す（F はディスク
                         イメージ。512 バイトの倍数）
   --card-out F          停止時に挿さっているカードのディスクイメージを F に書く
@@ -158,6 +160,7 @@ struct RunOpts {
     trace_hash_ram: u64,
     trace_hash_out: Option<String>,
     quiet_uart: bool,
+    audio_out: Option<String>,
     no_idle_skip: bool,
     snap_save: Option<(String, u64)>,
     snap_load: Option<String>,
@@ -229,6 +232,7 @@ fn parse_run_opts(args: &[String]) -> Result<RunOpts, String> {
             "--trace-hash-ram" => o.trace_hash_ram = parse_u64(&val()?)?,
             "--trace-hash-out" => o.trace_hash_out = Some(val()?),
             "--quiet-uart" => o.quiet_uart = true,
+            "--audio-out" => o.audio_out = Some(val()?),
             "--no-idle-skip" => o.no_idle_skip = true,
             "--snap-save" => {
                 let v = val()?;
@@ -536,6 +540,13 @@ fn cmd_run(args: &[String]) -> Result<ExitCode, String> {
         Some(p) => Some(net::Pcap::create(p)?),
         None => None,
     };
+    let mut wav = match &o.audio_out {
+        Some(p) => {
+            m.set_audio_capture(true);
+            Some(wav::WavOut::create(p, m.steps())?)
+        }
+        None => None,
+    };
     let mut uart = UartTap::new();
     let mut stdout = std::io::stdout();
     let io = |e: std::io::Error| e.to_string();
@@ -629,12 +640,19 @@ fn cmd_run(args: &[String]) -> Result<ExitCode, String> {
             // ネットワークとのやり取りの間隔（仮想時間 10ms）
             target = target.min(steps + INSTRUCTIONS_PER_SECOND / 100);
         }
+        if wav.is_some() {
+            // 音を取り出す間隔（仮想時間 0.1 秒。コアの溜めの上限より十分短く）
+            target = target.min(steps + INSTRUCTIONS_PER_SECOND / 10);
+        }
         // 少なくとも 1 命令は進める（--max-steps が今の命令数以下の場合など）。
         target = target.max(steps + 1);
         if matches!(r, Ok(false)) {
             r = sess.run(&mut m, target, &mut apply);
         }
         drain_uart(&mut m, &mut uart);
+        if let Some(w) = &mut wav {
+            w.feed(m.take_audio(), m.steps())?;
+        }
         let sent = m.net_take_tx();
         if let Some(p) = &mut pcap {
             for f in &sent {
@@ -733,6 +751,9 @@ fn cmd_run(args: &[String]) -> Result<ExitCode, String> {
     }
     if let Some(p) = &mut pcap {
         p.flush()?;
+    }
+    if let Some(w) = wav {
+        w.finish()?;
     }
     if let Some(f) = &o.net_record {
         let (start, evs) = sess.stop_recording();

@@ -293,16 +293,135 @@ impl Uart {
     }
 }
 
-impl DmaStub {
-    pub const STATE_VERSION: u16 = 1;
+impl Dma {
+    /// 2: チャネルの状態（転送中のカウンタ・アドレス・未読の区切り）を持つ実装に
+    /// した（2026-09-30）。1 は値保持スタブのレジスタ（[`load_state_v1`](Self::load_state_v1)）。
+    pub const STATE_VERSION: u16 = 2;
 
+    /// 区切りを迎えて RAM から読んでいない転送（ready）は、保存の前にボードが
+    /// 取り出す（flush_audio）。
     pub fn save_state(&self, e: &mut Encoder) {
-        let DmaStub { stub } = self;
-        stub.save_state(e);
+        let Dma { ch, ready } = self;
+        debug_assert!(ready.is_empty());
+        for c in ch {
+            let dma::DmaChannel {
+                disrc,
+                disrcc,
+                didst,
+                didstc,
+                dcon,
+                on,
+                curr_tc,
+                curr_src,
+                curr_dst,
+                seg_src,
+                seg_units,
+            } = c;
+            e.u32s(&[
+                *disrc, *disrcc, *didst, *didstc, *dcon, *curr_tc, *curr_src, *curr_dst, *seg_src,
+                *seg_units,
+            ]);
+            e.bool(*on);
+        }
     }
 
     pub fn load_state(&mut self, d: &mut Decoder) -> Result<(), Error> {
-        let DmaStub { stub } = self;
-        stub.load_state(d)
+        let Dma { ch, ready } = self;
+        ready.clear();
+        for c in ch.iter_mut() {
+            let dma::DmaChannel {
+                disrc,
+                disrcc,
+                didst,
+                didstc,
+                dcon,
+                on,
+                curr_tc,
+                curr_src,
+                curr_dst,
+                seg_src,
+                seg_units,
+            } = c;
+            [
+                *disrc, *disrcc, *didst, *didstc, *dcon, *curr_tc, *curr_src, *curr_dst, *seg_src,
+                *seg_units,
+            ] = d.u32s()?;
+            *on = d.bool()?;
+            if *curr_tc > 0xFFFFF {
+                return d.err("dma: CURR_TC out of range");
+            }
+        }
+        Ok(())
+    }
+
+    /// 版数 1（値保持スタブ）から: 書かれたレジスタだけを引き継ぎ、転送は始まって
+    /// いない（CURR_TC=0）ものとする。ON_OFF は書かれた値のまま（旧版で止まっていた
+    /// 再生は、読み込み後に DMA の要求で進み出す）。
+    pub fn load_state_v1(&mut self, d: &mut Decoder) -> Result<(), Error> {
+        let mut st = Stub::new(&[]);
+        st.load_state(d)?;
+        *self = Dma::new();
+        for (n, c) in self.ch.iter_mut().enumerate() {
+            let r = |o: u32| st.read(n as u32 * 0x40 + o, 4);
+            c.disrc = r(0x00) & 0x7FFF_FFFF;
+            c.disrcc = r(0x04) & 3;
+            c.didst = r(0x08) & 0x7FFF_FFFF;
+            c.didstc = r(0x0C) & 3;
+            c.dcon = r(0x10);
+            c.on = r(0x20) & 2 != 0;
+        }
+        Ok(())
+    }
+}
+
+impl Iis {
+    pub const STATE_VERSION: u16 = 1;
+
+    pub fn save_state(&self, e: &mut Encoder) {
+        let Iis {
+            con,
+            mode,
+            psr,
+            fcon,
+            tx_count,
+            phase,
+            right,
+        } = self;
+        e.u32s(&[*con, *mode, *psr, *fcon, *tx_count]);
+        e.i64(*phase);
+        e.bool(*right);
+    }
+
+    pub fn load_state(&mut self, d: &mut Decoder) -> Result<(), Error> {
+        let Iis {
+            con,
+            mode,
+            psr,
+            fcon,
+            tx_count,
+            phase,
+            right,
+        } = self;
+        [*con, *mode, *psr, *fcon, *tx_count] = d.u32s()?;
+        *phase = d.i64()?;
+        *right = d.bool()?;
+        if *tx_count > 32 || *phase < 0 || (self.tx_running() && self.phase == 0) {
+            return d.err("iis: bad FIFO count or shift time");
+        }
+        Ok(())
+    }
+
+    /// machine の版数 4 まで（値保持スタブ）から: 書かれたレジスタだけを引き継ぐ
+    /// （FIFO は空。送信中なら次の送り出しは 1 間隔後）。
+    pub fn load_state_stub(&mut self, d: &mut Decoder) -> Result<(), Error> {
+        let mut st = Stub::new(&[]);
+        st.load_state(d)?;
+        *self = Iis::new();
+        self.con = st.read(0x00, 4) & 0x3F;
+        self.mode = st.read(0x04, 4) & 0x1FF;
+        self.psr = st.read(0x08, 4) & 0x3FF;
+        self.fcon = st.read(0x0C, 4) & 0xF000;
+        self.phase = self.half_ticks();
+        Ok(())
     }
 }

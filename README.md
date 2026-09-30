@@ -153,6 +153,8 @@ IME は切る）で操作する。
   スクリプト（絶対命令数）を作る。書き出した 2 つを CLI で再生すると同じ状態になる
   （スクリプトの先頭のコメントに手順と、終わりの CPU・RAM・画面の SHA-256）:
   `gunzip X.snap.gz && cerulean run --snap-load X.snap --script X.txt --result r.jsonl PPC_USA.bin`
+- 音: メニューの「音を出す」でゲストの音（起動音・タップ音・通知など。IIS＋DMA）を鳴らす
+  （既定はオフ。等速のときだけ鳴らし、早送り・2 倍・最高速の間は鳴らさない）。
 - 時計: 保存から再開したとき・画面に戻ったとき・起動の早送りの後に、ゲストの時計を端末の
   時刻に合わせる（メニューで切れる。記録にも `rtc` コマンドとして残るので再生しても同じ）。
 - 動かせるのは 1 タブだけ（2 つ目のタブは待つ）。ホーム画面に追加でき、オフラインでも開ける。
@@ -163,6 +165,8 @@ Chrome での確認（CDP で操作する。依存なし）:
   （約 2 分。先に `cd rust && cargo build --release`）
 - `node tools/browser/app-smoke.mjs tmp/images/PPC_USA.bin tmp/app-smoke` — 操作と画面の PNG
   （`--desktop`・`--viewport=844x390`・`--layout-only`・`--headed`）
+- `node tools/browser/app-audio.mjs tmp/images/PPC_USA.bin tmp/app-audio` — 音をオンにして等速で
+  起動し、起動音が AudioContext に渡ることを確かめる（約 30 秒）
 
 ## ビルドと実行
 
@@ -187,6 +191,9 @@ $R run --trace --max-steps 1000 tmp/images/PPC_USA.bin
 # Today 画面まで起動（36 億命令、約 45 秒）して画面を PNG に保存。
 # 1 億命令ごとの連番 PNG は --fb-every 100000000 を足す
 $R run --rtc 2006-01-02T15:04:05 --max-steps 3600000000 --fb-out screen.png tmp/images/PPC_USA.bin
+
+# ゲストの音を WAV に書く（音の間は仮想時間に合わせて無音で埋める。起動音は約 16.4 秒目）
+$R run --rtc 2006-01-02T15:04:05 --max-steps 3600000000 --audio-out boot.wav tmp/images/PPC_USA.bin
 
 # 物理アドレス範囲へのアクセスを表示（周辺機器の調査用。1 命令ずつ進むので遅い）
 $R run --watch 0x4D000000-0x4D000FFF --max-steps 100000000 tmp/images/PPC_USA.bin

@@ -62,6 +62,8 @@ let recStartSteps = null;
 // スナップショットは保存時点の時刻の続きなので、合わせないと実際の日時からずれる（§7.4）。
 let syncClock = true;
 let hiddenAt = 0;
+// 音（メニューでオンにしたときだけ溜めて送る。鳴らすのは UI の AudioContext）
+let audioOn = false;
 const uartDec = new TextDecoder("latin1");
 
 const post = (m, transfer) => postMessage(m, transfer ?? []);
@@ -674,6 +676,7 @@ function tick() {
       }
       if (cur > target) delay = Math.max(1, Math.ceil((Number(cur - target) * 1000) / rate));
     }
+    sendAudio(turbo);
     const now = performance.now();
     if (now - lastFrameT >= FRAME_MS) {
       lastFrameT = now;
@@ -689,6 +692,15 @@ function tick() {
     return;
   }
   if (running()) schedule(delay);
+}
+
+// 溜まった音を UI に送る。等速のときだけ鳴らし、早送り・2 倍・最高速の間は捨てる
+// （実時間と合わないので）。
+function sendAudio(turbo) {
+  if (!audioOn) return;
+  const s = emu.takeAudio();
+  if (!s.length || turbo || speed !== 1) return;
+  post({ audio: s.buffer, rate: emu.audioRate() }, [s.buffer]);
 }
 
 function sendFrame(force = false) {
@@ -752,6 +764,7 @@ function start(e, id, name, turbo) {
   emu = e;
   imageId = id;
   if (jitOn) emu.setJit(true, ...JIT_PARAMS);
+  emu.setAudio(audioOn);
   stopped = false;
   paused = false;
   lastFrame = null;
@@ -1066,6 +1079,10 @@ const handlers = {
   },
   clockOption({ on }) {
     syncClock = on;
+  },
+  audio({ on }) {
+    audioOn = on;
+    emu?.setAudio(on);
   },
   async netConfig({ on, url, token }) {
     const changed = url !== netCfg.url || token !== netCfg.token;
