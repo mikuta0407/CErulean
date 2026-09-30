@@ -56,7 +56,8 @@
 ## 高解像度（VGA・正方形）のイメージ（2026-09-30）
 
 - 画面の大きさはイメージの中にはなく、Device Emulator がスキンの設定（`displayWidth`・
-  `displayHeight`。VGA は 480×640、VGA の正方形は 480×480、QVGA の正方形は 240×240）から起動前に
+  `displayHeight`。VGA は 480×640、VGA の正方形は 480×480、正方形は 240×240、WM6 の
+  `*_GSM_QVGA_VR` は 320×320。msi の CGen_PPC_XML_properties.xml の DisplayWidth/Height）から起動前に
   RAM に置く。WM5 JPN の `PPC_JPN_VGA.bin` の OAL（VA 0x800AF89C〜）は PA 0x30020000（BSP の引数の
   領域）の +0x44 が署名 0xDE12DE34 なら +0x48 幅・+0x4A 高さ・+0x4C 色数を使い（「Using
   emulator-specified video parameters」）、なければ 240×320・16 ビット。置かないと VGA 用の大きな

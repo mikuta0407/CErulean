@@ -395,7 +395,7 @@ function rtcNow() {
 
 // イメージから起動するときにゲストへ渡す画面の大きさ（[幅, 高さ]。null なら渡さない =
 // 240×320）。画面の大きさは Device Emulator ではスキンの設定で、イメージの中には無いので
-// 選んでもらう。「自動」はイメージの名前（SDK の命名: *_VGA*・*SQUARE*）から決める。
+// 選んでもらう。「自動」はイメージの名前（SDK の命名: *_VGA*・*SQUARE*・*_QVGA_*）から決める。
 function screenFor(name) {
   const v = $("screenSize").value;
   if (v !== "auto") {
@@ -405,6 +405,8 @@ function screenFor(name) {
   const vga = /vga/i.test(name) && !/qvga/i.test(name);
   const square = /square/i.test(name);
   if (vga) return square ? [480, 480] : [480, 640];
+  // WM6 の *_GSM_QVGA_VR は 320×320 の正方形（msi の構成: Square QVGA Emulator）
+  if (/qvga/i.test(name)) return [320, 320];
   return square ? [240, 240] : null;
 }
 try {
