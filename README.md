@@ -3,11 +3,15 @@
 Windows Mobile 5.0 / 6 をブラウザで動かすエミュレータです。
 タップやキーで操作でき、対応アプリのインストールもできます。
 
+**[GitHub Pages版で使う](https://mikuta0407.github.io/CErulean/)**
+
 <img src="docs/assets/wm5-jpn-vga-today.png" width="240" height="320" alt="Windows Mobile 5.0 日本語VGA版のToday画面">
 
-**OS イメージは同梱していません。** [取得・抽出手順と利用条件](docs/images.md)を参照してください。
+**OS イメージは同梱していません。** [取得・抽出手順と利用条件](docs/images.md)に従って用意し、ブラウザで選択してください。
 
-## 起動する
+Windows Mobile 内からインターネットを使うには、別途[中継サーバー](docs/usage.md#インターネットを使う)が必要です。
+
+## セルフホストする
 
 [Releases](https://github.com/mikuta0407/CErulean/releases) から、使用する環境に合うビルド済みバイナリを取得・展開してください。
 `cerulean` のあるフォルダで実行します。
