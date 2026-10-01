@@ -7,15 +7,21 @@ Windows Mobile 5.0 / 6 をブラウザで動かすエミュレータです。
 
 ## 起動する
 
-Web 資材を含む単体バイナリなら、Rust・Node.js・外部の Web 資材は不要です。
+[Releases](https://github.com/mikuta0407/CErulean/releases) から、使用する環境に合うビルド済みバイナリを取得・展開してください。
+`cerulean` のあるフォルダで実行します。
 
 ```sh
-cerulean serve
+./cerulean serve
 ```
 
-1. <http://127.0.0.1:8000/app/> を開く。
-2. 抽出した `.bin` を選んで起動する（画面サイズはファイル名から自動判定）。
-3. Today 画面が出たら、タップ・ドラッグ・方向キー・Enter で操作する。PC の英数字入力は IME をオフにする。
+Windows では `cerulean.exe` を使い、PowerShell で `./cerulean.exe serve` を実行します。
+実行権限がない場合は `chmod +x cerulean` を実行してください。
+サーバーを動かしているターミナルは開いたままにします。終了は Ctrl+C です。
+
+1. ブラウザで <http://127.0.0.1:8000/app/> を開く。
+2. [取得・抽出手順](docs/images.md)で用意した `.bin` を選ぶ。画面サイズは「自動」のままで起動できます。
+3. Today 画面が出るまで待ち、タップ・ドラッグ・方向キー・Enter で操作する。
+   PC の英数字入力は IME をオフにしてください。
 
 ### 基本操作
 
@@ -29,19 +35,30 @@ cerulean serve
 保存先はブラウザ内です。サイトデータを消すと保存も失われます。
 **書き出したスナップショットには OS の内容が含まれるため、公開共有しないでください。**
 
-### ネットワークを使う
+### インターネットを使う
+
+Windows Mobile 内からインターネットに接続するには、中継サーバーが必要です。
+次のコマンドで、ブラウザ版の配信と中継サーバーを一緒に起動できます。
 
 ```sh
-cerulean serve --with-relay
+./cerulean serve --with-relay
 ```
 
-1. 起動時に表示される URL を開く（中継トークンが自動で設定される）。
-2. メニューの「ネットワーク（中継サーバー経由）」をオンにする。
+1. 起動時に表示されるトークン付き URL をブラウザで開く。
+2. Windows Mobile を起動し、CErulean のメニューで「ネットワーク（中継サーバー経由）」をオンにする。
 3. Windows Mobile の「設定 → 接続 → ネットワークカード」で、接続先を「インターネット設定」にする。
-4. HTTPS を使う場合は、IE Mobile で `http://10.0.2.2/` を開き、CErulean Local CA をインストールする。
+4. Windows Mobile の Internet Explorer で Web サイトを開く。
+   HTTPS サイトを使う場合は、先に `http://10.0.2.2/` を開き、CErulean Local CA の証明書をインストールする。
 
 別の中継サーバーを使う場合は、メニューで URL とトークンを指定します。
 HTTPS のページからは `wss://`（ローカルの中継は `ws://127.0.0.1`）を使います。
+
+### スマートフォンで使う
+
+配信された CErulean をブラウザで開きます。
+抽出した `.bin` はスマートフォン内に保存し、その端末で選択してください。
+
+iOS では、HTTPS で開かないと動作が遅くなる可能性があります。
 
 ### サーバーのオプション
 
@@ -71,7 +88,7 @@ target/release/cerulean serve
 ### 静的な Web サーバーに置く
 
 ```sh
-cerulean web-export site
+./cerulean web-export site
 ```
 
 `site/` の中身をそのまま HTTPS の Web サーバーに置き、`/app/` を開きます。
@@ -100,8 +117,7 @@ cerulean web-export site
 ## 詳しい情報
 
 - [使い方・配信設定](docs/usage.md)
-- [開発・CLI・テスト](docs/development.md)
-- [設計文書](docs/README.md)
+- [イメージの取得・抽出手順と利用条件](docs/images.md)
 
 ## ライセンス
 

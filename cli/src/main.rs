@@ -1,5 +1,5 @@
 //! CErulean のネイティブの開発用 CLI。
-//! 一致確認の出力（--result・--trace-hash）の中身は testdata/golden/README.md が正。
+//! 一致確認の出力（--result・--trace-hash）の中身は tmp/internal-docs/testdata/golden/README.md が正。
 
 mod card;
 mod net;

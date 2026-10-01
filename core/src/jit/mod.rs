@@ -1,4 +1,4 @@
-//! JIT-to-wasm（段階5。設計は docs/stage5-design.md、2026-09-29 ユーザー確認済み）。
+//! JIT-to-wasm（段階5。設計は tmp/internal-docs/docs/stage5-design.md、2026-09-29 ユーザー確認済み）。
 //!
 //! よく実行されるブロック（ページ内の直線の命令列。codegen.rs）を wasm の関数に変換し、
 //! ホスト（web クレートの [`JitHost`]）が本体と同じ線形メモリを import した

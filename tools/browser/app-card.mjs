@@ -1,5 +1,5 @@
 // app-card.mjs: ブラウザ版のストレージカードを Chrome で通しで確かめる
-// （docs/storage-card-design.md。2026-09-29 ユーザー決定の「カードに簡単にデータを入れられる」）。
+// （tmp/internal-docs/docs/storage-card-design.md。2026-09-29 ユーザー決定の「カードに簡単にデータを入れられる」）。
 //
 //   tools/web-build.sh && tools/serve-bench.py &
 //   node tools/browser/app-card.mjs <イメージ> <出力ディレクトリ> [--desktop] [--headed]

@@ -1,5 +1,5 @@
-//! 一致確認用の出力（testdata/golden/README.md の結果の JSON と trace-hash）。
-//! 書式は testdata/golden/README.md を参照。
+//! 一致確認用の出力（tmp/internal-docs/testdata/golden/README.md の結果の JSON と trace-hash）。
+//! 書式は tmp/internal-docs/testdata/golden/README.md を参照。
 
 use std::io::Write;
 

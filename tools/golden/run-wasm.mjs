@@ -2,7 +2,7 @@
 //
 // run.sh の wasm 版: testdata/golden/scenarios/<シナリオ名>.scenario の定義どおりに
 // web クレートの wasm（Node 用の出力 web/pkg-node。tools/web-build.sh で作る）を
-// リセットから走らせ、結果の JSON Lines（testdata/golden/README.md）を書く。
+// リセットから走らせ、結果の JSON Lines（tmp/internal-docs/testdata/golden/README.md）を書く。
 // ネイティブの CLI の --result と同じ値になるはず（計画書 §9 段階2）。
 // 実イメージのシナリオは image=$<環境変数名> の環境変数（CERULEAN_IMAGE など）が必要。
 // CERULEAN_JIT=1（または「閾値,まとめる数」。例 1,1）で JIT を有効にする（段階5。

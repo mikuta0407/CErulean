@@ -5,12 +5,28 @@ CErulean が読み込むのは **Microsoft Device Emulator 用の `.bin`** で�
 
 ## 利用条件
 
-- Microsoft の公式配布を使い、パッケージ内のライセンスを確認してください。
+- Microsoft が配布したパッケージを使い、パッケージ内のライセンスを確認してください。
 - WM5 SDK・WM6 Images の規約は、公開コピーの配布や逆コンパイル等を制限しています。
   WM6 は商用ホスティングも禁止しています。
 - **OS イメージ・MSI/CAB・抽出した DLL/EXE・OS を含むスナップショットは公開しないでください。**
 
 ## 1. ダウンロード
+
+まず試す場合は、Windows Mobile 5.0 の日本語 VGA 版（480×640）を用意します。
+以下のイメージをすべて取得する必要はありません。
+
+### WM5 日本語 VGA 版
+
+使用するパッケージは `Windows Mobile 5.0 Emulator Images for Pocket PC - JPN.msi` です。
+Microsoft の配布 URL は現在利用できないため、元の配布ファイルを保存した
+Wayback Machine のアーカイブから取得します。
+
+```sh
+curl --fail --location --output wm5_emu_jpn.msi \
+  'https://web.archive.org/web/20150617130421id_/http://download.microsoft.com/download/b/7/5/b7566ed3-6940-4541-8cf2-3e0fc1fafbc4/Windows%20Mobile%205.0%20Emulator%20Images%20for%20Pocket%20PC%20-%20JPN.msi'
+```
+
+### WM5 英語版・WM6 日本語版
 
 - [WM5 SDK for Pocket PC（英語版）](https://www.microsoft.com/en-us/download/details.aspx?id=42)
 - [WM6 Localized Emulator Images](https://www.microsoft.com/en-us/download/details.aspx?id=7974)
@@ -26,11 +42,19 @@ curl --fail --location --output wm6pro_jpn.msi \
 
 ## 2. 抽出
 
-Python 3 を用意し、[抽出ツール](../tools/images/extract-msi.py)を
-`extract-msi.py` という名前で MSI と同じ作業フォルダに保存します。以下もそのフォルダで実行してください。
+Python 3 を用意し、[抽出ツール](../tools/images/extract-msi.py)を開いて、
+GitHub の「Raw」から内容を `extract-msi.py` という名前で保存します。
+ソースの ZIP を取得した場合は、`tools/images/extract-msi.py` をコピーしても構いません。
+
+MSI と抽出ツールを同じ作業フォルダに置き、以下のコマンドをそのフォルダで実行してください。
 WM5 の規約は MSI のライセンス表示、WM6 は下記で抽出する `F_License.rtf` で確認できます。
 
 ```sh
+# WM5 日本語 VGA 版
+python3 extract-msi.py wm5_emu_jpn.msi wm5 \
+  _2PPC_JP_1_BIN
+cp wm5/_2PPC_JP_1_BIN wm5/PPC_JPN_VGA.bin
+
 # WM5 英語版
 python3 extract-msi.py wm5sdk.msi wm5 \
   _208PPC_USA_bin
@@ -52,6 +76,7 @@ Windows では公式インストーラーから取り出す方法もあります
 
 | イメージ | 画面サイズ | 構成 |
 |---|---|---|
+| `wm5/PPC_JPN_VGA.bin` | 480×640 | WM5 日本語版・VGA |
 | `wm5/PPC_USA.bin` | 240×320 | WM5 英語版 |
 | `wm6/PPC_JPN.bin` | 240×320 | WM6 日本語版・Classic |
 | `wm6/PPC_JPN_GSM_VGA.bin` | 480×640 | WM6 日本語版・Professional（電話 UI あり、通話は未対応） |

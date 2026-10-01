@@ -1,12 +1,24 @@
 # 詳しい使い方
 
-[README に戻る](../README.md)。コマンドはリポジトリ直下で実行します。
+[README に戻る](../README.md)。
 
 ## まず動かす
 
-`cerulean` はブラウザ用の HTML・JavaScript・アイコン・wasm を埋め込んだ単体バイナリにできます。
-そのバイナリを用意した後は、**`cerulean serve` だけで起動**できます。実行時にソースツリー・
-外部の Web 資材・Rust・Node.js は不要です（OS イメージとブラウザは別途必要です）。
+[Releases](https://github.com/mikuta0407/CErulean/releases) から、使用する環境に合うビルド済みバイナリを取得・展開してください。
+`cerulean` のあるフォルダで実行します。
+
+```sh
+./cerulean serve
+```
+
+Windows では `cerulean.exe` を使い、PowerShell で `./cerulean.exe serve` を実行します。
+ブラウザで <http://127.0.0.1:8000/app/> を開き、[取得・抽出手順](images.md)で用意した `.bin` を選択してください。
+初回の起動には数十秒以上かかります。
+
+サーバーを動かしているターミナルは開いたままにします。終了は Ctrl+C です。
+実行権限がない場合は `chmod +x cerulean` を実行してください。
+
+### ソースからビルドする場合
 
 ソースから作る場合、以下のコマンドを、このリポジトリのルートで実行してください（Linux / macOS の Bash、
 Windows では WSL の Bash を想定）。
@@ -40,6 +52,31 @@ target/release/cerulean serve
 
 起動後は状態が自動保存され、次に開くと「続きから再開」できます。音はメニューの
 「音を出す」でオンにします（既定はオフ）。詳しくは以下のブラウザ版の使い方を参照してください。
+
+## インターネットを使う
+
+Windows Mobile 内からインターネットに接続するには、中継サーバーが必要です。
+次のコマンドで、ブラウザ版の配信と中継サーバーを一緒に起動できます。
+
+```sh
+./cerulean serve --with-relay
+```
+
+1. 起動時に表示されるトークン付き URL をブラウザで開く。
+2. Windows Mobile を起動し、CErulean のメニューで「ネットワーク（中継サーバー経由）」をオンにする。
+3. Windows Mobile の「設定 → 接続 → ネットワークカード」で、接続先を「インターネット設定」にする。
+4. Windows Mobile の Internet Explorer で Web サイトを開く。
+   HTTPS サイトを使う場合は、先に `http://10.0.2.2/` を開き、CErulean Local CA の証明書をインストールする。
+
+別の中継サーバーを使う場合は、メニューで URL とトークンを指定します。
+HTTPS のページからは `wss://`（ローカルの中継は `ws://127.0.0.1`）を使います。
+
+## スマートフォンで使う
+
+配信された CErulean をブラウザで開きます。
+抽出した `.bin` はスマートフォン内に保存し、その端末で選択してください。
+
+iOS では、HTTPS で開かないと動作が遅くなる可能性があります。
 
 ## できること
 
@@ -78,7 +115,6 @@ target/release/cerulean serve
 - [ ] PXA27x 系の実機構成への対応（将来の拡張）
 
 TODO の対応時期は未定です。
-設計と確認記録は [文書の案内](README.md) を参照してください。
 
 ## 保存と困ったとき
 
@@ -101,8 +137,8 @@ HTML・JS・wasm を隣に置く必要はありません。ビルド時に使っ
 実行したディレクトリに影響されません。
 
 ```sh
-cerulean serve                 # http://127.0.0.1:8000/app/
-cerulean serve --with-relay    # 同じポートの /relay にゲストのネットワーク中継も置く
+./cerulean serve                 # http://127.0.0.1:8000/app/
+./cerulean serve --with-relay    # 同じポートの /relay にゲストのネットワーク中継も置く
 ```
 
 `--port N`（127.0.0.1）・`--listen 0.0.0.0:8000`（他の端末から）を指定できます。
@@ -120,7 +156,7 @@ Web 資材の変更を試すときは `--root web/www` で外部ファイルか�
 
 ```sh
 # 埋め込んだものと同じ Web 資材を、新しいディレクトリへ書き出す
-cerulean web-export site
+./cerulean web-export site
 ```
 
 生成された `site/` の中身を、そのまま Web サーバーの公開ディレクトリに置きます。
@@ -134,7 +170,7 @@ OS イメージは公開ディレクトリに置かず、利用者がブラウ�
 配信は **HTTPS** にし、`.wasm` の Content-Type を **`application/wasm`**、`.js` を
 **`text/javascript`** に設定してください。ローカル確認では `http://localhost` も使えます。
 `file://` で HTML を直接開く方法には対応していません。ネットワーク機能は既定のオフのままで
-使ってください。必要になったら `cerulean relay` を別に用意し、その URL とトークンを設定できます。
+使ってください。Windows Mobile 内からインターネットを使う場合は、中継サーバーが必要です。必要になったら `./cerulean relay` を別に用意し、その URL とトークンを設定できます。
 
 ### HTTPS と中継をまとめて配信する
 

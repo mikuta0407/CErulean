@@ -589,7 +589,7 @@ mod tests {
         assert_eq!(load_words(adc).unwrap().entry, 0x80001000);
     }
 
-    /// 実イメージ（CERULEAN_IMAGE があるときだけ）: CLAUDE.md の確認済みの事実。
+    /// 実イメージ（CERULEAN_IMAGE があるときだけ）: tmp/internal-docs/CLAUDE.md の確認済みの事実。
     #[test]
     fn real_image() {
         let Some(path) = std::env::var_os("CERULEAN_IMAGE") else {

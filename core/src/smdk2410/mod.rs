@@ -48,7 +48,7 @@ const UART_BASE: u32 = 0x50000000;
 
 /// WinCE カーネルの仮想アドレスマッピングのうち、ロード時の変換に使う部分。
 /// VA 0x80000000〜 が PA 0x30000000〜（SDRAM）に対応する（実イメージで確認済み。
-/// 完全な OEMAddressTable は CLAUDE.md の「確認済みの事実」）。
+/// 完全な OEMAddressTable は tmp/internal-docs/CLAUDE.md の「確認済みの事実」）。
 const KERNEL_VA_BASE: u32 = 0x80000000;
 
 /// 1 命令あたりの PCLK ティック数 = PCLK_TICKS_NUM/8。
@@ -631,7 +631,7 @@ impl Machine {
         Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
     }
 
-    /// CPU 状態のダンプ（一致確認用。並びは testdata/golden/README.md の版数 1、
+    /// CPU 状態のダンプ（一致確認用。並びは tmp/internal-docs/testdata/golden/README.md の版数 1、
     /// 212 バイト、すべて LE）。状態は変えない。
     pub fn cpu_dump(&self) -> Vec<u8> {
         const VERSION: u32 = 1;
@@ -844,7 +844,7 @@ fn map(b: &mut Bus<Dev>, flash_size: u32) -> Result<(), crate::bus::MapError> {
     // （Device Emulator 構成はフラッシュではなく RAMFMD を使う）。
     // 2026-09-30 の調査: Am29LV800BB の ID を返すとドライバは 64KB × 510 ブロックと決め打ちで
     // 消去を始め、その番地は 16MB で折り返す。実在のチップの構成と合わないので載せない
-    // （docs/storage-persistence.md）。
+    // （tmp/internal-docs/docs/storage-persistence.md）。
     // TODO: バンク3 の Ethernet（CS8900 相当）等が必要になったら分割する。
     b.map_mmio(
         "bank0-1-empty",

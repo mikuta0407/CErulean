@@ -251,7 +251,7 @@ impl Board {
 
 // ---- PC カード（バンク2）と外部割り込みの配線 ----
 //
-// 観察（2026-09-29、pcc_smdk2410.dll の初期化。docs/storage-card-design.md）:
+// 観察（2026-09-29、pcc_smdk2410.dll の初期化。tmp/internal-docs/docs/storage-card-design.md）:
 //   - I/O 空間は PA 0x11000000 + ISA の I/O ポート、メモリ空間は PA 0x10000000 +
 //     ISA のメモリアドレス（コントローラのポート 0x3E0/0x3E1 と、属性メモリの CIS を
 //     この位置で読む）。

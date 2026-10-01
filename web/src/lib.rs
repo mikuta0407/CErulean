@@ -36,7 +36,7 @@ extern "C" {
     fn web_sys_console_error(s: &str);
 }
 
-// ---- JIT のホスト（段階5。docs/stage5-design.md §2）----
+// ---- JIT のホスト（段階5。tmp/internal-docs/docs/stage5-design.md §2）----
 //
 // 生成したモジュールは本体の線形メモリを import する。関数は本体の関数テーブルに
 // 置き、Rust からテーブルの添字（wasm32 の関数ポインタ）で直接呼ぶ（段階5-2。
@@ -698,7 +698,7 @@ impl Emu {
         emu::format_recording(start_snap, image_id, start, &evs).map_err(|e| JsError::new(&e))
     }
 
-    /// 最後に止まった理由（testdata/golden/README.md の stop の JSON）。
+    /// 最後に止まった理由（tmp/internal-docs/testdata/golden/README.md の stop の JSON）。
     #[wasm_bindgen(js_name = stopJson)]
     pub fn stop_json(&self) -> String {
         self.stop.clone()
@@ -794,7 +794,7 @@ impl Emu {
         self.m.take_uart1()
     }
 
-    /// CPU 状態のダンプ（testdata/golden/README.md、212 バイト）。
+    /// CPU 状態のダンプ（tmp/internal-docs/testdata/golden/README.md、212 バイト）。
     #[wasm_bindgen(js_name = cpuDump)]
     pub fn cpu_dump(&self) -> Vec<u8> {
         self.m.cpu_dump()

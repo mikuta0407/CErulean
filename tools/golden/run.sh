@@ -2,13 +2,13 @@
 # run.sh <シナリオ名> <出力.jsonl> [追加の引数...]
 #
 # testdata/golden/scenarios/<シナリオ名>.scenario の定義どおりに Rust 版（release）を
-# リセットから走らせ、結果の JSON Lines（testdata/golden/README.md）を書く。
+# リセットから走らせ、結果の JSON Lines（tmp/internal-docs/testdata/golden/README.md）を書く。
 # 追加の引数は CLI にそのまま渡す（例: --trace-hash 1000000）。
 # CLI は $CERULEAN_BIN（既定: target/release/cerulean。無ければビルド）。
 # GOLDEN_RUNNER=wasm なら web クレートの wasm を Node で走らせる（run-wasm.mjs）。
 #
 # 実イメージのシナリオは image=$<環境変数名> で、その環境変数にイメージのパスが要る
-# （CERULEAN_IMAGE = PPC_USA.bin など。一覧は testdata/golden/README.md）。
+# （CERULEAN_IMAGE = PPC_USA.bin など。一覧は tmp/internal-docs/testdata/golden/README.md）。
 # UART1 の出力は <出力>.uart に、CLI の標準エラーは <出力>.err に書く。
 set -euo pipefail
 if [ $# -lt 2 ]; then
@@ -38,7 +38,7 @@ done < "$def"
 if [[ $image =~ ^\$([A-Z0-9_]+)$ ]]; then
   var=${BASH_REMATCH[1]}
   if [ -z "${!var:-}" ]; then
-    echo "run.sh: $name needs $var (path to the image; see testdata/golden/README.md)" >&2
+    echo "run.sh: $name needs $var (path to the image; see docs/images.md)" >&2
     exit 3
   fi
   image=${!var}

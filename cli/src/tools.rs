@@ -21,7 +21,7 @@ fn load_snap(path: &str) -> Result<Machine, String> {
 // ---- goldencmp ----
 
 /// JSON Lines の 1 行から、キーの値（文字列ならクォートの中、数・オブジェクトは
-/// そのまま）を取り出す。一致確認の結果（testdata/golden/README.md）の書式だけを
+/// そのまま）を取り出す。一致確認の結果（tmp/internal-docs/testdata/golden/README.md）の書式だけを
 /// 読む最小の読み取り（serde を使わない）。
 fn json_field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
     let k = format!("\"{key}\":");

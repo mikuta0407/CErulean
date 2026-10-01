@@ -1,5 +1,5 @@
 // app-net.mjs: ブラウザ版のネットワーク（中継サーバー経由）を Chrome で通しで確かめる
-// （docs/network-design.md）。
+// （tmp/internal-docs/docs/network-design.md）。
 //
 //   tools/web-build.sh && (cargo build --release)
 //   node tools/browser/app-net.mjs <イメージ> <スナップショット> <出力ディレクトリ> [--headed]

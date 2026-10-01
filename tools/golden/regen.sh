@@ -6,7 +6,7 @@
 # image=$<環境変数名> の環境変数（CERULEAN_IMAGE など）が必要で、無ければ飛ばす。
 #
 # 期待値を変えるのはコアの動作を意図して変えたときだけ（理由をコミットに残す。
-# testdata/golden/README.md）。
+# tmp/internal-docs/testdata/golden/README.md）。
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
 gdir=$root/testdata/golden

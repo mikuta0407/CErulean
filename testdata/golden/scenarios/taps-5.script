@@ -1,7 +1,7 @@
 # taps-5: Today 画面（36 億命令）の後にタップ 5 回。
 # 元の相対表記（押下時間は既定の 100ms = 13,520,000 命令）:
 #   @3600100000i tap 20 10 / +1s tap 50 189 / +3s tap 73 284 / +2s tap 35 50 / +3s tap 227 10
-# 基準シナリオは絶対命令数だけを使う（testdata/golden/README.md）。
+# 基準シナリオは絶対命令数だけを使う（tmp/internal-docs/testdata/golden/README.md）。
 @3600100000i down 20 10     # Start
 @3613620000i up
 @3748820000i down 50 189    # Start メニューの Settings
