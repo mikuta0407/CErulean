@@ -3,6 +3,8 @@
 Windows Mobile 5.0 / 6 をブラウザで動かすエミュレータです。
 タップやキーで操作でき、対応アプリのインストールもできます。
 
+<img src="docs/assets/wm5-jpn-vga-today.png" width="240" height="320" alt="Windows Mobile 5.0 日本語VGA版のToday画面">
+
 **OS イメージは同梱していません。** [取得・抽出手順と利用条件](docs/images.md)を参照してください。
 
 ## 起動する
