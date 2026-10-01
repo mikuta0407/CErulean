@@ -24,14 +24,16 @@ rev=${1:-HEAD}
 w=$root/tmp/bench
 rm -rf "$w/web-base"
 mkdir -p "$w/web-base"
-git archive "$rev" rust | tar -x -C "$w/web-base"
-build() { # <rust ディレクトリ> <target ディレクトリ> <出力>
+git archive "$rev" | tar -x -C "$w/web-base"
+build() { # <ワークスペース> <target ディレクトリ> <出力>
   (cd "$1" && CARGO_TARGET_DIR=$2 cargo build --release -q -p cerulean-web --target wasm32-unknown-unknown)
   rm -rf "$3"
   wasm-bindgen --target nodejs --out-dir "$3" "$2/wasm32-unknown-unknown/release/cerulean_web.wasm"
 }
-build "$w/web-base/rust" "$w/target-base" "$w/pkg_base"
-build rust "$root/rust/target" "$w/pkg_work"
+base_workspace=$w/web-base
+[ -f "$base_workspace/Cargo.toml" ] || base_workspace=$w/web-base/rust
+build "$base_workspace" "$w/target-base" "$w/pkg_base"
+build "$root" "$root/target" "$w/pkg_work"
 : > "$w/wr_base"
 : > "$w/wr_work"
 for _ in $(seq "$n"); do

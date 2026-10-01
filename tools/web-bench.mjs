@@ -1,4 +1,4 @@
-// web-bench.mjs: ブラウザの計測ページ（rust/web/www/bench）と同じ計測を Node で行う。
+// web-bench.mjs: ブラウザの計測ページ（web/www/bench）と同じ計測を Node で行う。
 // 使い方: tools/web-build.sh の後、CERULEAN_IMAGE=... node tools/web-bench.mjs
 //   [シナリオ（boot-1200M・boot-today、既定 boot-1200M）] [JIT の「閾値,数」（省略で JIT なし）]
 import { readFileSync } from "node:fs";
@@ -6,7 +6,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const www = resolve(root, "rust/web/www");
+const www = resolve(root, "web/www");
 const wasm = await import(resolve(www, "pkg/cerulean_web.js"));
 const { runBench } = await import(resolve(www, "bench/bench-core.js"));
 await wasm.default({ module_or_path: readFileSync(resolve(www, "pkg/cerulean_web_bg.wasm")) });

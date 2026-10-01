@@ -4,7 +4,7 @@
 # testdata/golden/scenarios/<シナリオ名>.scenario の定義どおりに Rust 版（release）を
 # リセットから走らせ、結果の JSON Lines（testdata/golden/README.md）を書く。
 # 追加の引数は CLI にそのまま渡す（例: --trace-hash 1000000）。
-# CLI は $CERULEAN_BIN（既定: rust/target/release/cerulean。無ければビルド）。
+# CLI は $CERULEAN_BIN（既定: target/release/cerulean。無ければビルド）。
 # GOLDEN_RUNNER=wasm なら web クレートの wasm を Node で走らせる（run-wasm.mjs）。
 #
 # 実イメージのシナリオは image=$<環境変数名> で、その環境変数にイメージのパスが要る
@@ -55,16 +55,16 @@ fi
 
 if [ "${GOLDEN_RUNNER:-native}" = wasm ]; then
   # wasm（Node）で走らせる（tools/web-build.sh の出力を使う）。
-  [ -f "$root/rust/web/pkg-node/cerulean_web.js" ] || "$root/tools/web-build.sh" >/dev/null
+  [ -f "$root/web/pkg-node/cerulean_web.js" ] || "$root/tools/web-build.sh" >/dev/null
   node "$root/tools/golden/run-wasm.mjs" "$name" "$out" > "$out.uart" 2> "$out.err" || {
     echo "run.sh: $name: wasm runner exited with $? (see $out.err)" >&2
     exit 1
   }
   exit 0
 fi
-bin=${CERULEAN_BIN:-$root/rust/target/release/cerulean}
+bin=${CERULEAN_BIN:-$root/target/release/cerulean}
 if [ ! -x "$bin" ]; then
-  (cd "$root/rust" && cargo build --release -q -p cerulean-cli)
+  (cd "$root" && cargo build --release -q -p cerulean-cli)
 fi
 args=(run --history 0 --quiet-uart --rtc "$rtc" --max-steps "$max_steps" --result "$out")
 [ -n "$script" ] && args+=(--script "$gdir/scenarios/$script")

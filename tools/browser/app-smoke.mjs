@@ -1,4 +1,4 @@
-// app-smoke.mjs: ブラウザ版（rust/web/www/app）を Chrome で開き、イメージから起動して
+// app-smoke.mjs: ブラウザ版（web/www/app）を Chrome で開き、イメージから起動して
 // Today まで進め、タッチ・ハードウェアボタン・PC のキーで操作して画面を PNG に残す。
 //
 //   tools/web-build.sh && tools/serve-bench.py &
@@ -17,7 +17,7 @@ const headed = process.argv.includes("--headed");
 const desktop = process.argv.includes("--desktop");
 const layoutOnly = process.argv.includes("--layout-only");
 const vp = process.argv.find((a) => a.startsWith("--viewport="))?.slice(11).split("x").map(Number);
-const url = process.env.APP_URL ?? "http://localhost:8000/rust/web/www/app/";
+const url = process.env.APP_URL ?? "http://localhost:8000/web/www/app/";
 if (!image || !outDir) {
   console.error("usage: app-smoke.mjs <image> <outdir> [--headed] [--desktop]");
   process.exit(2);

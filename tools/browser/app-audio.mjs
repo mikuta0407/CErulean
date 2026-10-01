@@ -1,4 +1,4 @@
-// app-audio.mjs: ブラウザ版（rust/web/www/app）の音の確認。メニューの「音を出す」を
+// app-audio.mjs: ブラウザ版（web/www/app）の音の確認。メニューの「音を出す」を
 // オンにしてイメージから起動し、起動の早送りをすぐやめて等速で進め、起動音（約 22 億命令目
 // = 仮想 16.4 秒）が AudioContext に渡されることを確かめる。
 //
@@ -13,7 +13,7 @@ import { appHelpers, echoConsole, launchChrome, openPage, sleep } from "./cdp.mj
 
 const [image, outDir] = process.argv.slice(2).filter((a) => !a.startsWith("--"));
 const headed = process.argv.includes("--headed");
-const url = process.env.APP_URL ?? "http://localhost:8000/rust/web/www/app/";
+const url = process.env.APP_URL ?? "http://localhost:8000/web/www/app/";
 if (!image || !outDir) {
   console.error("usage: app-audio.mjs <image> <outdir> [--headed]");
   process.exit(2);

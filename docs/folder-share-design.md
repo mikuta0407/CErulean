@@ -11,7 +11,7 @@ CompactFlash と同じ「Storage Card」に見える。ユーザー了承: ROM �
 ない（Device Emulator 固有の装置で仕様は非公開。Device Emulator のソースは参照しない）。
 ゲストのドライバの機械語（`cerulean disasm` でスナップショットから逆アセンブル）だけを根拠に、
 ホスト側（この装置）は **ゲストのコードが読む値を、そのコードの使い方と矛盾しないように**
-返す。レジスタ・共有バッファ・コマンドの一覧は `rust/core/src/smdk2410/deshare.rs` の先頭。
+返す。レジスタ・共有バッファ・コマンドの一覧は `core/src/smdk2410/deshare.rs` の先頭。
 
 ## 観察（PPC_JPN.bin）
 
@@ -42,7 +42,7 @@ CompactFlash と同じ「Storage Card」に見える。ユーザー了承: ROM �
 ## 実装
 
 - コア: `smdk2410/deshare.rs`（レジスタ・中身のファイルツリー `ShareFs`・コマンド・スナップ
-  ショット）。0x500F4000〜0x500F5FFF を専用の装置にし、その外の 0x500F0000 台は今までどおり
+  ショット）。0x500F4000〜0x500F5FFF を専用の装置にし、その外の 0x500F0000 台は
   値保持スタブ。コマンドは MMIO の書き込みの直後（次の命令より前）に処理し、RAM は共有バッファと
   データバッファの範囲（0x33EEF000〜0x33EFFFFF）だけを読み書きする（`Devices::after_write`・
   `RamAccess`）。新しい項目の日時はゲストの RTC（決定論的）。

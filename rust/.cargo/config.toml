@@ -1,5 +1,0 @@
-# wasm32-wasip1 のテストバイナリは Node の WASI で実行する（コアのテストを
-# usize が 32 ビットの環境でも走らせるため。計画書 §4.2）。
-# パスに / を含むので、Cargo はこの設定ファイルの親（rust/）からの相対で解決する。
-[target.wasm32-wasip1]
-runner = "tools/wasi-run.mjs"

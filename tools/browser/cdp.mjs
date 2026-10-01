@@ -77,7 +77,7 @@ export function connect(url) {
 
 export const sleep = (ms) => new Promise((ok) => setTimeout(ok, ms));
 
-// ブラウザ版（rust/web/www/app）の操作の道具。desktop ならマウス、でなければタッチで操作する。
+// ブラウザ版（web/www/app）の操作の道具。desktop ならマウス、でなければタッチで操作する。
 let shotN = 0; // 撮った順の番号（ブラウザを開き直しても続ける）
 export function appHelpers(p, outDir, { desktop = false } = {}) {
   const h = {

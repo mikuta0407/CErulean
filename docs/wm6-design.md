@@ -7,14 +7,14 @@
 ## イメージ
 
 - 入手元: Microsoft「Windows Mobile 6 Localized Emulator Images」（Download Center ID 7974）。
-  archive.org の `WM6LocalizedEmulatorImages` に全言語の msi がある。
+  公式配布ページと取得手順は [images.md](images.md) を参照。
   `Windows Mobile 6 Professional Images (JPN).msi`（228,013,056 バイト、SHA-256
   `7856461d9009d699de8c00278a43ce81797cba0bce60ce8dc55b9dc339fe155d`）。
 - msi の CAB の `CGen_PocketPC_0411_PPC_JPN.BIN` が QVGA・電話なしの Pocket PC（同梱のスキン
   `Pocket_PC.xml` の題名は「Windows Mobile 6 Classic」。電話つきの `*_GSM_*` が Professional）。
   ここでは `PPC_JPN.bin` と呼ぶ。100,663,296 バイト（96MB）、SHA-256
   `14270634549027eb83fb2b9ecd5e0fe23935a811f76b402a9ebd8bb5e33a1ea7`。
-  他に Phone 版（`*_GSM_*`）・VGA・Square の BIN があるが試していない。
+  電話つき VGA 構成にも対応。他の Phone・Square 構成は未確認。
 - **B000FF 形式ではなく、バンク0 の NOR フラッシュの中身そのもの**:
   - 先頭 64KB が IPL（「Microsoft Windows CE IPL Version 1.2 for DeviceEmulator」）。先頭の命令は
     `b 0x1000`（リセットベクタ）。+0x40 の 'CECE' の次が IPL の ROMHDR（VA 0x80029B7C。
@@ -24,7 +24,7 @@
   - OEMAddressTable（VA 0x88036D14）は WM5 と同じ並びで、0x88000000 → PA 0（96MB）が加わり、
     WM5 の 0x88000000/0x8A000000/0x8C000000 の行がない。
 - ローダーの判別（`loader::is_flash`）: B000FF の署名がなく、4KB の倍数で 128MB 以下、
-  先頭が条件 AL の B、+0x40 が 'CECE'。`.nb0` の名前なら従来どおり .nb0 として扱う。
+  先頭が条件 AL の B、+0x40 が 'CECE'。`.nb0` の名前なら .nb0 として扱う。
 
 ## 起動の流れ（観察）
 
@@ -63,14 +63,14 @@
   emulator-specified video parameters」）、なければ 240×320・16 ビット。置かないと VGA 用の大きな
   部品を 240×320 に描く。WM6 の IPL は引数の領域を初期化し直すが +0x44〜 は残り、同じく効く。
 - `Machine::set_display`（CLI `--screen 480x640`、ブラウザ版は起動画面の「画面」。既定の「自動」は
-  名前の VGA・Square から決める）で置く。指定しなければ何も置かない（今までと同じ）。
+  名前の VGA・Square から決める）で置く。指定しなければ何も置かない。
 - touch.dll の換算は画面の幅・高さの 4 倍を変数に持つので、タッチの逆変換も LCD に設定された
   大きさから求める（`touch_screen_size`）。VGA のメモの手書きで指定どおりの位置に描けた。
 - WM5 JPN の VGA 版と WM6 の電話つき VGA 版（`PPC_JPN_GSM_VGA_VR.BIN`）が 480×640 で Today まで
-  起動し、操作できる（ブラウザ版も Chrome で確認）。基準シナリオ `wm6-vga-settings`
+  起動し、操作できる（ブラウザ版でも操作可能）。基準シナリオ `wm6-vga-settings`
   （`CERULEAN_IMAGE_WM6_VGA`）。
 
-## NOR フラッシュ（`rust/core/src/norflash.rs`）
+## NOR フラッシュ（`core/src/norflash.rs`）
 
 一次資料は Am29LV800B のデータシートのコマンドの表。ゲストの使い方は IPL とカーネルの
 フラッシュドライバのトレース。
@@ -107,6 +107,6 @@
 
 - ID を返す範囲（先頭の 3 語だけか、セクタごとか）、セクタの構成、書き込み・消去の時間。
 - CFI・アンロックバイパス・消去の中断は未実装（使われていない）。
-- Phone・VGA・Square の BIN、WM6 Standard（Smartphone）、WM6.1/6.5 は未確認。
+- 電話つき VGA 以外の Phone・Square 構成、WM6 Standard（Smartphone）、WM6.1/6.5 は未確認。
 - ブラウザ版は同じ wasm の経路で読み込める（形式の判別はコア）。メモリは RAM 128MB＋
-  フラッシュ 96MB、スナップショットは約 235MB になる。実ブラウザでの確認はまだ。
+  フラッシュ 96MB、スナップショットは約 235MB になる。

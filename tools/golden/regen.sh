@@ -6,12 +6,11 @@
 # image=$<環境変数名> の環境変数（CERULEAN_IMAGE など）が必要で、無ければ飛ばす。
 #
 # 期待値を変えるのはコアの動作を意図して変えたときだけ（理由をコミットに残す。
-# 計画書 §1）。段階1 までは Go 版で作った値で、2026-09-28 に Rust 版と一致を確認して
-# 基準を Rust 版に切り替えた。
+# testdata/golden/README.md）。
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
 gdir=$root/testdata/golden
-(cd "$root/rust" && cargo build --release -q -p cerulean-cli)
+(cd "$root" && cargo build --release -q -p cerulean-cli)
 names=("$@")
 if [ ${#names[@]} -eq 0 ]; then
   for f in "$gdir"/scenarios/*.scenario; do names+=("$(basename "$f" .scenario)"); done

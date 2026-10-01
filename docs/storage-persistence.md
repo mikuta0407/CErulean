@@ -27,7 +27,7 @@
 ## RAMFMD（RAM ディスク）を残す
 
 - `OEMGetExtensionDRAM` が PA 0x34000000〜（VA 0x94000000）の 32MB を RAMFMD に予約する
-  （以前「後半 32MB」としていたのは誤り。PA 0x36000000〜 の 32MB はシステムに返す側）。
+  （PA 0x36000000〜 の 32MB はシステムに返す側）。
   RAMFMD は先頭に署名 "FLSH"（0x48534C46）と構成（0x1F81 セクタ・0x1000 バイト等）を置き、
   署名が合わなければ「RAMFMD: Clearing RAM storage region」で消去する（`ramfmd.dll`
   0x01665448〜）。

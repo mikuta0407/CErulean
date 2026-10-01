@@ -1,0 +1,38 @@
+# CErulean の Rust ワークスペース。
+# core: エミュレータのコア（プラットフォーム非依存、std のみ）
+# fat:  ストレージカードのイメージ（FAT）を外から読み書きする（std のみ。コアは使わない）
+# net:  ゲストのイーサネットを外へつなぐユーザー空間の NAT（std のみ。コアは使わない）
+# cli:  ネイティブの開発用 CLI
+# web:  ブラウザ（wasm）のエントリ
+[workspace]
+resolver = "3"
+members = ["core", "fat", "net", "cli", "web"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+publish = false
+license = "MIT"
+
+# 依存はユーザーの承認を得たものだけ。
+[workspace.dependencies]
+cerulean-core = { path = "core" }
+cerulean-fat = { path = "fat" }
+cerulean-net = { path = "net" }
+# wasm-bindgen-cli と版を一致させる必要があるので = で固定する。
+wasm-bindgen = "=0.2.129"
+# 一致確認のハッシュ（CLI のみ。段階0 で「段階1 の CLI で入れる」と合意）。
+sha2 = "0.11"
+# 画面の PNG 保存（CLI のみ。段階0 で「段階1 の CLI で入れる」と合意）。
+png = "0.18"
+# 中継サーバー・CLI の --net が HTTPS のサイトへ今の TLS でつなぐ（CLI のみ。
+# 2026-09-30 ユーザー承認。暗号は ring を使い、aws-lc は使わない）。
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+webpki-roots = "1"
+
+# 計測は必ず release で行う。
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

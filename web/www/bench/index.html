@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CErulean wasm 計測</title>
+<style>
+  :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+  body { margin: 16px; max-width: 48rem; }
+  pre { white-space: pre-wrap; background: color-mix(in srgb, currentColor 8%, transparent); padding: 8px; border-radius: 6px; }
+  .ok { color: #2a7; } .ng { color: #d33; }
+</style>
+</head>
+<body>
+<h1>CErulean wasm 計測（段階2・段階5）</h1>
+<p><code>tools/web-build.sh</code> で wasm をビルドし、<code>tools/serve-bench.py</code> で配信して
+<code>http://localhost:8000/web/www/bench/</code> を開く（キャッシュを無効にして配信する）。</p>
+<p>条件を選んでから WM5 のイメージ（PPC_USA.bin）を選ぶと、リセットから走らせて速度と基準との
+一致を測る（数十秒〜数分。イメージはこのページの外に送らない）。同じイメージでもう一度測るときは
+「同じイメージでもう一度」を押す（条件ごとに新しい Worker で走らせる）。</p>
+<p>
+<label>内容 <select id="mode">
+  <option value="bench">計測（基準との一致・速度）</option>
+  <option value="trace">JIT の経過診断（数分）</option>
+</select></label>
+<label>シナリオ <select id="scenario">
+  <option value="boot-1200M">boot-1200M（起動 12 億命令）</option>
+  <option value="boot-today">boot-today（Today まで 36 億命令）</option>
+</select></label>
+<label>JIT <select id="jit">
+  <option value="off">なし</option>
+  <option value="64,32" selected>あり（閾値 64・32 ブロック）</option>
+  <option value="1,1">あり（閾値 1・1 ブロックずつ）</option>
+</select></label>
+<label><input type="checkbox" id="snapshot"> スナップショット・OPFS も測る</label>
+</p>
+<p>メモリ（JIT で増える分は V8 等の最適化コンパイルの一時的な作業領域）はブラウザの道具で見る:
+Chrome はタスクマネージャ（Shift+Esc）の「メモリ使用量」の最大、Firefox は about:processes、
+Mac の Safari はアクティビティモニタの「Safari Web コンテンツ」（このページのプロセス）。
+iPhone は数値を見にくいので、タブが落ちて再読み込みされないかを見る。</p>
+<p>「JIT の経過診断」は、1 つの Worker で JIT なし → JIT のホストだけ（コンパイルしない）→
+JIT ありを順にリセットから 3 億命令ずつ走らせ、2500 万命令ごとの速度と素の JS の速さを出す
+（シナリオ・JIT の選択は使わない。Safari で JIT ありが遅い原因の切り分け。Safari を完全に
+終了して開き直した直後に行う）。</p>
+<input type="file" id="image"> <button id="again" disabled>同じイメージでもう一度</button>
+<p><button id="probe">JIT 診断（イメージ不要・十数秒）</button>
+JS・小さな wasm・エミュレータ本体の速さを比べ、遅い原因を切り分ける。</p>
+<pre id="out"></pre>
+<script type="module">
+const out = document.getElementById("out");
+const print = (s) => { out.textContent += s + "\n"; };
+// 計測は Worker で行う（本番の構成と同じ。計画書 §3.4）。
+let worker = null;
+const startWorker = (msg, transfer) => {
+  // 前の計測の Worker は止める（生成コード・メモリを持ち越さない）。
+  worker?.terminate();
+  worker = new Worker("worker.js", { type: "module" });
+  worker.onmessage = ({ data }) => {
+    if (data.log) print(data.log);
+    if (data.error) print(`ERROR ${data.error}`);
+    if (data.result) {
+      print("\n結果（この JSON を報告に貼る）:\n" + JSON.stringify(data.result, null, 1));
+      out.className = data.result.match === false || data.result.snapRoundTrip === false ? "ng" : "ok";
+    }
+  };
+  worker.onerror = (e) => print(`worker error: ${e.message}`);
+  worker.postMessage(msg, transfer);
+};
+document.getElementById("probe").onclick = async () => {
+  out.textContent = "";
+  out.className = "";
+  print(navigator.userAgent);
+  const synthetic = new Uint8Array(await (await fetch("/testdata/golden/synthetic/idle.words")).arrayBuffer());
+  startWorker({ probe: true, synthetic }, [synthetic.buffer]);
+};
+let file = null;
+const bench = async () => {
+  out.textContent = "";
+  out.className = "";
+  const scenario = document.getElementById("scenario").value;
+  const jitSel = document.getElementById("jit").value;
+  const jit = jitSel === "off" ? null : jitSel.split(",").map(Number);
+  const snapshot = document.getElementById("snapshot").checked;
+  const lines = (await (await fetch(`/testdata/golden/expected/${scenario}.jsonl`)).text()).trim().split("\n");
+  const expected = JSON.parse(lines.at(-1));
+  // Worker に移すので、毎回ファイルから読み直す。
+  const imageBytes = new Uint8Array(await file.arrayBuffer());
+  if (document.getElementById("mode").value === "trace") {
+    print(`${navigator.userAgent}\nimage ${file.name} ${imageBytes.length} bytes, JIT trace`);
+    startWorker({ imageBytes, trace: true }, [imageBytes.buffer]);
+    return;
+  }
+  print(`${navigator.userAgent}\nimage ${file.name} ${imageBytes.length} bytes, ${scenario}, jit ${jitSel}`);
+  startWorker({ imageBytes, expected, jit, snapshot }, [imageBytes.buffer]);
+};
+document.getElementById("image").onchange = (ev) => {
+  file = ev.target.files[0];
+  document.getElementById("again").disabled = !file;
+  if (file) bench();
+};
+document.getElementById("again").onclick = () => file && bench();
+</script>
+</body>
+</html>

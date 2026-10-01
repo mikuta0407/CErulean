@@ -14,11 +14,11 @@
 set -uo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
 gdir=$root/testdata/golden
-(cd "$root/rust" && cargo build --release -q -p cerulean-cli) || exit 1
+(cd "$root" && cargo build --release -q -p cerulean-cli) || exit 1
 if [ "${GOLDEN_RUNNER:-native}" = wasm ]; then
   "$root/tools/web-build.sh" > /dev/null || exit 1
 fi
-cmp=$root/rust/target/release/cerulean
+cmp=$root/target/release/cerulean
 names=("$@")
 if [ ${#names[@]} -eq 0 ]; then
   for f in "$gdir"/scenarios/*.scenario; do names+=("$(basename "$f" .scenario)"); done

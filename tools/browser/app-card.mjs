@@ -21,7 +21,7 @@ const args = process.argv.slice(2);
 const [image, outArg] = args.filter((a) => !a.startsWith("--"));
 const desktop = args.includes("--desktop");
 const headed = args.includes("--headed");
-const url = process.env.APP_URL ?? "http://localhost:8000/rust/web/www/app/";
+const url = process.env.APP_URL ?? "http://localhost:8000/web/www/app/";
 if (!image || !outArg) {
   console.error("usage: app-card.mjs <image> <outdir> [--desktop] [--headed]");
   process.exit(2);
@@ -34,7 +34,7 @@ rmSync(outDir, { recursive: true, force: true });
 mkdirSync(dlDir, { recursive: true });
 mkdirSync(srcDir, { recursive: true });
 const root = resolve(import.meta.dirname, "../..");
-const cli = resolve(root, "rust/target/release/cerulean");
+const cli = resolve(root, "target/release/cerulean");
 
 const check = (cond, msg) => {
   if (!cond) throw new Error("FAILED: " + msg);
@@ -141,7 +141,7 @@ try {
   await h.shot("after-eject");
 
   // 4. CLI で再生（card insert のイメージはスクリプトと同じ場所に置く）
-  if (!existsSync(cli)) throw new Error(`${cli} がない（cd rust && cargo build --release）`);
+  if (!existsSync(cli)) throw new Error(`${cli} がない（cargo build --release）`);
   const txt = readdirSync(dlDir).find((n) => n.endsWith(".txt"));
   const gz = readdirSync(dlDir).find((n) => n.endsWith(".snap.gz"));
   execFileSync("gunzip", ["-kf", resolve(dlDir, gz)]);

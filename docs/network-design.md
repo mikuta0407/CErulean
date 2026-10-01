@@ -1,14 +1,11 @@
 # ネットワーク（NE2000 の PC カード＋中継サーバー）の設計
 
-開始用プロンプトは `docs/network-kickoff.md`。この文書は決定事項・観察結果・未決事項を
-まとめる（随時更新）。
-
 ## 決定事項（2026-09-30 ユーザー決定）
 
 - **ゲスト側**: 82365SL 互換のコントローラ（ストレージカードで実装済み）に挿す NE2000 互換の
   PC カード（DP8390 相当の NIC）。
 - **ホスト側は案 B**: ARP・DHCP・DNS・TCP の終端（ユーザー空間の NAT）を std のみの自作
-  クレート `rust/net`（cerulean-net）に置き、ブラウザ（wasm）と CLI で共有する。外へは TCP の
+  クレート `net`（cerulean-net）に置き、ブラウザ（wasm）と CLI で共有する。外へは TCP の
   バイト列だけを出す。
   - 案 A（イーサネットのフレームをそのまま中継し、サーバー側で TAP か NAT）は、サーバーに
     root か結局 TCP のスタックが要り重くなるので選ばなかった。
@@ -20,8 +17,7 @@
   127.0.0.1（`--listen` で変える）。
 - UI: メニューの「ネットワーク（中継サーバー経由）」のトグル（既定はオフ）と中継サーバーの
   URL・トークン。オン・オフはイーサネットカードの挿入・抜去としてゲストに見せ、記録する。
-  計画書 §7.5 の「サイトはネットワーク通信をしない」は「オンにしたときだけ、ユーザーが指定
-  した中継サーバーとだけ通信する」に改めた。
+  オンにしたときだけ、ユーザーが指定した中継サーバーと通信する。
 
 ## 一次資料（`tmp/docs/`、非コミット。テキスト化は `tmp/pdf2txt.sh`）
 
@@ -81,7 +77,7 @@ CIS の書式はストレージカードと同じく SanDisk の Table 6-1 の�
 
 ## 実装（2026-09-30）
 
-- **コア**（`rust/core/src/pccard/ne2000.rs`）: CIS・構成レジスタ（COR・CCSR）・DP8390 の
+- **コア**（`core/src/pccard/ne2000.rs`）: CIS・構成レジスタ（COR・CCSR）・DP8390 の
   ページ 0〜2 のレジスタ・リモート DMA（Remote Read/Write・Send Packet）・送信（TXP で即座に
   完了してホストへの列に積む）・受信（アドレスのフィルタ・受信リング・BNRY での中断と OVW）・
   リセットポート。仮想時間を持たない（送受信は瞬時）。
@@ -90,7 +86,7 @@ CIS の書式はストレージカードと同じく SanDisk の Table 6-1 の�
   - Machine の API: `insert_nic(mac)`・`eject_any_card()`・`net_take_tx()`・`net_receive(frame)`。
   - 入力（script・emu）: `nic insert [MAC]`・`nic eject`・`net rx <16 進>`。ネットワークから
     来たフレームはすべて `net rx` として命令数つきで記録する（再生はネットワークなしで同じ状態）。
-- **スタック**（`rust/net`、cerulean-net）: sans-IO（ソケット・時計に触れない）。
+- **スタック**（`net`、cerulean-net）: sans-IO（ソケット・時計に触れない）。
   - 仮想の LAN 10.0.2.0/24: ゲートウェイ 10.0.2.2（DHCP サーバーを兼ねる）・DNS 10.0.2.3・
     ゲスト 10.0.2.15。ゲートウェイの MAC は 02:43:52:4C:4E:FE。
   - DNS は名前ごとに仮のアドレス（198.18.0.0/15）をすぐに返し、そのアドレスへの接続は名前で
@@ -103,7 +99,7 @@ CIS の書式はストレージカードと同じく SanDisk の Table 6-1 の�
   `--net-record F`（受け取ったフレームのスクリプト）・`--net-pcap F`（送受信の pcap。時刻は
   仮想時間）・`--net-verbose`。`--script` は複数指定できる（再生は元のスクリプトと記録を並べる）。
 - **中継サーバー**: `cerulean relay [--listen A] [--token T] [--allow-private]`、またはアプリの
-  配信と同じポートの `/relay`（`cerulean serve --with-relay`。rust/cli/src/serve.rs）。約束は
+  配信と同じポートの `/relay`（`cerulean serve --with-relay`。cli/src/serve.rs）。約束は
   relay.rs の先頭のコメント。既定では私的アドレス（LAN・localhost・CGN 等）への接続を断る
   （2026-09-30 追加。家の LAN への踏み台にならないように）。WebSocket 1 本に接続を多重化し、接続ごとに CREDIT（ブラウザが受け
   取れる量）の範囲で読む。
@@ -136,7 +132,7 @@ WM5 の IE Mobile は SSL 2.0 互換の ClientHello で TLS 1.0 を求め、RC4_
 直接つながらない。警告なしに使えるよう、ゲストの TLS をエミュレータの外側で終端し、外へは今の
 TLS でつなぎ直す:
 
-- **ゲスト側（`rust/net`。std のみ・自作）**: `bigint.rs`（多倍長整数・RSA・Miller-Rabin）、
+- **ゲスト側（`net`。std のみ・自作）**: `bigint.rs`（多倍長整数・RSA・Miller-Rabin）、
   `crypto.rs`（MD5・SHA-1・HMAC・RC4・乱数の生成器）、`x509.rs`（DER・自前の CA・名前ごとの
   サーバー証明書。署名は SHA-1、有効期間 2000〜2049 年でゲストの時計に依らない）、`tls.rs`
   （TLS 1.0 のサーバー。RSA の鍵交換・RC4_128_SHA）。443 番への接続は、仮のアドレスから分かる

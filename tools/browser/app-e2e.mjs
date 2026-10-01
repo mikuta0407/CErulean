@@ -9,7 +9,7 @@
 //  3. リロード → 「続きから再開」で再開でき、ゲストの時計が今に合うこと
 //  4. Chrome を強制終了（SIGKILL）→ 開き直して再開できること
 //  5. 2 つ目のタブでは「別のタブで動いています」になること
-//  6. 書き出したスクリプトをネイティブ CLI（rust/target/release/cerulean）で再生し、
+//  6. 書き出したスクリプトをネイティブ CLI（target/release/cerulean）で再生し、
 //     終わりの CPU 状態・RAM・画面の SHA-256 がスクリプトに書いた値と一致すること
 //
 // Chrome のプロファイル（OPFS を含む）は出力ディレクトリの下に毎回作り直す。
@@ -22,7 +22,7 @@ const args = process.argv.slice(2);
 const [image, outArg] = args.filter((a) => !a.startsWith("--"));
 const desktop = args.includes("--desktop");
 const headed = args.includes("--headed");
-const url = process.env.APP_URL ?? "http://localhost:8000/rust/web/www/app/";
+const url = process.env.APP_URL ?? "http://localhost:8000/web/www/app/";
 if (!image || !outArg) {
   console.error("usage: app-e2e.mjs <image> <outdir> [--desktop] [--headed]");
   process.exit(2);
@@ -33,7 +33,7 @@ const profile = resolve(outDir, "profile");
 rmSync(outDir, { recursive: true, force: true });
 mkdirSync(dlDir, { recursive: true });
 const root = resolve(import.meta.dirname, "../..");
-const cli = resolve(root, "rust/target/release/cerulean");
+const cli = resolve(root, "target/release/cerulean");
 
 let chrome = null;
 async function open() {
@@ -163,7 +163,7 @@ try {
   p2.close();
 
   // 6. CLI で再生
-  if (!existsSync(cli)) throw new Error(`${cli} がない（cd rust && cargo build --release）`);
+  if (!existsSync(cli)) throw new Error(`${cli} がない（cargo build --release）`);
   const txt = readdirSync(dlDir).find((n) => n.endsWith(".txt"));
   const gz = readdirSync(dlDir).find((n) => n.endsWith(".snap.gz"));
   execFileSync("gunzip", ["-kf", resolve(dlDir, gz)]);

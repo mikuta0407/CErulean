@@ -1,7 +1,7 @@
 // run-wasm.mjs <シナリオ名> <出力.jsonl>
 //
 // run.sh の wasm 版: testdata/golden/scenarios/<シナリオ名>.scenario の定義どおりに
-// web クレートの wasm（Node 用の出力 rust/web/pkg-node。tools/web-build.sh で作る）を
+// web クレートの wasm（Node 用の出力 web/pkg-node。tools/web-build.sh で作る）を
 // リセットから走らせ、結果の JSON Lines（testdata/golden/README.md）を書く。
 // ネイティブの CLI の --result と同じ値になるはず（計画書 §9 段階2）。
 // 実イメージのシナリオは image=$<環境変数名> の環境変数（CERULEAN_IMAGE など）が必要。
@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const require = createRequire(import.meta.url);
-const web = require(resolve(root, "rust/web/pkg-node/cerulean_web.js"));
+const web = require(resolve(root, "web/pkg-node/cerulean_web.js"));
 
 const [name, out] = process.argv.slice(2);
 if (!name || !out) {

@@ -25,11 +25,13 @@ image=${CERULEAN_IMAGE:-$root/tmp/images/PPC_USA.bin}
 w=$root/tmp/bench
 rm -rf "$w/base"
 mkdir -p "$w/base"
-git archive "$rev" rust | tar -x -C "$w/base"
-(cd "$w/base/rust" && CARGO_TARGET_DIR=$w/target-base cargo build --release -q -p cerulean-cli)
-(cd rust && cargo build --release -q -p cerulean-cli)
+git archive "$rev" | tar -x -C "$w/base"
+base_workspace=$w/base
+[ -f "$base_workspace/Cargo.toml" ] || base_workspace=$w/base/rust
+(cd "$base_workspace" && CARGO_TARGET_DIR=$w/target-base cargo build --release -q -p cerulean-cli)
+(cargo build --release -q -p cerulean-cli)
 cp "$w/target-base/release/cerulean" "$w/c_base"
-cp rust/target/release/cerulean "$w/c_work"
+cp target/release/cerulean "$w/c_work"
 : > "$w/r_base"
 : > "$w/r_work"
 for _ in $(seq "$n"); do

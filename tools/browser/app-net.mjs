@@ -1,7 +1,7 @@
 // app-net.mjs: ブラウザ版のネットワーク（中継サーバー経由）を Chrome で通しで確かめる
 // （docs/network-design.md）。
 //
-//   tools/web-build.sh && (cd rust && cargo build --release)
+//   tools/web-build.sh && (cargo build --release)
 //   node tools/browser/app-net.mjs <イメージ> <スナップショット> <出力ディレクトリ> [--headed]
 //
 // アプリと中継サーバーは `cerulean serve --with-relay` で配信する（中継の URL はアプリの既定の
@@ -38,7 +38,7 @@ const profile = resolve(outDir, "profile");
 rmSync(outDir, { recursive: true, force: true });
 mkdirSync(dlDir, { recursive: true });
 const root = resolve(import.meta.dirname, "../..");
-const cli = resolve(root, "rust/target/release/cerulean");
+const cli = resolve(root, "target/release/cerulean");
 const TOKEN = "app-net-test-token";
 const RELAY = "127.0.0.1:18765";
 const url = `http://${RELAY}/app/#relay-token=${TOKEN}`;

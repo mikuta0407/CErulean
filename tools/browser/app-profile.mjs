@@ -19,7 +19,7 @@ import { appHelpers, echoConsole, launchChrome, openPage, sleep } from "./cdp.mj
 const args = process.argv.slice(2);
 const [imageA, imageB, outArg] = args.filter((a) => !a.startsWith("--"));
 const headed = args.includes("--headed");
-const url = process.env.APP_URL ?? "http://localhost:8000/rust/web/www/app/";
+const url = process.env.APP_URL ?? "http://localhost:8000/web/www/app/";
 if (!imageA || !imageB || !outArg) {
   console.error("usage: app-profile.mjs <imageA> <imageB> <outdir> [--headed]");
   process.exit(2);

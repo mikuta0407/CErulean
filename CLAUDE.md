@@ -1,20 +1,15 @@
 # CErulean 設計方針
 
 Windows Mobile 5.0（WinCE 5.0）LLE エミュレータ。WM6 の日本語版も同じ構成で動く
-（2026-09-30。`docs/wm6-design.md`）。**Rust 製**（`rust/`）。最初の出荷先は
+（2026-09-30。`docs/wm6-design.md`）。**Rust 製**（Cargo ワークスペースはリポジトリ直下）。最初の出荷先は
 ブラウザ（wasm）で、将来はネイティブ（iOS/Android/PC）と JIT も揃える。
-移行の計画・段階・決定事項は `docs/rust-migration-plan.md`。
-
-2026-09 まで Go で開発し、Rust に全面移行した（段階1 で全基準シナリオの完全一致を確認し、
-2026-09-28 に基準を Rust 版へ切り替えて Go 版を削除。最後の Go 版のコミットは 039ccb4）。
-Go 版の設計の理由コメントは Rust のコードに移してある。下の「確認済みの事実」の
-フラグ名（-trace・-watch・-fb-out など）は Go 版の CLI のもの（Rust 版は `--` 形式）。
+設計文書の案内は `docs/README.md`。
 
 ## 絶対条件
 
-- **コアは std のみ・プラットフォーム非依存**（`rust/core`、パッケージ名 `cerulean-core`）。
+- **コアは std のみ・プラットフォーム非依存**（`core`、パッケージ名 `cerulean-core`）。
   ファイル・時計・スレッドに触れない（入出力は cli・web から渡す）。UI・OS 依存は
-  `rust/cli`（ネイティブの開発用 CLI）と `rust/web`（wasm）に置く。
+  `cli`（ネイティブの開発用 CLI）と `web`（wasm）に置く。
 - **CPU はインタプリタが基準**（App Store 版 iOS では JIT 不可）。命令デコードと実行を
   分離してあり、IR・JIT（段階4・5）を足せる構造を保つこと。どの実行方式も
   インタプリタと完全に一致させる。
@@ -51,12 +46,12 @@ Go 版の設計の理由コメントは Rust のコードに移してある。�
   （wasm では panic でインスタンスが使えなくなる）。
 - **`unsafe` は原則使わない**。使うなら `// SAFETY:` に理由と安全性の根拠を書き、
   計測で効果が確かめられた場合だけにし、テストで守る。
-- **依存の追加はユーザーの承認を取る**（計画書 §8）。現在の依存: web の
+- **依存の追加はユーザーの承認を取る**。現在の依存: web の
   `wasm-bindgen`（=0.2.129、wasm-bindgen-cli と同じ版に固定）、CLI の `sha2`・`png`・
   `rustls`（ring）・`webpki-roots`（HTTPS の中継。2026-09-30 承認）。
   コアは依存なし。ワークスペース内の自作クレート `cerulean-fat`・`cerulean-net`（どちらも
   std のみ）を CLI・web が使う。
-- **版の固定**: `rust/rust-toolchain.toml`（1.98.1）と `rust/Cargo.lock` をコミット。
+- **版の固定**: `rust-toolchain.toml`（1.98.1）と `Cargo.lock` をコミット。
   wasm-bindgen を上げるときは wasm-bindgen-cli も同じ版を入れ直す。
 - **コミット前の確認**: `tools/check.sh`（fmt・clippy・テスト〔ネイティブと
   wasm32-wasip1〕、web の wasm ビルドと Node での読み込み。CERULEAN_IMAGE があれば
@@ -72,11 +67,11 @@ Go 版の設計の理由コメントは Rust のコードに移してある。�
 - 計測は必ず release ビルドで、交互に 3 回以上走らせて最良値で比べる
   （`tools/bench/bench.sh`。この環境は ±4% 程度ばらつく）。
 
-## 一致確認（定義は `testdata/golden/README.md`、計画書 §5）
+## 一致確認（定義は `testdata/golden/README.md`）
 
 - 比べるのはゲストから見える値だけ（CPU 状態のダンプ・RAM・UART1・画面の RGBA の
   SHA-256・停止の種類）。基準シナリオはリセット起点（イメージ＋固定の RTC＋絶対命令数の
-  スクリプト）。期待値は Go 版で作り、Rust 版で完全一致を確認して基準にしたもの。
+  スクリプト）。期待値は Rust のネイティブのインタプリタを基準にする。
 - 食い違ったら: 基準のビルドと調べるビルドを `--trace-hash N` で走らせて最初に食い違った
   区間を二分探索 → `--trace` の PC と命令語で比べる → 割り込みの時刻の違いなら
   `--watch` でデバイスへのアクセスを比べる。
@@ -84,12 +79,12 @@ Go 版の設計の理由コメントは Rust のコードに移してある。�
 - 特化した実行関数は汎用版とのランダム差分テスト（`arm/tests.rs`）、アイドルスキップは
   有無での全状態一致のテスト（`smdk2410/tests.rs`）で守る。
 - JIT はインタプリタとの差分テスト（`jit/selftest.rs`。生成コードの実行に JS の
-  WebAssembly が要るので Node で `rust/web/tests/jit-diff.mjs`。check.sh が走らせる）と、
+  WebAssembly が要るので Node で `web/tests/jit-diff.mjs`。check.sh が走らせる）と、
   `CERULEAN_JIT=1 GOLDEN_RUNNER=wasm tools/golden/verify.sh`（`1,1` = 閾値 1・1 ブロック
   ずつでも通すこと）で守る。JIT の対象の Op を足したら差分テストの命令の生成も広げる
   （コンパイルされなかった Op があると失敗する）。
 
-## 構成（`rust/core/src`）
+## 構成（`core/src`）
 
 所有権は **「CPU の状態とシステムを並べて持つ」**（2026-09 ユーザー確認済み。計画書 §3.3）。
 
@@ -120,9 +115,9 @@ mmu → bus::PhysMem、bus → bus::Devices（ボードが MMIO を振り分け�
 - `pccard`: PC カードのコントローラ（`pd6710.rs`）とカード（`cf.rs`。CompactFlash の ATA、
   `ne2000.rs`。NE2000 互換のイーサネット。ソケットの中身は `Slot`）。
   SoC に依らない部品で、バンク2 の配置と EINT への配線は smdk2410 の board.rs。
-  カードのイメージを外から読み書きするのは別クレート `rust/fat`（cerulean-fat。コアは使わない）。
+  カードのイメージを外から読み書きするのは別クレート `fat`（cerulean-fat。コアは使わない）。
   Device Emulator のフォルダ共有（ソケットを使わない「Storage Card」）は `smdk2410/deshare.rs`。
-  ゲストのイーサネットを外へつなぐ NAT（ARP・DHCP・DNS・TCP の終端）は別クレート `rust/net`
+  ゲストのイーサネットを外へつなぐ NAT（ARP・DHCP・DNS・TCP の終端）は別クレート `net`
   （cerulean-net。sans-IO。コアは使わない）。設計は docs/network-design.md。
 - `norflash`: AMD 方式の NOR フラッシュ（WM6 のイメージ。SoC に依らない部品で、バンク0 への
   配置は smdk2410。`load_image` がフラッシュのイメージを見たときだけ載せる）。
@@ -181,14 +176,24 @@ mmu → bus::PhysMem、bus → bus::Devices（ボードが MMIO を振り分け�
   実行ループに戻らずに続けて呼ぶ（引き当ては CodeCache::enter の vpages と同じ判定を
   生成コードで行う）。JIT ありの実行ループは、ページをまたいだ直後も enter_page で
   分岐先から JIT に入る。
-- Go 版の動作で合わせているもの: ARM 状態の cond=1111 の命令は条件判定で「不成立」に
+- 現在の条件判定: ARM 状態の cond=1111 の命令は条件判定で「不成立」に
   なり NOP として飛ばされる（TODO(v5TE) で見直す）。
-- Go 版で効果がなく取り下げたもの（計測済み）: CPU 側のデータ用ページキャッシュ、PGO。
-  Rust で必要なら計測し直す（計画書 §6.1）。
+
+## Web 資材の配布
+
+- 配布用バイナリは `tools/build.sh` で作る。`tools/web-build.sh` で wasm と wasm-bindgen の
+  資材を生成してから、CLI を `--features embedded-web` でビルドする。
+- `cli/build.rs` が HTML・JS・アイコン・wasm を埋め込む。アプリの新しいファイルを追加したら
+  埋め込み一覧も更新する。wasm-bindgen の `pkg/snippets/` の JS は自動で列挙する。
+- `web/www/pkg/assets.json` は生成物。Service Worker が wasm・追加 JS も含めて保存する。
+- `cerulean serve` は埋め込みを優先し、`--root DIR` は開発用の外部資材への切り替え。
+  `cerulean web-export DIR` は同じ資材を静的配信用に書き出す（既存ディレクトリは上書きしない）。
+- OS イメージ・保存状態は埋め込まない。単体配布の確認は
+  `node tools/browser/app-distribution.mjs target/release/cerulean`（Chrome 必要）。
 
 ## スナップショット・入力の設計
 
-- 形式は `rust/core/src/snapshot.rs` の先頭コメント（署名 `CRLNSNAP`・形式の版数・マシン名・
+- 形式は `core/src/snapshot.rs` の先頭コメント（署名 `CRLNSNAP`・形式の版数・マシン名・
   イメージ ID、名前・版数・長さを前置きし CRC-32 を後置したチャンクの列）。コアは無圧縮
   （Today で約 134MB。圧縮は段階2 の計測の後に決める）。未知・非対応は必ずエラー。
   **段階3 で公開した後は旧版の読み込みを残す**。
@@ -197,26 +202,25 @@ mmu → bus::PhysMem、bus → bus::Devices（ボードが MMIO を振り分け�
   コンパイルエラーになる）。派生情報は `_` と明示する。ソフト TLB も保存する。
 - 入力 API（touch_down/up・key_down/up）は smdk2410 の Machine に置き、スクリプトの解釈は
   `script`、イベントの適用は `emu`。時刻は命令数（`INSTRUCTIONS_PER_SECOND` =
-  135.2M/仮想秒）で、決定論的。スクリプトの書式は当面 Go 版と同じ。
+  135.2M/仮想秒）で、決定論的。スクリプトの書式は `core/src/script.rs` を参照。
 - **ネットワーク**（2026-09-30）: ネットワークから来たフレームはすべて `net rx` の入力として
   命令数つきで記録する（外とのやり取りは決定論的でないが、記録の再生はネットワークなしで同じ
   状態になる）。オン・オフはイーサネットカードの挿抜（`nic insert/eject`）として見せる。
   ブラウザ版はメニューでオンにしたときだけ、指定した中継サーバー（`cerulean relay`）と
   WebSocket で通信する。CLI は `--net`（OS のソケットで直接。実時間に合わせる）。
-  HTTPS はゲストの TLS 1.0 を `rust/net` で終端（自前の CA をゲストに入れる）し、外へは
+  HTTPS はゲストの TLS 1.0 を `net` で終端（自前の CA をゲストに入れる）し、外へは
   CLI の rustls で今の TLS につなぎ直す（docs/network-design.md の HTTPS）。
-- 対話フロントエンドは段階3 のブラウザ版（`rust/web/www/app`。Worker＋wasm、保存は OPFS、
+- 対話フロントエンドは段階3 のブラウザ版（`web/www/app`。Worker＋wasm、保存は OPFS、
   PWA）。Chrome での確認は `tools/browser/app-e2e.mjs`（完了条件の通し）と
   `app-smoke.mjs`（配置・操作）・`app-audio.mjs`（音）・`app-profile.mjs`（プロファイル）。
   **プロファイル**（2026-09-30）: OPFS の `profiles/<id>/` に保存・カード・記録を分ける（既定の
-  プロファイルは根。前からの保存をそのまま使うため）。イメージ・CA は共有。切り替えは今のマシンを
+  プロファイルは根。既定プロファイルの保存先）。イメージ・CA は共有。切り替えは今のマシンを
   自動保存して止め、切り替え先の最新の保存から再開する（worker.js の先頭の配置の表）。8000 番に別の `cerulean serve` が
-  居るときは `tools/serve-bench.py 8123` と `APP_URL` で別のポートにする。既定の判断は計画書の段階3 の「経過」。Go 版の serve の
-  UI は `rust/web/www/legacy-serve/` に参考として置いてある（入力の対応表は app に移した）。
+  居るときは `tools/serve-bench.py 8123` と `APP_URL` で別のポートにする。
 
 ## 実イメージについて確認済みの事実（2026-09 検証）
 
-- WM5 Pocket PC SDK（archive.org の `windows-mobile-5.0-pocket-pc-sdk_202305`）内の
+- WM5 Pocket PC SDK（入手手順は `docs/images.md`）内の
   `PPC_USA.bin`（21MB、`tmp/images/` に抽出済み）は **B000FF（BIN）形式**。
 - イメージ範囲: start=0x80070000 length=0x01421ED0、エントリ=0x80076CF0、レコード 99 個
   （チェックサム全数一致）。
@@ -232,7 +236,7 @@ mmu → bus::PhysMem、bus → bus::Devices（ボードが MMIO を振り分け�
 - **SDRAM は 128MB 必要**: OEMGetExtensionDRAM が PA 0x34000000〜を署名書き込みで
   プローブする。64MB+折り返しにするとエイリアスを実 RAM と誤検出して二重使用になる。
   このうち PA 0x34000000〜の 32MB が RAMFMD（RAM ディスク。本体の
-  ファイルシステム）になる（2026-09-30 に訂正。以前は「後半」としていた）。バンク7(0x38000000)と
+  ファイルシステム）になる。バンク7(0x38000000)と
   バンク0〜5(ROM/フラッシュ)はオープンバス（読み 0）で、NOR フラッシュプローブ
   （AM29LV800）とメモリプローブが正しく失敗する。
 - カーネルは FPU 検出のため MRC p10 を、トラップ用に未定義空間
@@ -249,8 +253,7 @@ mmu → bus::PhysMem、bus → bus::Devices（ボードが MMIO を振り分け�
   イメージから直接読まずに実行時トレース（-trace-from）で見る。
 - **PA 0x500F0000 台は Device Emulator 固有の準仮想デバイス**（S3C2410 にない）。
   +0x2080+n*0x20 は dmatrans.dll（DMA トランスポート、4 チャネル）、
-  +0x5000 は emulserv.dll（割り込みは EINT11・High レベル。以前「EINT3」としていたのは
-  誤り。2026-09-29 に GPIO の監視で確認）。どちらも
+  +0x5000 は emulserv.dll（割り込みは EINT11・High レベル。GPIO の監視で確認）。どちらも
   初期化の読み書きだけでブートは止めない（詳細は machine/smdk2410 のコメント）。
   DE 固有モジュールは他に DeviceEmulator_lcd.dll・vcefsd.dll（フォルダ共有）・
   serdma.dll・dmacnect.exe・EmulatorStub.exe がある。
@@ -344,7 +347,7 @@ mmu → bus::PhysMem、bus → bus::Devices（ボードが MMIO を振り分け�
 - **マイルストーン4 の到達点**: Today（36 億命令）のスナップショットから、タップで
   Start メニュー → Calendar / Settings が起動し、方向キー・Enter・文字入力も効く。
 
-- **WM6（2026-09-30。docs/wm6-design.md）**: archive.org の「Windows Mobile 6 Localized Emulator
+- **WM6（2026-09-30。docs/wm6-design.md）**: Microsoft の「Windows Mobile 6 Localized Emulator
   Images」の JPN（Professional Images の msi）の `PPC_JPN.bin`（`tmp/images/wm6/`）は 96MB の
   **バンク0 の NOR フラッシュの中身**（B000FF でない。先頭が IPL、+0x30000 からカーネル）。
   OEMAddressTable に VA 0x88000000 → PA 0（96MB）。IPL・カーネルのドライバは Am29LV800BB
@@ -358,31 +361,7 @@ mmu → bus::PhysMem、bus → bus::Devices（ボードが MMIO を振り分け�
   `Machine::set_display`・CLI `--screen`・ブラウザ版の起動画面で指定する。タッチの換算は LCD の
   大きさから（touch.dll は幅・高さ×4 を変数に持つ）。詳細は docs/wm6-design.md。
 
-## 今後の計画（2026-09 時点。後回しと判断したもの）
-
-- **ソフトキーの物理キー入力**: kbdmouse の表に VK_F1/F2 が無い。画面のソフトキー
-  表示のタップで同じ操作ができるので後回し。着手するなら、DE 本体ボタンの経路を
-  観察する（他の入力系モジュール: conshid/kbdhid・emulserv・0x500F0000 の準仮想
-  デバイスへのアクセスを -watch とトレースで確認）。
-- 本体ストレージの永続化（2026-09-30 調査。docs/storage-persistence.md）: NOR フラッシュ
-  （amdnord.dll の構成が実在のチップと合わない）・RAMFMD（OAL が毎回の起動で領域を上書きする）の
-  どちらも無改変のイメージでは成り立たない。永続化はスナップショットで行う。ROM は書き換えない。
-- **電源ボタン**（pwrbtn2410.dll、GPF0/EINT0）: 押すとサスペンド（OEMPowerOff・
-  スリープ・起床要因）の実装が必要になり範囲が大きい。UI 操作には不要なので後回し。
-- 性能改善の続き: 段階4 は 4-2（IR）で区切った（2026-09-29。ネイティブ約 100M・Node の
-  wasm 約 75M 命令/秒。ネイティブの律速は命令の振り分けそのもの）。段階5（JIT-to-wasm、
-  `docs/stage5-design.md`）は 5-2 と 5-4 の前半（V8 のメモリ）まで完了（Node の起動 4 億命令で
-  JIT あり約 173M 命令/秒、JIT なしの 2.3 倍。途中の最大の RSS は JIT なし +約 100MB。
-  計画書の段階5「5-4 前半の結果」。メモリは `tools/bench/jit-mem.mjs` で測る）と 5-3 の
-  ページをまたぐ連結（Today まで約 105M 命令/秒）まで。残りは各ブラウザでの計測と
-  CODE_LIMIT の決定（5-4 後半。Safari 27 で JIT 全体が効かない状態の原因は未特定）、
-  サイド出口（MMIO・TLB ミス）の後のインタプリタの削減。スーパー命令・
-  フラグ計算の遅延・メモリ経路の短縮（段階4-3・4-4）は見送り中。
-- wasm の速度は LLVM の展開の判断に敏感: 実行ループ（Cpu::run_loop）が呼び出し側に
-  展開される・CodeCache::enter が展開されないと、JIT なしで 1〜4 割遅くなった
-  （2026-09-29）。実行ループの周りを変えたら `tools/bench/web-bench.sh` で確かめる。
-
-## 未確定事項・次の課題（随時更新）
+## 実装の制限・未確定事項
 
 - データシート照合（2026-09 実施）で確認済み: INT_SPI0/1=22/29、SPI のレジスタ配置・
   リセット値、ADC のレジスタ・リセット値・変換時間、LCD のビット配置と 16bpp の
@@ -418,7 +397,5 @@ mmu → bus::PhysMem、bus → bus::Devices（ボードが MMIO を振り分け�
 - INTC の PRIORITY（回転アービトレーション）は固定優先度に簡略化中。
 - BLX 等 ARMv5TE 拡張は未実装（PXA27x 対応時）。
 - LDC/STC・CDP は未実装または未定義例外扱い。
-- 日本語版イメージ: WM5 の JPN 版 msi は Wayback Machine にある（tmp/images/HOWTO_images.md）。
-  WM6 の JPN 版は archive.org（docs/wm6-design.md）。
 - NOR フラッシュ（WM6）: ID を返す範囲・セクタの構成・書き込み／消去の時間は推定
   （norflash.rs の TODO）。Phone・VGA の BIN、WM6 Standard・6.1/6.5 は未確認。

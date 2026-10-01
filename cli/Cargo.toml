@@ -1,0 +1,25 @@
+[package]
+name = "cerulean-cli"
+description = "CErulean のネイティブの開発用 CLI"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "cerulean"
+path = "src/main.rs"
+
+[features]
+# tools/build.sh が有効にする。通常の CLI ビルドは wasm の生成を必要としない。
+embedded-web = []
+
+[dependencies]
+cerulean-core.workspace = true
+cerulean-fat.workspace = true
+cerulean-net.workspace = true
+sha2.workspace = true
+png.workspace = true
+rustls.workspace = true
+webpki-roots.workspace = true

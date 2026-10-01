@@ -1,7 +1,24 @@
-# テスト用イメージ等の作業ディレクトリ（入手方法は README.md 参照）
+# テスト用イメージ等の作業ディレクトリ（入手方法は docs/images.md 参照）
 /tmp/
 
 # Rust のビルド成果物
-/rust/target/
-/rust/web/pkg-node/
-/rust/web/www/pkg/
+/target/
+/web/pkg-node/
+/web/www/pkg/
+# README の web-export の出力先
+/site/
+
+# OS イメージ・配布パッケージ・保存状態は場所を問わずコミットしない
+# スナップショットには OS の内容が含まれる
+*.[bB][iI][nN]
+*.[nN][bB]0
+*.[mM][sS][iI]
+*.[cC][aA][bB]
+*.[iI][mM][gG]
+*.snap
+*.snap.gz
+/WM-images.tar.gz
+
+# Python の生成物
+__pycache__/
+*.py[cod]
