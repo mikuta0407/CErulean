@@ -41,7 +41,7 @@ dependencies = [
 
 [[package]]
 name = "cerulean-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "cerulean-core",
  "cerulean-fat",
@@ -54,19 +54,19 @@ dependencies = [
 
 [[package]]
 name = "cerulean-core"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "cerulean-fat"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "cerulean-net"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "cerulean-web"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "cerulean-core",
  "cerulean-fat",
