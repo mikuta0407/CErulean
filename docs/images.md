@@ -1,5 +1,7 @@
 # OS イメージの用意
 
+**日本語** | [English](images.en.md)
+
 CErulean が読み込むのは **Microsoft Device Emulator 用の `.bin`** です。
 配布パッケージの `.msi` から取り出してください。実機用 ROM は対象外です。
 

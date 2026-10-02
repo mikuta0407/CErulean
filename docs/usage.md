@@ -1,5 +1,7 @@
 # 詳しい使い方
 
+**日本語** | [English](usage.en.md)
+
 [README に戻る](../README.md)。
 
 ## まず動かす

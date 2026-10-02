@@ -1,5 +1,7 @@
 # CErulean
 
+**日本語** / **[English README is here → README.en.md](README.en.md)**
+
 Windows Mobile 5.0 / 6 をブラウザで動かすエミュレータです。
 タップやキーで操作でき、対応アプリのインストールもできます。
 
