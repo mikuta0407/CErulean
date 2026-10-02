@@ -106,6 +106,7 @@ On iOS, performance may be slow unless the page is opened over HTTPS.
 - Hardware soft key (VK_F1/F2) and power button input. Tap the on-screen buttons instead of the soft keys.
 - Loading `.msi` directly. Extract the `.bin` beforehand.
 - Running in multiple tabs at once, and continuing a recording after a forced exit during recording. Resuming from a saved state is possible.
+- Differences in boot time by language, screen size and image (WM5 English VGA can take about 100 seconds at normal speed; see [details](images.en.md#boot-time)). We plan to improve this.
 - No guarantee that every app or peripheral works. Sound does not play during fast-forward, 2x or maximum speed.
 
 ## TODO
@@ -114,6 +115,7 @@ On iOS, performance may be slow unless the page is opened over HTTPS.
 - [ ] Decide the minimum supported browser versions and CSP settings for public hosting
 - [ ] Implement input paths for the hardware soft keys and power button
 - [ ] Fill in unsupported ARM / MMU and peripheral behavior (alignment checks, additional NOR flash commands, etc.)
+- [ ] Investigate and reduce the differences in boot time between images (e.g. WM5 English VGA, which takes long to reach Today)
 - [ ] Native interactive UI (iOS / Android / PC). The current native build is a development CLI
 - [ ] Support for PXA27x-based real-device configurations (future extension)
 

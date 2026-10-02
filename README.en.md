@@ -115,11 +115,13 @@ Serve `.wasm` as `application/wasm`. Users select the OS image locally.
 - Real-device ROMs, Windows Phone and desktop Windows are out of scope
 - Calls, SMS and cellular connections are not supported
 - No guarantee that every app or peripheral works
+- The wait until the Today screen appears varies greatly with language, screen size and image (WM5 English VGA can take about 100 seconds at normal speed; see [details](docs/images.en.md#boot-time))
 
 ## TODO
 
 - Hardware soft key and power button input
 - Improved CPU and peripheral compatibility
+- Reducing the differences in boot time between images
 - A native interactive UI
 
 ## More information

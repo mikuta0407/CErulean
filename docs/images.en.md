@@ -85,3 +85,21 @@ Open the browser app following the [README](../README.en.md#self-hosting) and se
 
 The screen size is detected automatically from the file name. For VGA editions, keep `VGA` in the name.
 If the detection is wrong, you can change it on the start screen.
+
+### Boot time
+
+The time until the Today screen appears varies greatly with the image's language, screen size and edition.
+These are rough figures, measured with the CLI, for the guest time (virtual time) until Today appears.
+
+| Image | Until Today (approx.) |
+|---|---|
+| WM5 English QVGA, WM6 English Classic / Phone VGA | within about 30 seconds |
+| WM5 Japanese VGA | about 60–70 seconds |
+| WM5 English VGA | about 120–130 seconds |
+
+The browser app fast-forwards the first ~27 seconds (3.6×10⁹ instructions) after startup. The rest runs at normal speed,
+so you may wait about 40 seconds for WM5 Japanese VGA and about 100 seconds for WM5 English VGA.
+During that wait the guest appears to be in some kind of wait state rather than computing, but the cause has not been identified yet.
+Setting the speed to "Maximum" in the menu shortens the wait.
+
+**We plan to improve the differences in boot time between languages and images.** Once Today has been reached the state is saved automatically, so from the second time on you can start quickly with "Resume".
