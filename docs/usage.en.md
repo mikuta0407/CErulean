@@ -87,6 +87,7 @@ On iOS, performance may be slow unless the page is opened over HTTPS.
 - Boot to the Today screen, use the standard apps, install supported CAB / EXE files
 - Tap and drag on the screen; arrow keys, Enter, alphanumerics and App button input
 - Automatic and manual save, resume, snapshot import / export
+- Display language (Japanese / English): detected automatically from the browser and switchable from the menu
 - Per-image and per-screen-size profile switching, adding to the home screen (PWA), offline startup
 - Guest audio playback (at normal speed), clock synchronization with the device
 - Creating and inserting / ejecting storage cards, and exchanging files with the host

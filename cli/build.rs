@@ -18,6 +18,7 @@ fn main() {
         "app/index.html",
         "app/app.js",
         "app/worker.js",
+        "app/i18n.js",
         "app/style.css",
         "app/sw.js",
         "app/manifest.webmanifest",

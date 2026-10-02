@@ -16,71 +16,72 @@
 <header>
   <span class="brand">CErulean</span>
   <span id="badge" class="badge" hidden></span>
-  <span id="recBadge" class="badge warn" hidden>● 記録中</span>
-  <span id="saveBadge" class="badge muted" hidden>保存中…</span>
+  <span id="recBadge" class="badge warn" hidden><span data-i18n="recBadge">● 記録中</span></span>
+  <span id="saveBadge" class="badge muted" hidden data-i18n="saveBadge">保存中…</span>
   <span id="statusLine" class="status"></span>
-  <button id="pause" class="icon" title="一時停止" aria-label="一時停止" disabled>❚❚</button>
-  <button id="menuBtn" class="icon" title="メニュー" aria-label="メニュー">☰</button>
+  <button id="pause" class="icon" title="一時停止" aria-label="一時停止" data-i18n-title="pause" data-i18n-aria="pause" disabled>❚❚</button>
+  <button id="menuBtn" class="icon" title="メニュー" aria-label="メニュー" data-i18n-title="menu" data-i18n-aria="menu">☰</button>
 </header>
 
 <main id="device">
   <div id="screenBox">
-    <canvas id="screen" width="240" height="320" aria-label="WM5 の画面（タップで操作）"></canvas>
+    <canvas id="screen" width="240" height="320" aria-label="WM5 の画面（タップで操作）" data-i18n-aria="screenAria"></canvas>
     <div id="start" class="overlay">
       <h1>Windows Mobile</h1>
       <div class="profile">
-        <label>プロファイル <select id="profileSel"></select></label>
-        <button id="profileNew" class="small">新規</button>
-        <button id="profileRename" class="small">名前</button>
-        <button id="profileDel" class="small">削除</button>
+        <label><span data-i18n="profile">プロファイル</span> <select id="profileSel"></select></label>
+        <button id="profileNew" class="small" data-i18n="profNew">新規</button>
+        <button id="profileRename" class="small" data-i18n="profRename">名前</button>
+        <button id="profileDel" class="small" data-i18n="profDel">削除</button>
         <p class="fine" id="profileInfo"></p>
       </div>
       <p id="startMsg">準備中…</p>
-      <button id="resume" class="primary" hidden>続きから再開<small id="resumeInfo"></small></button>
+      <button id="resume" class="primary" hidden><span data-i18n="resume">続きから再開</span><small id="resumeInfo"></small></button>
       <ul id="saveList" class="list"></ul>
       <ul id="imageList" class="list"></ul>
-      <label class="secondary file">イメージを選ぶ（.bin）<input type="file" id="imageFile" hidden></label>
-      <label class="secondary file">スナップショットを読み込む<input type="file" id="snapFile" hidden></label>
-      <label class="fine">イメージから起動するときの画面 <select id="screenSize">
-        <option value="auto" selected>自動（名前から）</option>
+      <label class="secondary file"><span data-i18n="pickImage">イメージを選ぶ（.bin）</span><input type="file" id="imageFile" hidden></label>
+      <label class="secondary file"><span data-i18n="loadSnap">スナップショットを読み込む</span><input type="file" id="snapFile" hidden></label>
+      <label class="fine"><span data-i18n="screenFor">イメージから起動するときの画面</span> <select id="screenSize">
+        <option value="auto" selected data-i18n="optAutoName">自動（名前から）</option>
         <option value="240x320">240×320（QVGA）</option>
         <option value="480x640">480×640（VGA）</option>
-        <option value="240x240">240×240（正方形）</option>
-        <option value="320x320">320×320（正方形。WM6 の *_QVGA_VR）</option>
-        <option value="480x480">480×480（VGA 正方形）</option>
+        <option value="240x240" data-i18n="opt240">240×240（正方形）</option>
+        <option value="320x320" data-i18n="opt320">320×320（正方形。WM6 の *_QVGA_VR）</option>
+        <option value="480x480" data-i18n="opt480">480×480（VGA 正方形）</option>
       </select></label>
-      <p class="fine">プロファイルごとに保存・ストレージカード・記録が分かれます（イメージは共有）。
+      <p class="fine" data-i18n="startNote1">プロファイルごとに保存・ストレージカード・記録が分かれます（イメージは共有）。
         OS や画面の大きさの違う環境を使い分けるときは、プロファイルを作って切り替えてください。
         切り替えると今の状態を自動保存し、切り替え先の続きから再開します。</p>
-      <p class="fine">WM5・WM6 のエミュレータ用イメージ（<code>PPC_USA.bin</code>・<code>PPC_JPN.bin</code> など）を選ぶと、
+      <p class="fine"><label class="langRow"><span data-i18n="language">言語</span> <select class="langSel"><option value="auto" data-i18n="langAuto">自動</option><option value="ja">日本語</option><option value="en">English</option></select></label></p>
+      <p class="fine" data-i18n="startNote2">WM5・WM6 のエミュレータ用イメージ（<code>PPC_USA.bin</code>・<code>PPC_JPN.bin</code> など）を選ぶと、
         Today 画面まで早送りで起動し、着いたら自動で保存します。画面の大きさはイメージに合わせて選んでください
         （「自動」は名前の 480x640 などの大きさ、なければ VGA・Square・QVGA で決めます）。イメージ・保存はこの端末の中だけで使い、外部には送りません。</p>
     </div>
     <div id="stopBanner" class="overlay stop" hidden>
-      <h1>停止しました</h1>
+      <h1 data-i18n="stopped">停止しました</h1>
       <pre id="stopText"></pre>
-      <button id="stopResume" class="primary">直前の自動保存から再開</button>
-      <button id="stopExport" class="secondary">この状態を書き出す</button>
-      <button id="stopBack" class="secondary">最初の画面に戻る</button>
+      <button id="stopResume" class="primary" data-i18n="stopResume">直前の自動保存から再開</button>
+      <button id="stopExport" class="secondary" data-i18n="stopExport">この状態を書き出す</button>
+      <button id="stopBack" class="secondary" data-i18n="stopBack">最初の画面に戻る</button>
     </div>
     <div id="otherTab" class="overlay" hidden>
-      <h1>別のタブで動いています</h1>
-      <p>エミュレータを動かせるのは 1 つのタブだけです（保存が衝突しないように）。
+      <h1 data-i18n="otherTabH">別のタブで動いています</h1>
+      <p data-i18n="otherTabP">エミュレータを動かせるのは 1 つのタブだけです（保存が衝突しないように）。
         もう一方のタブを閉じると、ここで動かせるようになります。</p>
     </div>
   </div>
 
-  <div id="keys" aria-label="ハードウェアボタン">
+  <div id="keys" aria-label="ハードウェアボタン" data-i18n-aria="hwButtons">
     <div class="apps left">
       <button class="hw app" data-key="App1">1</button>
       <button class="hw app" data-key="App2">2</button>
     </div>
     <div class="dpad">
-      <button class="hw up" data-key="Up" aria-label="上">▲</button>
-      <button class="hw left" data-key="Left" aria-label="左">◀</button>
-      <button class="hw center" data-key="Enter" aria-label="決定">●</button>
-      <button class="hw right" data-key="Right" aria-label="右">▶</button>
-      <button class="hw down" data-key="Down" aria-label="下">▼</button>
+      <button class="hw up" data-key="Up" aria-label="上" data-i18n-aria="up">▲</button>
+      <button class="hw left" data-key="Left" aria-label="左" data-i18n-aria="left">◀</button>
+      <button class="hw center" data-key="Enter" aria-label="決定" data-i18n-aria="ok">●</button>
+      <button class="hw right" data-key="Right" aria-label="右" data-i18n-aria="right">▶</button>
+      <button class="hw down" data-key="Down" aria-label="下" data-i18n-aria="down">▼</button>
     </div>
     <div class="apps right">
       <button class="hw app" data-key="App3">3</button>
@@ -92,134 +93,137 @@
 
 <aside id="menu" hidden>
   <section>
-    <h2>実行</h2>
+    <h2 data-i18n="secRun">実行</h2>
     <div class="row">
-      <label>速度 <select id="speed">
-        <option value="1" selected>等速</option>
-        <option value="2">2 倍</option>
-        <option value="0">最高速</option>
+      <label><span data-i18n="speed">速度</span> <select id="speed">
+        <option value="1" selected data-i18n="speed1">等速</option>
+        <option value="2" data-i18n="speed2">2 倍</option>
+        <option value="0" data-i18n="speedMax">最高速</option>
       </select></label>
       <label><input type="checkbox" id="jit" checked> JIT</label>
-      <button id="skipTurbo" hidden>起動の早送りをやめる</button>
+      <button id="skipTurbo" hidden data-i18n="skipTurbo">起動の早送りをやめる</button>
     </div>
     <div class="row">
-      <label><input type="checkbox" id="audioOn"> 音を出す</label>
-      <label>音量 <input type="range" id="audioVol" min="0" max="1" step="0.05" value="0.8"></label>
+      <label class="langRow"><span data-i18n="language">言語</span> <select class="langSel"><option value="auto" data-i18n="langAuto">自動</option><option value="ja">日本語</option><option value="en">English</option></select></label>
     </div>
-    <p class="note">音は等速のときだけ鳴らします（早送り・2 倍・最高速の間は鳴らしません）。
+    <div class="row">
+      <label><input type="checkbox" id="audioOn"> <span data-i18n="audioOn">音を出す</span></label>
+      <label><span data-i18n="volume">音量</span> <input type="range" id="audioVol" min="0" max="1" step="0.05" value="0.8"></label>
+    </div>
+    <p class="note" data-i18n="audioNote">音は等速のときだけ鳴らします（早送り・2 倍・最高速の間は鳴らしません）。
       エミュレーションが実時間に追いつかない区間では途切れます。</p>
     <div class="row">
-      <label><input type="checkbox" id="clockSync" checked> 再開・復帰時にゲストの時計を今に合わせる</label>
-      <button id="clockNow">時計を今に合わせる</button>
+      <label><input type="checkbox" id="clockSync" checked> <span data-i18n="clockSync">再開・復帰時にゲストの時計を今に合わせる</span></label>
+      <button id="clockNow" data-i18n="clockNow">時計を今に合わせる</button>
     </div>
     <div class="row">
-      <span>プロファイル: <strong id="profileName">-</strong></span>
-      <button id="toStart">最初の画面へ（プロファイル・イメージ・保存を選ぶ）</button>
+      <span><span data-i18n="profileColon">プロファイル:</span> <strong id="profileName">-</strong></span>
+      <button id="toStart" data-i18n="toStart">最初の画面へ（プロファイル・イメージ・保存を選ぶ）</button>
     </div>
   </section>
   <section>
-    <h2>保存</h2>
+    <h2 data-i18n="secSave">保存</h2>
     <div class="row">
-      <button id="saveNow">今の状態を保存</button>
-      <label class="button file">読み込む<input type="file" id="snapFile2" hidden></label>
+      <button id="saveNow" data-i18n="saveNow">今の状態を保存</button>
+      <label class="button file"><span data-i18n="load">読み込む</span><input type="file" id="snapFile2" hidden></label>
     </div>
     <ul id="menuSaves" class="list compact"></ul>
-    <p class="note">自動保存は 3 世代（起動が Today に着いたとき・画面を離れたとき・操作があれば 30 秒ごと・なければ 5 分ごと）。
+    <p class="note" data-i18n="saveNote">自動保存は 3 世代（起動が Today に着いたとき・画面を離れたとき・操作があれば 30 秒ごと・なければ 5 分ごと）。
       書き出したスナップショットにはイメージ（Microsoft の配布物）の中身が含まれます。公開の場で共有しないでください。</p>
     <p class="note" id="storageInfo"></p>
   </section>
   <section id="cardSection">
-    <h2>ストレージカード</h2>
+    <h2 data-i18n="secCard">ストレージカード</h2>
     <p class="note" id="cardState">-</p>
     <div class="row">
-      <button id="cardInsert">挿す</button>
-      <button id="cardEject">抜く</button>
-      <button id="cardExport">イメージを書き出す</button>
-      <label class="button file">イメージを読み込む<input type="file" id="cardImportFile" hidden></label>
+      <button id="cardInsert" data-i18n="cardInsert">挿す</button>
+      <button id="cardEject" data-i18n="cardEject">抜く</button>
+      <button id="cardExport" data-i18n="cardExport">イメージを書き出す</button>
+      <label class="button file"><span data-i18n="cardImport">イメージを読み込む</span><input type="file" id="cardImportFile" hidden></label>
     </div>
     <div class="row">
-      <label>新しいカード <select id="cardSize"></select></label>
-      <button id="cardNew">作る</button>
+      <label><span data-i18n="cardNewLabel">新しいカード</span> <select id="cardSize"></select></label>
+      <button id="cardNew" data-i18n="cardNew">作る</button>
     </div>
     <div id="cardFiles" hidden>
       <div class="row">
         <span id="cardPath" class="path"></span>
-        <label class="button file">ファイルを入れる<input type="file" id="cardAddFiles" multiple hidden></label>
-        <label class="button file">フォルダを入れる<input type="file" id="cardAddDir" webkitdirectory hidden></label>
-        <button id="cardMkdir">フォルダを作る</button>
+        <label class="button file"><span data-i18n="cardAddFiles">ファイルを入れる</span><input type="file" id="cardAddFiles" multiple hidden></label>
+        <label class="button file"><span data-i18n="cardAddDir">フォルダを入れる</span><input type="file" id="cardAddDir" webkitdirectory hidden></label>
+        <button id="cardMkdir" data-i18n="cardMkdir">フォルダを作る</button>
       </div>
       <ul id="cardList" class="list compact"></ul>
-      <p class="note">ここにファイルをドラッグしても入れられます。</p>
+      <p class="note" data-i18n="cardDrag">ここにファイルをドラッグしても入れられます。</p>
     </div>
-    <p class="note">WM5 からは「Storage Card」に見えます。中身の出し入れは、カードを<strong>抜いている間</strong>に
+    <p class="note" data-i18n="cardNote">WM5 からは「Storage Card」に見えます。中身の出し入れは、カードを<strong>抜いている間</strong>に
       ここで行います。挿している間の中身はエミュレータの中にあり、保存（スナップショット）にも含まれます。
       抜くとこの端末に書き戻します。ネットワークがオンの間（PC カードのソケットをイーサネットカードが
       使っている間）は、Device Emulator のフォルダ共有の方式で挿します（WM5 からは同じ「Storage Card」）。</p>
   </section>
   <section id="netSection">
-    <h2>ネットワーク（中継サーバー経由）</h2>
+    <h2 data-i18n="secNet">ネットワーク（中継サーバー経由）</h2>
     <div class="row">
-      <label><input type="checkbox" id="netOn"> オン（イーサネットカードを挿す）</label>
+      <label><input type="checkbox" id="netOn"> <span data-i18n="netOn">オン（イーサネットカードを挿す）</span></label>
     </div>
     <div class="row">
-      <label>中継サーバー <input type="url" id="netUrl" placeholder="wss://（このサイト）/relay" size="28" spellcheck="false"></label>
+      <label><span data-i18n="relayLabel">中継サーバー</span> <input type="url" id="netUrl" placeholder="wss://（このサイト）/relay" data-i18n-placeholder="relayPh" size="28" spellcheck="false"></label>
     </div>
     <div class="row">
-      <label>トークン <input type="password" id="netToken" size="28" autocomplete="off" spellcheck="false"></label>
+      <label><span data-i18n="tokenLabel">トークン</span> <input type="password" id="netToken" size="28" autocomplete="off" spellcheck="false"></label>
     </div>
     <p class="note" id="netState">オフ</p>
-    <p class="note">オンにしたときだけ、ここで指定した中継サーバーと WebSocket で通信し、WM5 の通信
+    <p class="note" data-i18n="netNote1">オンにしたときだけ、ここで指定した中継サーバーと WebSocket で通信し、WM5 の通信
       （TCP のバイト列と接続先の名前）を中継させます。オフの間、このサイトは外部と通信しません。
       中継サーバーは <code>cerulean serve --with-relay</code>（このサイトの <code>/relay</code>）か
       <code>cerulean relay</code>（ネイティブの CLI）で起動し、表示されたトークンを入れます。
       https のページからは <code>wss://</code> の中継サーバー（または自分の端末の <code>ws://127.0.0.1</code>）にしかつなげません。</p>
-    <p class="note"><strong>HTTPS</strong>: WM5 の IE Mobile は古い TLS しか話せないので、エミュレータの中で TLS を
+    <p class="note"><span data-i18n="netNote2"><strong>HTTPS</strong>: WM5 の IE Mobile は古い TLS しか話せないので、エミュレータの中で TLS を
       受けて、外へは中継サーバーが今の TLS でつなぎ直します。最初に一度、WM5 の IE で <code>http://10.0.2.2/</code> を開き、
-      証明書（CErulean Local CA）をインストールしてください。この CA の鍵はこの端末の中だけにあります。
-      <button id="netCaExport">CA の証明書を書き出す</button></p>
-    <p class="note">初めて使うときは WM5 の「設定 → 接続 → ネットワークカード」で「ネットワークカードの接続先」を
+      証明書（CErulean Local CA）をインストールしてください。この CA の鍵はこの端末の中だけにあります。</span>
+      <button id="netCaExport" data-i18n="netCaExport">CA の証明書を書き出す</button></p>
+    <p class="note" data-i18n="netNote3">初めて使うときは WM5 の「設定 → 接続 → ネットワークカード」で「ネットワークカードの接続先」を
       「インターネット設定」にしてください。オンの間もストレージカードは挿せます（フォルダ共有の方式になる）。
       受け取ったデータは操作の記録に含まれます。</p>
   </section>
   <section>
-    <h2>操作の記録</h2>
+    <h2 data-i18n="secRec">操作の記録</h2>
     <div class="row">
       <button id="rec">記録開始</button>
-      <button id="recScript" hidden>スクリプトを書き出す</button>
-      <button id="recSnap" hidden>起点スナップショットを書き出す</button>
-      <button id="recCards" hidden>挿したカードのイメージを書き出す</button>
+      <button id="recScript" hidden data-i18n="recScript">スクリプトを書き出す</button>
+      <button id="recSnap" hidden data-i18n="recSnap">起点スナップショットを書き出す</button>
+      <button id="recCards" hidden data-i18n="recCards">挿したカードのイメージを書き出す</button>
     </div>
-    <p class="note">記録は起点のスナップショットと、絶対命令数の入力スクリプトの組です。
+    <p class="note" data-i18n="recNote">記録は起点のスナップショットと、絶対命令数の入力スクリプトの組です。
       書き出した 2 つをネイティブの CLI で再生すると同じ画面になります（手順はスクリプトの先頭のコメント）。</p>
     <pre id="recText" hidden></pre>
   </section>
   <section>
-    <h2>状態</h2>
+    <h2 data-i18n="secStatus">状態</h2>
     <dl>
-      <dt>命令数</dt><dd id="steps">-</dd>
-      <dt>仮想時間</dt><dd id="vtime">-</dd>
-      <dt>実時間比</dt><dd id="ratio">-</dd>
-      <dt>速度</dt><dd id="mips">-</dd>
-      <dt>アイドル</dt><dd id="idle">-</dd>
+      <dt data-i18n="stSteps">命令数</dt><dd id="steps">-</dd>
+      <dt data-i18n="stVtime">仮想時間</dt><dd id="vtime">-</dd>
+      <dt data-i18n="stRatio">実時間比</dt><dd id="ratio">-</dd>
+      <dt data-i18n="stSpeed">速度</dt><dd id="mips">-</dd>
+      <dt data-i18n="stIdle">アイドル</dt><dd id="idle">-</dd>
     </dl>
   </section>
   <section>
-    <h2>キー（PC のキーボード）</h2>
+    <h2 data-i18n="secKeys">キー（PC のキーボード）</h2>
     <table>
-      <tr><td><kbd>↑↓←→</kbd> <kbd>Enter</kbd></td><td>方向キー・決定</td></tr>
-      <tr><td><kbd>F1</kbd>〜<kbd>F5</kbd></td><td>App1〜App5</td></tr>
-      <tr><td><kbd>A</kbd>〜<kbd>Z</kbd> <kbd>0</kbd>〜<kbd>9</kbd></td><td>英数字</td></tr>
-      <tr><td><kbd>.</kbd> <kbd>,</kbd> <kbd>/</kbd> <kbd>-</kbd> <kbd>;</kbd> <kbd>=</kbd> <kbd>[</kbd> <kbd>]</kbd> <kbd>'</kbd> <kbd>`</kbd> <kbd>\</kbd></td><td>記号（どの文字になるかは WM5 のキー配列による）</td></tr>
-      <tr><td><kbd>Space</kbd> <kbd>BS</kbd> <kbd>Tab</kbd> <kbd>Esc</kbd> <kbd>Del</kbd></td><td>編集キー</td></tr>
-      <tr><td><kbd>Shift</kbd> <kbd>Ctrl</kbd> <kbd>Alt</kbd> <kbd>CapsLock</kbd></td><td>修飾キー</td></tr>
+      <tr><td><kbd>↑↓←→</kbd> <kbd>Enter</kbd></td><td data-i18n="kArrows">方向キー・決定</td></tr>
+      <tr><td><kbd>F1</kbd>〜<kbd>F5</kbd></td><td data-i18n="kApp">App1〜App5</td></tr>
+      <tr><td><kbd>A</kbd>〜<kbd>Z</kbd> <kbd>0</kbd>〜<kbd>9</kbd></td><td data-i18n="kAlnum">英数字</td></tr>
+      <tr><td><kbd>.</kbd> <kbd>,</kbd> <kbd>/</kbd> <kbd>-</kbd> <kbd>;</kbd> <kbd>=</kbd> <kbd>[</kbd> <kbd>]</kbd> <kbd>'</kbd> <kbd>`</kbd> <kbd>\</kbd></td><td data-i18n="kSym">記号（どの文字になるかは WM5 のキー配列による）</td></tr>
+      <tr><td><kbd>Space</kbd> <kbd>BS</kbd> <kbd>Tab</kbd> <kbd>Esc</kbd> <kbd>Del</kbd></td><td data-i18n="kEdit">編集キー</td></tr>
+      <tr><td><kbd>Shift</kbd> <kbd>Ctrl</kbd> <kbd>Alt</kbd> <kbd>CapsLock</kbd></td><td data-i18n="kMod">修飾キー</td></tr>
     </table>
-    <p class="note">日本語入力（IME）は切ってください（変換中のキーは送りません）。
+    <p class="note" data-i18n="keysNote">日本語入力（IME）は切ってください（変換中のキーは送りません）。
       ソフトキー（画面下の左右のメニュー）は画面をタップします。上の表にない記号は WM5 の画面上のキーボードで入力します。</p>
   </section>
   <section>
-    <h2>ログ</h2>
+    <h2 data-i18n="secLog">ログ</h2>
     <pre id="log"></pre>
-    <details><summary>カーネルのデバッグ出力（UART1）</summary><pre id="uart"></pre></details>
+    <details><summary data-i18n="uart">カーネルのデバッグ出力（UART1）</summary><pre id="uart"></pre></details>
   </section>
 </aside>
 

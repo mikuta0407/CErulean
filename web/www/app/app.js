@@ -1,7 +1,11 @@
 // ブラウザ版の UI（メインスレッド）。エミュレーションと保存は worker.js が行い、ここは
 // 画面の描画・入力（タッチ・ハードウェアボタン・PC のキー）・操作パネルだけを持つ
 // （計画書 §3.4・§7.1）。
+import { t as tr, detect, setLang, setPref, getPref, applyDom } from "./i18n.js";
 const $ = (id) => document.getElementById(id);
+setLang(detect());
+applyDom();
+$("startMsg").textContent = tr("準備中…");
 const canvas = $("screen");
 const ctx = canvas.getContext("2d");
 // 時計の自動合わせの設定は端末ごとに覚える（保存できない環境では既定の「合わせる」）
@@ -63,7 +67,7 @@ sessionStorage.removeItem("cerulean-autoresume");
 // 同じサイトを 2 つのタブで開くと自動保存が衝突するので、Web Locks でエミュレータを
 // 動かすタブを 1 つにする。取れなければ待ち、前のタブが閉じたら動き出す。
 if (!("WebAssembly" in globalThis)) {
-  $("startMsg").textContent = "このブラウザでは WebAssembly が使えません（iOS のロックダウンモードでは無効になります）。";
+  $("startMsg").textContent = tr("このブラウザでは WebAssembly が使えません（iOS のロックダウンモードでは無効になります）。");
 } else if (navigator.locks) {
   navigator.locks.request("cerulean-emulator", { ifAvailable: true }, (lock) => {
     if (lock) return startWorker();
@@ -83,9 +87,10 @@ if (!("WebAssembly" in globalThis)) {
 function startWorker() {
   worker = new Worker("worker.js", { type: "module" });
   worker.onmessage = ({ data }) => onWorker(data);
+  worker.postMessage({ op: "lang", lang: document.documentElement.lang });
   worker.onerror = (e) => {
-    log(`Worker の異常終了: ${e.message}`);
-    showStop(`Worker が異常終了しました: ${e.message}`, true);
+    log(tr("Worker の異常終了: {m}", { m: e.message }));
+    showStop(tr("Worker が異常終了しました: {m}", { m: e.message }), true);
   };
   send("init");
   send("clockOption", { on: $("clockSync").checked });
@@ -120,7 +125,7 @@ function onWorker(d) {
     $("stopBanner").hidden = true;
     $("pause").disabled = false;
     $("menu").hidden = true;
-    log(`起動: ${d.booted.name}（命令 ${BigInt(d.booted.steps).toLocaleString()}）`);
+    log(tr("起動: {name}（命令 {steps}）", { name: d.booted.name, steps: BigInt(d.booted.steps).toLocaleString() }));
     if (cardInfo) renderCard(cardInfo);
     // 保存を消されにくくする（§7.3。許可されるかはブラウザが決める）
     navigator.storage?.persist?.().catch(() => {});
@@ -145,20 +150,20 @@ function onWorker(d) {
     el.textContent = (el.textContent + d.uart).slice(-50000);
   }
   if ("saving" in d) $("saveBadge").hidden = !d.saving;
-  if (d.stopped) showStop(`エミュレーションが止まりました。\n${d.stopped}`, false);
+  if (d.stopped) showStop(tr("エミュレーションが止まりました。\n{m}", { m: d.stopped }), false);
   if (d.recorded) {
     $("recText").textContent = d.recorded.script;
     $("recText").hidden = false;
     $("recScript").hidden = false;
     $("recSnap").hidden = false;
     $("recCards").hidden = !/^@\d+i (card|share) insert /m.test(d.recorded.script);
-    log(`記録を止めました: ${d.recorded.base}`);
+    log(tr("記録を止めました: {base}", { base: d.recorded.base }));
   }
   if (d.download) download(d.download.bytes, d.download.name);
   if (d.card) renderCard(d.card);
   if (d.net) {
     const n = d.net;
-    $("netState").textContent = n.on ? `${n.msg}${n.nic ? "" : "（カード未挿入）"}・接続 ${n.conns}` : n.msg;
+    $("netState").textContent = n.on ? `${n.msg}${n.nic ? "" : tr("（カード未挿入）")}${tr("・接続 {n}", { n: n.conns })}` : n.msg;
   }
   if (d.error) {
     log("エラー: " + d.error);
@@ -237,7 +242,7 @@ function drawBoot() {
   ctx.fillText("Windows Mobile", w / 2, h * 0.3 + 26);
   ctx.fillStyle = "#b8c4d6";
   ctx.font = "11px sans-serif";
-  ctx.fillText("起動しています…", w / 2, h * 0.3 + 46);
+  ctx.fillText(tr("起動しています…"), w / 2, h * 0.3 + 46);
   // 進み具合（スプラッシュまでの命令数の目安。イメージによって前後する）
   const p = Math.min(bootSteps / SPLASH_STEPS, 0.99);
   const bw = Math.round(w * 0.6);
@@ -357,30 +362,32 @@ function fmtTime(sec) {
   const m = Math.floor(sec / 60);
   return `${m}:${(sec - m * 60).toFixed(1).padStart(4, "0")}`;
 }
+let lastStatus = null;
 function showStatus(s) {
+  lastStatus = s;
   paused = s.paused;
   recording = s.recording;
   $("pause").classList.toggle("on", paused);
   $("pause").textContent = paused ? "▶" : "❚❚";
-  $("pause").title = paused ? "再開" : "一時停止";
+  $("pause").title = tr(paused ? "再開" : "一時停止");
   $("steps").textContent = BigInt(s.steps).toLocaleString();
   bootSteps = Number(s.steps);
   if (!sawPicture) drawBoot();
   $("vtime").textContent = fmtTime(s.virtualSec);
-  $("ratio").textContent = paused ? "一時停止中" : `${s.ratio.toFixed(2)} 倍`;
-  $("mips").textContent = `${s.mips.toFixed(1)}M 命令/秒`;
-  $("idle").textContent = `${(s.idle * 100).toFixed(1)}% をスキップ`;
+  $("ratio").textContent = paused ? tr("一時停止中") : tr("{n} 倍", { n: s.ratio.toFixed(2) });
+  $("mips").textContent = tr("{n}M 命令/秒", { n: s.mips.toFixed(1) });
+  $("idle").textContent = tr("{n}% をスキップ", { n: (s.idle * 100).toFixed(1) });
   const badge = $("badge");
   badge.hidden = !(s.turbo && !paused) && !s.jitError;
   badge.classList.toggle("warn", !!s.jitError);
-  badge.textContent = s.jitError ? "JIT 停止" : "早送り";
+  badge.textContent = tr(s.jitError ? "JIT 停止" : "早送り");
   badge.title = s.jitError ?? "";
   $("skipTurbo").hidden = !(s.turbo && s.speed !== 0);
   $("recBadge").hidden = !recording;
-  $("rec").textContent = recording ? "記録停止" : "記録開始";
+  $("rec").textContent = tr(recording ? "記録停止" : "記録開始");
   $("rec").classList.toggle("on", recording);
   $("statusLine").textContent = paused
-    ? "一時停止中"
+    ? tr("一時停止中")
     : `${fmtTime(s.virtualSec)}  ×${s.ratio.toFixed(2)}  ${s.mips.toFixed(0)}M/s`;
 }
 
@@ -423,7 +430,7 @@ $("screenSize").onchange = () => {
   } catch {}
 };
 
-const fmtSteps = (s) => `${(Number(s) / 1e9).toFixed(2)}G 命令`;
+const fmtSteps = (s) => tr("{n}G 命令", { n: (Number(s) / 1e9).toFixed(2) });
 const fmtDate = (t) => new Date(t).toLocaleString();
 
 function item(label, sub, onclick, extra = []) {
@@ -455,14 +462,14 @@ function renderProfiles(list, cur) {
   profiles = list;
   profile = cur;
   const sel = $("profileSel");
-  sel.replaceChildren(...list.map((p) => new Option(p.name, p.id, false, p.id === cur.id)));
-  sel.add(new Option("＋ 新しいプロファイル…", "__new"));
-  $("profileName").textContent = cur.name;
+  sel.replaceChildren(...list.map((p) => new Option(tr(p.name), p.id, false, p.id === cur.id)));
+  sel.add(new Option(tr("＋ 新しいプロファイル…"), "__new"));
+  $("profileName").textContent = tr(cur.name);
   $("profileDel").disabled = cur.id === "default";
   const info = [];
-  if (cur.imageName) info.push(`イメージ ${cur.imageName}`);
-  if (cur.screen) info.push(`画面 ${cur.screen[0]}×${cur.screen[1]}`);
-  $("profileInfo").textContent = info.length ? info.join("・") : "まだ起動していません（下のイメージから起動します）";
+  if (cur.imageName) info.push(tr("イメージ {name}", { name: cur.imageName }));
+  if (cur.screen) info.push(tr("画面 {size}", { size: `${cur.screen[0]}×${cur.screen[1]}` }));
+  $("profileInfo").textContent = info.length ? info.join(tr("・")) : tr("まだ起動していません（下のイメージから起動します）");
   // 画面の大きさの選択は、このプロファイルで前に使った大きさを既定にする（まだ起動して
   // いないプロファイルでは端末の設定 = 既定は「自動」）
   let v = cur.screen ? `${cur.screen[0]}x${cur.screen[1]}` : null;
@@ -476,7 +483,7 @@ function renderProfiles(list, cur) {
   $("screenSize").value = v;
 }
 function newProfile() {
-  const name = prompt("新しいプロファイルの名前（例: WM6 VGA）");
+  const name = prompt(tr("新しいプロファイルの名前（例: WM6 VGA）"));
   if (name) send("createProfile", { name: name.trim() });
 }
 $("profileSel").onchange = () => {
@@ -489,20 +496,22 @@ $("profileSel").onchange = () => {
 };
 $("profileNew").onclick = newProfile;
 $("profileRename").onclick = () => {
-  const name = prompt("プロファイルの名前", profile?.name ?? "");
+  const name = prompt(tr("プロファイルの名前"), profile?.name ?? "");
   if (name) send("renameProfile", { id: profile.id, name: name.trim() });
 };
 $("profileDel").onclick = () => {
   const others = profiles.filter((p) => p.id !== profile.id);
   if (!others.length) return;
   const target = profile;
-  if (!confirm(`プロファイル「${target.name}」を消しますか？（保存・ストレージカード・記録ごと消えます。イメージは残ります）`)) return;
+  if (!confirm(tr("プロファイル「{name}」を消しますか？（保存・ストレージカード・記録ごと消えます。イメージは残ります）", { name: target.name }))) return;
   // 使っているプロファイルは消せないので、既定に切り替えてから消す
   send("switchProfile", { id: "default" });
   send("deleteProfile", { id: target.id });
 };
 
+let lastEstimate = null;
 function renderLists(estimate) {
+  lastEstimate = estimate;
   const manual = saves.filter((s) => s.kind === "manual");
   const latest = saves[0]; // 「続きから再開」は自動・手動を問わずいちばん新しい保存
   $("resume").hidden = !latest;
@@ -511,32 +520,32 @@ function renderLists(estimate) {
   const sl = $("saveList");
   sl.replaceChildren(
     ...manual.map((s) =>
-      item(`保存から再開`, `${fmtDate(s.savedAt)}・${fmtSteps(s.steps)}`, () => send("resume", { name: s.name })),
+      item(tr("保存から再開"), `${fmtDate(s.savedAt)}・${fmtSteps(s.steps)}`, () => send("resume", { name: s.name })),
     ),
   );
   const il = $("imageList");
   il.replaceChildren(
     ...images.map((im) =>
-      item(`${im.name} から起動`, `${(im.size / 1e6).toFixed(1)}MB・${im.id.slice(0, 12)}…`, () => send("bootStored", { id: im.id, rtc: rtcNow(), screen: screenFor(im.name) }), [
-        smallButton("✕", "この端末から消す", () => confirm(`${im.name} をこの端末から消しますか？`) && send("deleteImage", { id: im.id })),
+      item(tr("{name} から起動", { name: im.name }), `${(im.size / 1e6).toFixed(1)}MB・${im.id.slice(0, 12)}…`, () => send("bootStored", { id: im.id, rtc: rtcNow(), screen: screenFor(im.name) }), [
+        smallButton("✕", tr("この端末から消す"), () => confirm(tr("{name} をこの端末から消しますか？", { name: im.name })) && send("deleteImage", { id: im.id })),
       ]),
     ),
   );
-  if (!images.length && !saves.length) $("startMsg").textContent = "イメージを選んでください。";
+  if (!images.length && !saves.length) $("startMsg").textContent = tr("イメージを選んでください。");
 
   const ml = $("menuSaves");
   ml.replaceChildren(
     ...saves.map((s) =>
-      item(`${s.kind === "auto" ? "自動" : "手動"}・${fmtSteps(s.steps)}`, `${fmtDate(s.savedAt)}・${(s.size / 1e6).toFixed(1)}MB${s.label ? "・" + s.label : ""}`, () => {
-        if (confirm("この保存から再開しますか？（今の状態は失われます。必要なら先に保存してください）")) send("resume", { name: s.name });
+      item(`${tr(s.kind === "auto" ? "自動" : "手動")}・${fmtSteps(s.steps)}`, `${fmtDate(s.savedAt)}・${(s.size / 1e6).toFixed(1)}MB${s.label ? "・" + tr(s.label) : ""}`, () => {
+        if (confirm(tr("この保存から再開しますか？（今の状態は失われます。必要なら先に保存してください）"))) send("resume", { name: s.name });
       }, [
-        smallButton("⤓", "書き出す", () => send("exportSave", { name: s.name })),
-        smallButton("✕", "消す", () => confirm("この保存を消しますか？") && send("deleteSave", { name: s.name })),
+        smallButton("⤓", tr("書き出す"), () => send("exportSave", { name: s.name })),
+        smallButton("✕", tr("消す"), () => confirm(tr("この保存を消しますか？")) && send("deleteSave", { name: s.name })),
       ]),
     ),
   );
   if (estimate?.quota) {
-    $("storageInfo").textContent = `この端末の保存領域: ${(estimate.usage / 1e6).toFixed(0)}MB 使用 / 上限 ${(estimate.quota / 1e9).toFixed(1)}GB`;
+    $("storageInfo").textContent = tr("この端末の保存領域: {used}MB 使用 / 上限 {quota}GB", { used: (estimate.usage / 1e6).toFixed(0), quota: (estimate.quota / 1e9).toFixed(1) });
   }
 }
 
@@ -610,7 +619,7 @@ function sendNet(save = true) {
 }
 $("netOn").onchange = () => {
   if ($("netOn").checked && !$("netUrl").value.trim()) {
-    alert("中継サーバーの URL を入れてください");
+    alert(tr("中継サーバーの URL を入れてください"));
     $("netOn").checked = false;
     return;
   }
@@ -633,10 +642,10 @@ function renderCard(c) {
   }
   const has = !!c.meta;
   $("cardState").textContent = c.inserted
-    ? `挿しています（${has ? c.meta.name : "カード"}${c.share ? "・フォルダ共有の方式" : ""}）。中身はエミュレータの中にあります。`
+    ? tr("挿しています（{name}{share}）。中身はエミュレータの中にあります。", { name: has ? c.meta.name : tr("カード"), share: c.share ? tr("・フォルダ共有の方式") : "" })
     : has
-      ? `抜いています: ${c.meta.name}（${fmtSize(c.meta.size)}・空き ${fmtSize(c.free ?? 0)}）`
-      : "カードがありません。「作る」で空のカードを作るか、イメージを読み込んでください。";
+      ? tr("抜いています: {name}（{size}・空き {free}）", { name: c.meta.name, size: fmtSize(c.meta.size), free: fmtSize(c.free ?? 0) })
+      : tr("カードがありません。「作る」で空のカードを作るか、イメージを読み込んでください。");
   $("cardInsert").disabled = c.inserted || !has || !booted || stopped;
   $("cardEject").disabled = !c.inserted;
   $("cardExport").disabled = !has && !c.inserted;
@@ -648,7 +657,7 @@ function renderCard(c) {
   const rows = [];
   if (c.path) {
     const up = c.path.split("/").slice(0, -1).join("/");
-    rows.push(item("..", "上のフォルダ", () => send("cardOpen", { path: up })));
+    rows.push(item("..", tr("上のフォルダ"), () => send("cardOpen", { path: up })));
   }
   for (const e of c.entries) {
     const t = e.modified;
@@ -658,7 +667,7 @@ function renderCard(c) {
       : () => send("cardGet", { name: e.name });
     rows.push(
       item(e.dir ? `📁 ${e.name}` : e.name, e.dir ? when : `${fmtSize(e.size)}・${when}`, open, [
-        smallButton("✕", "カードから消す", () => confirm(`${e.name} を消しますか？${e.dir ? "（中身ごと）" : ""}`) && send("cardDelete", { name: e.name })),
+        smallButton("✕", tr("カードから消す"), () => confirm(tr("{name} を消しますか？{dir}", { name: e.name, dir: e.dir ? tr("（中身ごと）") : "" })) && send("cardDelete", { name: e.name })),
       ]),
     );
   }
@@ -677,21 +686,21 @@ async function putCardFiles(files) {
   if (list.length) send("cardPut", { files: list }, transfer);
 }
 $("cardNew").onclick = () => {
-  if (cardInfo?.meta && !confirm("今のカードの中身は消えます。新しいカードを作りますか？（必要なら先にイメージを書き出してください）")) return;
+  if (cardInfo?.meta && !confirm(tr("今のカードの中身は消えます。新しいカードを作りますか？（必要なら先にイメージを書き出してください）"))) return;
   send("cardNew", { mb: +$("cardSize").value });
 };
 $("cardInsert").onclick = () => send("cardInsert");
 $("cardEject").onclick = () => send("cardEject");
 $("cardExport").onclick = () => send("cardExport");
 $("cardMkdir").onclick = () => {
-  const name = prompt("フォルダの名前");
+  const name = prompt(tr("フォルダの名前"));
   if (name) send("cardMkdir", { name });
 };
 $("cardImportFile").addEventListener("change", async (e) => {
   const f = e.target.files[0];
   e.target.value = "";
   if (!f) return;
-  if (cardInfo?.meta && !confirm("今のカードをこのイメージで置き換えますか？")) return;
+  if (cardInfo?.meta && !confirm(tr("今のカードをこのイメージで置き換えますか？"))) return;
   const bytes = new Uint8Array(await f.arrayBuffer());
   send("cardImport", { bytes, name: f.name }, [bytes.buffer]);
 });
@@ -851,5 +860,25 @@ window.addEventListener("blur", () => {
 // Service Worker はオフラインで開けるようにするだけ（ネットワーク優先で、つながれば
 // 常に新しい版を使う。版の切り替えはページを開き直したとき = 自動保存の後）。
 if ("serviceWorker" in navigator) {
-  navigator.serviceWorker.register("sw.js").catch((e) => log(`Service Worker を登録できません: ${e.message}`));
+  navigator.serviceWorker.register("sw.js").catch((e) => log(tr("Service Worker を登録できません: {m}", { m: e.message })));
+}
+
+// ---- 言語 ----
+// 画面の固定の文言は入れ替え、状態に応じて作る文言は最後の内容でもう一度作る
+// （残りは次の更新で切り替わる）。
+function changeLang(p) {
+  const l = setPref(p);
+  applyDom();
+  worker?.postMessage({ op: "lang", lang: l });
+  for (const sel of document.querySelectorAll(".langSel")) sel.value = getPref();
+  if (profiles.length && profile) renderProfiles(profiles, profile);
+  if (images.length || saves.length) renderLists(lastEstimate);
+  else $("startMsg").textContent = tr("イメージを選んでください。");
+  if (lastStatus) showStatus(lastStatus);
+  if (cardInfo) renderCard(cardInfo);
+  if (!sawPicture) drawBoot();
+}
+for (const sel of document.querySelectorAll(".langSel")) {
+  sel.value = getPref();
+  sel.onchange = () => changeLang(sel.value);
 }

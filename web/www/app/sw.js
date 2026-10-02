@@ -4,9 +4,9 @@
 // 開き直したときだけ起きるので、動作中のエミュレータが途中で別の版に変わることはない
 // （開き直す前に pagehide・visibilitychange で自動保存している）。
 // イメージ・保存は OPFS にあり、ここでは扱わない。
-const CACHE = "cerulean-app-v2";
+const CACHE = "cerulean-app-v3";
 const SHELL = [
-  "./", "index.html", "app.js", "worker.js", "style.css", "manifest.webmanifest",
+  "./", "index.html", "app.js", "worker.js", "i18n.js", "style.css", "manifest.webmanifest",
   "icon.svg", "icon-192.png", "icon-512.png",
   "../pkg/assets.json",
 ];

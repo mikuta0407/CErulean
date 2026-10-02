@@ -25,6 +25,7 @@
 // サーバーと WebSocket でつなぐ（それ以外にサイトは外と通信しない。計画書 §7.5）。
 // 書き込みは一時ファイルに書き終えてから名前を変える（書きかけを残さない。§7.3）。
 import init, * as wasm from "../pkg/cerulean_web.js";
+import { t as tr, setLang } from "./i18n.js";
 
 const IPS = 135_200_000; // 仮想時間 1 秒あたりの命令数（smdk2410 の INSTRUCTIONS_PER_SECOND）
 // 1 回の run で進める仮想時間（10ms）。入力の反映の遅れはこれ以下になる。
@@ -239,7 +240,7 @@ async function storeImage(bytes, name) {
     await writeAtomic(d, `${id}.bin`, bytes);
     await writeJson(d, `${id}.json`, { id, name, size: bytes.length, used: Date.now() });
   } catch (e) {
-    log(`イメージを保存できません: ${e.message}`);
+    log(tr("イメージを保存できません: {m}", { m: e.message }));
   }
   return id;
 }
@@ -272,7 +273,7 @@ async function saveState(d, base, meta, afterCapture) {
   const [size] = await Promise.all([writeAtomic(d, `${base}.snap.gz`, cs.readable), ...pending]);
   const m = { ...meta, name: base, imageId, steps: steps.toString(), savedAt: Date.now(), size };
   await writeJson(d, `${base}.json`, m);
-  log(`保存 ${base}: 命令 ${steps.toLocaleString()}、${(size / 1e6).toFixed(1)}MB（写し ${captureMs.toFixed(0)}ms・全体 ${(performance.now() - t0).toFixed(0)}ms）`);
+  log(tr("保存 {base}: 命令 {steps}、{mb}MB（写し {cap}ms・全体 {all}ms）", { base, steps: steps.toLocaleString(), mb: (size / 1e6).toFixed(1), cap: captureMs.toFixed(0), all: (performance.now() - t0).toFixed(0) }));
   return m;
 }
 
@@ -332,7 +333,7 @@ async function sendLists() {
     profiles = await listProfiles();
     estimate = await navigator.storage.estimate?.();
   } catch (e) {
-    log(`OPFS を使えません: ${e.message}`);
+    log(tr("OPFS を使えません: {m}", { m: e.message }));
   }
   post({ images, saves, profiles, profile: cur, estimate: estimate && { usage: estimate.usage, quota: estimate.quota } });
 }
@@ -361,7 +362,7 @@ async function autosave(reason) {
     await sendLists();
   } catch (e) {
     // 容量超過など。失敗は必ず知らせる（§7.4）。書きかけは writeAtomic が消す。
-    post({ error: `自動保存に失敗しました: ${e.message}`, soft: true });
+    post({ error: tr("自動保存に失敗しました: {m}", { m: e.message }), soft: true });
   } finally {
     saving = false;
     post({ saving: false });
@@ -387,10 +388,10 @@ async function loadCard() {
     const d = await pdir("cards");
     cardMeta = await readJson(d, "card.json");
     const bytes = new Uint8Array(await (await (await d.getFileHandle("card.img")).getFile()).arrayBuffer());
-    if (bytes.length !== cardMeta.size) throw new Error("大きさが合いません");
+    if (bytes.length !== cardMeta.size) throw new Error(tr("大きさが合いません"));
     card = new wasm.CardImage(bytes);
   } catch (e) {
-    if (e.name !== "NotFoundError") log(`カードのイメージを読めません: ${e.message}`);
+    if (e.name !== "NotFoundError") log(tr("カードのイメージを読めません: {m}", { m: e.message }));
     card?.free();
     card = null;
     cardMeta = false; // 無い（作るまで読みに行かない）
@@ -438,8 +439,8 @@ const cardIn = () => !!emu && (emu.cardInserted() || emu.shareInserted());
 
 // 編集は抜いている間だけ（挿している間の中身はゲストのもの）。
 function editableCard() {
-  if ((emu && cardIn())) throw new Error("カードを抜いてから編集してください");
-  if (!card) throw new Error("カードがありません（先に作るか読み込んでください）");
+  if ((emu && cardIn())) throw new Error(tr("カードを抜いてから編集してください"));
+  if (!card) throw new Error(tr("カードがありません（先に作るか読み込んでください）"));
   return card;
 }
 
@@ -454,7 +455,7 @@ function setClockNow(reason) {
   if (!emu || stopped) return;
   const t = rtcNow();
   emu.setClock(Int32Array.from(t));
-  log(`時計を合わせた（${reason}）: ${t[0]}-${String(t[1]).padStart(2, "0")}-${String(t[2]).padStart(2, "0")} ${t.slice(3).map((v) => String(v).padStart(2, "0")).join(":")}`);
+  log(tr("時計を合わせた（{reason}）: {time}", { reason: tr(reason), time: `${t[0]}-${String(t[1]).padStart(2, "0")}-${String(t[2]).padStart(2, "0")} ${t.slice(3).map((v) => String(v).padStart(2, "0")).join(":")}` }));
 }
 
 // ---- ネットワーク（中継サーバー経由。cli/src/relay.rs が約束の正）----
@@ -482,12 +483,12 @@ async function loadOrCreateCa() {
     netCa = new Uint8Array(await (await (await d.getFileHandle("ca.bin")).getFile()).arrayBuffer());
     return;
   } catch {}
-  netStatus("HTTPS の中継用の CA を作っています（初回だけ。十数秒かかることがあります）…");
+  netStatus(tr("HTTPS の中継用の CA を作っています（初回だけ。十数秒かかることがあります）…"));
   await new Promise((ok) => setTimeout(ok, 0));
   const ca = wasm.netCreateCa(crypto.getRandomValues(new Uint8Array(32)));
   await writeAtomic(d, "ca.bin", ca);
   netCa = ca;
-  log("HTTPS の中継用の CA を作った（WM5 の IE で http://10.0.2.2/ から入れる）");
+  log(tr("HTTPS の中継用の CA を作った（WM5 の IE で http://10.0.2.2/ から入れる）"));
 }
 
 function netStatus(msg) {
@@ -512,12 +513,12 @@ function wsOpen() {
   try {
     sock = new WebSocket(netCfg.url);
   } catch (e) {
-    netStatus(`中継サーバーの URL が不正です: ${e.message}`);
+    netStatus(tr("中継サーバーの URL が不正です: {m}", { m: e.message }));
     return;
   }
   ws = sock;
   sock.binaryType = "arraybuffer";
-  netStatus("中継サーバーに接続中…");
+  netStatus(tr("中継サーバーに接続中…"));
   sock.onopen = () => {
     const t = new TextEncoder().encode(netCfg.token);
     const m = new Uint8Array(1 + t.length);
@@ -526,6 +527,10 @@ function wsOpen() {
     sock.send(m);
   };
   sock.onmessage = ({ data }) => {
+  if (data.op === "lang") {
+    setLang(data.lang);
+    return;
+  }
     if (ws !== sock) return;
     try {
       onRelay(new Uint8Array(data));
@@ -541,7 +546,7 @@ function wsOpen() {
     wsReady = false;
     netResetAll();
     if (netCfg.on) {
-      netStatus(was ? "中継サーバーとの接続が切れました（5 秒後につなぎ直します）" : "中継サーバーにつなげません（URL・トークン・サーバーの起動を確認してください。5 秒後に再試行）");
+      netStatus(tr(was ? "中継サーバーとの接続が切れました（5 秒後につなぎ直します）" : "中継サーバーにつなげません（URL・トークン・サーバーの起動を確認してください。5 秒後に再試行）"));
       netRetry = setTimeout(wsOpen, 5000);
     }
   };
@@ -572,16 +577,16 @@ function onRelay(m) {
   if (kind === 0x81) {
     const ver = m.length >= 3 ? dv.getUint16(1, true) : 0;
     if (ver < 2) {
-      netStatus(`中継サーバーの版が古い（${ver}）: cerulean relay を新しくしてください`);
+      netStatus(tr("中継サーバーの版が古い（{ver}）: cerulean relay を新しくしてください", { ver }));
       ws?.close();
       return;
     }
     wsReady = true;
-    netStatus("中継サーバーにつながっています");
+    netStatus(tr("中継サーバーにつながっています"));
     return;
   }
   if (kind === 0x86) {
-    netStatus(`中継サーバーが拒否しました: ${new TextDecoder().decode(m.subarray(1))}`);
+    netStatus(tr("中継サーバーが拒否しました: {m}", { m: new TextDecoder().decode(m.subarray(1)) }));
     return;
   }
   const id = dv.getUint32(1, true);
@@ -671,7 +676,7 @@ function netApply() {
   if (!emu || stopped) return;
   if (netCfg.on) {
     if (emu.cardInserted()) {
-      netStatus("ストレージカードを抜いてからオンにしてください（PC カードのソケットは 1 つです。オンにした後に挿すと、ネットワークと同時に使える方式で挿せます）");
+      netStatus(tr("ストレージカードを抜いてからオンにしてください（PC カードのソケットは 1 つです。オンにした後に挿すと、ネットワークと同時に使える方式で挿せます）"));
       return;
     }
     emu.netEnable(true);
@@ -679,7 +684,7 @@ function netApply() {
     if (!emu.nicInserted()) {
       emu.nicInsert();
       inputSinceSave = true;
-      log("イーサネットカードを挿した");
+      log(tr("イーサネットカードを挿した"));
     }
     wsOpen();
     if (!ws) netStatus(netMsg);
@@ -688,7 +693,7 @@ function netApply() {
     if (emu.nicInserted()) {
       emu.nicEject();
       inputSinceSave = true;
-      log("イーサネットカードを抜いた");
+      log(tr("イーサネットカードを抜いた"));
     }
     emu.netEnable(false);
     netStatus("オフ");
@@ -929,7 +934,7 @@ const handlers = {
     try {
       await loadCurrentProfile();
     } catch (e) {
-      log(`プロファイルを読めません: ${e.message}`);
+      log(tr("プロファイルを読めません: {m}", { m: e.message }));
     }
     post({ ready: true });
     await sendLists();
@@ -951,19 +956,19 @@ const handlers = {
   async switchProfile({ id }) {
     if (id === profile.id) return;
     const p = (await listProfiles()).find((x) => x.id === id);
-    if (!p) throw new Error("そのプロファイルはありません");
+    if (!p) throw new Error(tr("そのプロファイルはありません"));
     await leaveMachine("プロファイルの切り替え");
     profile = { ...p, used: Date.now() };
     await saveProfile(profile);
     await writeJson(await dir("profiles"), "current.json", { id });
     resetCardState();
-    log(`プロファイル「${profile.name}」に切り替えた`);
+    log(tr("プロファイル「{name}」に切り替えた", { name: profile.name }));
     await sendLists();
     await sendCard();
     if ((await listSaves()).length) await handlers.resume({});
   },
   async createProfile({ name }) {
-    const p = { id: `p${Date.now().toString(36)}`, name: name || "新しいプロファイル", created: Date.now() };
+    const p = { id: `p${Date.now().toString(36)}`, name: name || tr("新しいプロファイル"), created: Date.now() };
     await saveProfile(p);
     await handlers.switchProfile({ id: p.id });
   },
@@ -977,8 +982,8 @@ const handlers = {
   },
   // 消す（保存・カード・記録ごと）。今のプロファイルと既定のプロファイルは消せない。
   async deleteProfile({ id }) {
-    if (id === profile.id) throw new Error("使っているプロファイルは消せません（先に切り替えてください）");
-    if (id === "default") throw new Error("既定のプロファイルは消せません");
+    if (id === profile.id) throw new Error(tr("使っているプロファイルは消せません（先に切り替えてください）"));
+    if (id === "default") throw new Error(tr("既定のプロファイルは消せません"));
     const d = await dir("profiles");
     await d.removeEntry(id, { recursive: true }).catch(() => {});
     await d.removeEntry(`${id}.json`).catch(() => {});
@@ -994,19 +999,19 @@ const handlers = {
   async resume({ name }) {
     const d = await pdir("saves");
     const cands = name ? [name] : (await listSaves()).map((s) => s.name);
-    if (!cands.length) throw new Error("保存がありません");
+    if (!cands.length) throw new Error(tr("保存がありません"));
     for (const n of cands) {
       try {
         const meta = await readJson(d, `${n}.json`);
         const { e, id } = machineFromSnapshot(await readState(d, n));
-        start(e, id, `${meta.kind === "auto" ? "自動保存" : "保存"} ${n}`, true);
+        start(e, id, `${tr(meta.kind === "auto" ? "自動保存" : "保存")} ${n}`, true);
         if (syncClock && turboUntil === 0n) setClockNow("再開");
         return;
       } catch (err) {
-        log(`${n} を読めません（壊れている可能性）: ${err.message}`);
+        log(tr("{n} を読めません（壊れている可能性）: {m}", { n, m: err.message }));
       }
     }
-    throw new Error("読める保存がありません");
+    throw new Error(tr("読める保存がありません"));
   },
   async save() {
     if (!emu || broken) return;
@@ -1047,7 +1052,7 @@ const handlers = {
   async importSnapshot({ bytes }) {
     const raw = await gunzipIfNeeded(new Blob([bytes]));
     const { e, id } = machineFromSnapshot(raw);
-    start(e, id, "読み込んだスナップショット", false);
+    start(e, id, tr("読み込んだスナップショット"), false);
     if (syncClock) setClockNow("読み込み");
     await handlers.save();
   },
@@ -1056,17 +1061,17 @@ const handlers = {
     await sendCard();
   },
   async cardNew({ mb }) {
-    if ((emu && cardIn())) throw new Error("カードを抜いてから作り直してください");
+    if ((emu && cardIn())) throw new Error(tr("カードを抜いてから作り直してください"));
     const c = wasm.CardImage.format(mb, "STORAGECARD");
     card?.free();
     card = c;
     cardPath = "";
     await storeCard(card.bytes(), `カード ${mb}MB`);
-    log(`新しいカード（${mb}MB）を作った`);
+    log(tr("新しいカード（{mb}MB）を作った", { mb }));
     await sendCard();
   },
   async cardImport({ bytes, name }) {
-    if ((emu && cardIn())) throw new Error("カードを抜いてから読み込んでください");
+    if ((emu && cardIn())) throw new Error(tr("カードを抜いてから読み込んでください"));
     const c = new wasm.CardImage(bytes); // FAT として開けるものだけ受け付ける
     card?.free();
     card = c;
@@ -1098,7 +1103,7 @@ const handlers = {
       n++;
     }
     await flushCard();
-    log(`カードに ${n} 個のファイルを入れた`);
+    log(tr("カードに {n} 個のファイルを入れた", { n }));
     await sendCard();
   },
   async cardGet({ name }) {
@@ -1120,7 +1125,7 @@ const handlers = {
     await sendCard();
   },
   async cardInsert() {
-    if (!emu || stopped) throw new Error("エミュレータが動いていません");
+    if (!emu || stopped) throw new Error(tr("エミュレータが動いていません"));
     const c = editableCard();
     const bytes = c.bytes();
     // 記録中は再生に要るので、挿した時点のイメージを記録の置き場に残す
@@ -1130,14 +1135,14 @@ const handlers = {
     // （WM5 からは同じ「Storage Card」に見える）
     if (emu.nicInserted()) {
       emu.shareInsert(bytes, name);
-      log("カードをフォルダ共有として挿した（ネットワークと同時に使える方式）");
+      log(tr("カードをフォルダ共有として挿した（ネットワークと同時に使える方式）"));
     } else {
       emu.cardInsert(bytes, name);
     }
     card.free();
     card = null;
     inputSinceSave = true;
-    log("カードを挿した");
+    log(tr("カードを挿した"));
     await sendCard();
   },
   async cardEject() {
@@ -1146,7 +1151,7 @@ const handlers = {
     card = new wasm.CardImage(bytes);
     await storeCard(bytes, cardMeta?.name ?? "カード");
     inputSinceSave = true;
-    log("カードを抜いた（中身を保存した）");
+    log(tr("カードを抜いた（中身を保存した）"));
     await sendCard();
   },
   async recordStart() {
@@ -1256,6 +1261,10 @@ function enqueue(f, op = "") {
   });
 }
 onmessage = ({ data }) => {
+  if (data.op === "lang") {
+    setLang(data.lang);
+    return;
+  }
   // 入力は列に並べず直ちに適用する（保存の圧縮・書き込みを待たせない。適用は
   // どちらでも run の合間 = 命令境界）
   if (data.op === "input") {
